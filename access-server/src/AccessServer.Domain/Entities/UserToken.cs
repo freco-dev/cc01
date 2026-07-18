@@ -6,9 +6,13 @@ public sealed class UserToken : Entity
 
     public required User User { get; set; }
 
-    public required string Token { get; set; }
+    public required string TokenHash { get; set; }
 
-    public required string SubDomain { get; set; }
+    public required string TokenType { get; set; }
 
-    public TimeSpan ExpiresIn { get; set; }
+    public DateTimeOffset ExpiresAt { get; set; }
+
+    public DateTimeOffset? RevokedAt { get; set; }
+
+    public string? ReplacedByTokenHash { get; set; }
 }
