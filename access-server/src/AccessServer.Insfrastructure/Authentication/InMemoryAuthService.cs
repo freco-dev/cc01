@@ -8,31 +8,24 @@ using AccessServer.Domain.Entities;
 using AccessServer.Insfrastructure.Persistence;
 using Microsoft.Extensions.Options;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.IdentityModel.Tokens;
-using System.Text.Json;
 
 namespace AccessServer.Insfrastructure.Authentication;
 
 public sealed class DatabaseAuthService : IAuthService
 {
-    private static readonly DistributedCacheEntryOptions EmailCacheOptions = new()
-    {
-        SlidingExpiration = TimeSpan.FromMinutes(5)
-    };
-
     private readonly JwtOptions _jwtOptions;
     private readonly AccessServerDbContext _dbContext;
-    private readonly IDistributedCache _cache;
+    private readonly IEmailCheckCache _emailCheckCache;
 
     public DatabaseAuthService(
         IOptions<JwtOptions> jwtOptions,
         AccessServerDbContext dbContext,
-        IDistributedCache cache)
+        IEmailCheckCache emailCheckCache)
     {
         _jwtOptions = jwtOptions.Value;
         _dbContext = dbContext;
-        _cache = cache;
+        _emailCheckCache = emailCheckCache;
     }
 
     public async Task<RegistrationResponse> RegisterAsync(RegisterRequest request, CancellationToken cancellationToken = default)
@@ -62,11 +55,11 @@ public sealed class DatabaseAuthService : IAuthService
         };
 
         _dbContext.Users.Add(user);
-    await _dbContext.SaveChangesAsync(cancellationToken);
+        await _dbContext.SaveChangesAsync(cancellationToken);
 
-        _cache.Remove(GetEmailCheckCacheKey(normalizedEmail));
+        await _emailCheckCache.RemoveAsync(normalizedEmail, cancellationToken);
 
-    return new RegistrationResponse(ToUserResponse(user), verificationCode);
+        return new RegistrationResponse(ToUserResponse(user), verificationCode);
     }
 
     public async Task<AuthSessionResponse> SignInAsync(SignInRequest request, CancellationToken cancellationToken = default)
@@ -124,7 +117,7 @@ public sealed class DatabaseAuthService : IAuthService
 
         var response = ToUserResponse(user);
         var session = await CreateSessionAsync(user, cancellationToken);
-        _cache.Remove(GetEmailCheckCacheKey(normalizedEmail));
+        await _emailCheckCache.RemoveAsync(normalizedEmail, cancellationToken);
 
         return new VerificationResponse(response, session.Tokens);
     }
@@ -174,20 +167,15 @@ public sealed class DatabaseAuthService : IAuthService
         ValidateEmail(request.Email);
 
         var normalizedEmail = NormalizeEmail(request.Email);
-        var cacheKey = GetEmailCheckCacheKey(normalizedEmail);
-        var cached = await _cache.GetStringAsync(cacheKey, cancellationToken);
-        if (!string.IsNullOrWhiteSpace(cached))
+        var cached = await _emailCheckCache.GetAsync(normalizedEmail, cancellationToken);
+        if (cached is not null)
         {
-            var cachedResponse = JsonSerializer.Deserialize<EmailCheckResponse>(cached);
-            if (cachedResponse is not null)
-            {
-                return cachedResponse;
-            }
+            return cached;
         }
 
         var user = await _dbContext.Users.AsNoTracking().SingleOrDefaultAsync(current => current.Email == normalizedEmail, cancellationToken);
         var response = new EmailCheckResponse(normalizedEmail, user is not null, user?.Verified ?? false);
-        await _cache.SetStringAsync(cacheKey, JsonSerializer.Serialize(response), EmailCacheOptions, cancellationToken);
+        await _emailCheckCache.SetAsync(response, cancellationToken);
         return response;
     }
 
@@ -244,8 +232,6 @@ public sealed class DatabaseAuthService : IAuthService
     private static UserResponse ToUserResponse(User user) => new(user.Id, user.FullName, user.Email, user.Verified, user.Subscribe);
 
     private static string NormalizeEmail(string email) => email.Trim().ToLowerInvariant();
-
-    private static string GetEmailCheckCacheKey(string email) => $"email-check:{email}";
 
     private static string GenerateVerificationCode() => RandomNumberGenerator.GetInt32(100000, 999999).ToString(CultureInfo.InvariantCulture);
 
