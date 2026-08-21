@@ -1,0 +1,100 @@
+syntax = "proto3";
+
+package cc01.v1;
+
+option go_package = "github.com/freco-dev/cc01/core-server/gen/cc01/v1;cc01v1";
+option csharp_namespace = "Cc01.V1";
+
+// Tunnel — klient (cc01 CLI / cc01d) va edge server o'rtasidagi boshqaruv
+// protokoli. `core-server/events` paketidagi gob asosidagi formatning o'rnini
+// bosadi.
+//
+// Simli format (framing):
+//
+//   Ulanish preambulasi — klient → server, bir marta:
+//     magic   [4]byte  = "CC01"
+//     version uint8    = 1
+//
+//   Keyin har bir freym, ikkala yo'nalishda ham:
+//     length  uint32 little-endian   (payload uzunligi, maksimum 1 MiB)
+//     payload Frame                  (protobuf)
+//
+// Preambula ataylab qo'shilgan: eski gob klienti 2 baytli uzunlik bilan
+// boshlaydi, shuning uchun magic mos kelmaydi va server aniq xato bilan rad
+// etadi — noto'g'ri parse qilingan baytlar bilan ishlashga urinmaydi.
+
+// Bitta boshqaruv freymi.
+message Frame {
+  oneof body {
+    TunnelRequested     tunnel_requested     = 1;
+    TunnelOpened        tunnel_opened        = 2;
+    ConnectionReceived  connection_received  = 3;
+  }
+}
+
+enum Protocol {
+  PROTOCOL_UNSPECIFIED = 0;
+  PROTOCOL_HTTP        = 1;
+  PROTOCOL_TCP         = 2;
+}
+
+// Klient → server: tunnel ochish so'rovi. Ulanishdagi birinchi freym.
+message TunnelRequested {
+  Protocol protocol = 1;
+
+  // So'ralayotgan subdomain. Bo'sh bo'lsa server tasodifiy nom beradi.
+  //
+  // ⚠️ VALIDATSIYA QOIDALARI — YAGONA MANBA (DEV_SPEC.md §6.6).
+  // Bu qoidalar ikki joyda amalga oshiriladi: Go tomonda edge serverda va
+  // C# tomonda access-server'da. Ular bir-biriga mos bo'lishi shart;
+  // `test/contract` ikkalasini bir xil kirishlar bilan solishtiradi.
+  //
+  // Ikkita mustaqil tekshiruv (regex yolg'iz o'zi yetarli emas — guruh
+  // o'zgaruvchan kenglikda, shuning uchun uzunlikni alohida tekshiramiz):
+  //
+  //   1) uzunlik : 3..38 belgi (ikkala chekka ham kiradi)
+  //   2) format  : ^[a-z0-9](?:[a-z0-9]|-[a-z0-9])*$
+  //                — faqat kichik harf, raqam va defis
+  //                — birinchi belgi alfanumerik
+  //                — har bir defisdan keyin alfanumerik keladi, demak
+  //                  oxirgi belgi ham alfanumerik va "--" uchramaydi
+  //   deny    : www, api, admin, cp, edge, relay, stun, mail, ns1, ns2,
+  //             static, cdn, status, docs, app, dashboard, internal
+  string subdomain = 2;
+
+  // Ixtiyoriy custom domen (CNAME bilan yo'naltirilgan). Access-server'da
+  // tasdiqlangan bo'lishi shart.
+  string custom_domain = 3;
+
+  // API token: "cc01_live_<prefiks>_<sir>". Avtorizatsiya uchun edge uni
+  // access-server'ga uzatadi va hech qachon log'ga yozmaydi.
+  string token = 4;
+
+  string cli_version = 5;
+}
+
+// Server → klient: tunnel ochildi yoki so'rov rad etildi.
+//
+// `error_message` bo'sh bo'lmasa — so'rov rad etilgan va qolgan maydonlar
+// ma'noga ega emas. `error_code` mashina uchun, `error_message` odam uchun.
+message TunnelOpened {
+  string   hostname       = 1;  // "myapp.example.com"
+  Protocol protocol       = 2;
+  uint32   public_port    = 3;  // HTTP uchun 80/443, TCP uchun ajratilgan port
+  uint32   private_port   = 4;  // klient juftlash uchun ulanadigan port
+  string   tunnel_id      = 5;
+
+  string   error_code     = 6;  // "SUBDOMAIN_NOT_OWNED", "TOKEN_INVALID", ...
+  string   error_message  = 7;
+}
+
+// Server → klient: public tomondan yangi ulanish keldi. Klient
+// `private_port`ga ulanib, `client_port`ni yuborib juftlikni yopadi.
+message ConnectionReceived {
+  bytes  client_ip    = 1;  // 4 bayt (IPv4) yoki 16 bayt (IPv6), tarmoq tartibida
+  uint32 client_port  = 2;
+
+  // true bo'lsa ulanish server tomonidan rad etilgan (limit oshgan) va
+  // klient hech narsa qilmasligi kerak — bu faqat xabar.
+  bool   rate_limited = 3;
+}

@@ -1,0 +1,119 @@
+syntax = "proto3";
+
+package cc01.v1;
+
+// `Protocol` enumi shu yerda ta'riflangan.
+import "cc01/v1/tunnel.proto";
+
+option go_package = "github.com/freco-dev/cc01/core-server/gen/cc01/v1;cc01v1";
+option csharp_namespace = "Cc01.V1";
+
+// Access — Account Plane (access-server, .NET) va Edge (core-server, Go)
+// o'rtasidagi ICHKI kontrakt. ARCHITECTURE.md §3.4.3, ADR-009, ADR-010.
+//
+// Bu servis hech qachon internetga ochilmaydi:
+//   · alohida listener va port (public API bilan bir xil emas)
+//   · mTLS majburiy, klient sertifikati CN allowlist bilan tekshiriladi
+//   · Kubernetes'da alohida Service + NetworkPolicy
+//
+// Invariant: access-server data plane yo'lida turmaydi. AuthorizeTunnel faqat
+// tunnel OCHILAYOTGANDA chaqiriladi; ochilgandan keyin trafik unga tegmaydi.
+
+service AccessInternalService {
+  // Tunnel ochish so'rovini avtorizatsiya qiladi: token → foydalanuvchi →
+  // subdomain egaligi → tarif kvotasi.
+  //
+  // Edge natijani 60 sekundgacha keshlaydi. Kesh TTL'i token bekor
+  // qilinganda o'zgarishning kuchga kirish kechikishini belgilaydi.
+  rpc AuthorizeTunnel (AuthorizeTunnelRequest) returns (AuthorizeTunnelResponse);
+
+  // Usage hisoboti — billing uchun. Edge har 60 sekundda batch yuboradi.
+  // Idempotent: `window_start` + `tunnel_id` bo'yicha takrorlanish e'tiborsiz
+  // qoldiriladi, shuning uchun qayta yuborish xavfsiz.
+  rpc ReportUsage (ReportUsageRequest) returns (ReportUsageResponse);
+}
+
+// ─────────────────────────── AuthorizeTunnel ───────────────────────────
+
+message AuthorizeTunnelRequest {
+  string   token         = 1;  // to'liq API token; AP faqat hash bilan solishtiradi
+  Protocol protocol      = 2;
+  string   subdomain     = 3;  // so'ralgan nom; bo'sh bo'lsa AP tanlaydi
+  string   custom_domain = 4;
+  string   cli_version   = 5;
+  string   client_ip     = 6;  // audit va rate limit uchun
+}
+
+message AuthorizeTunnelResponse {
+  // Ruxsat berilmagan bo'lsa faqat `denial` to'ldiriladi.
+  oneof result {
+    Grant  grant  = 1;
+    Denial denial = 2;
+  }
+}
+
+message Grant {
+  int64  user_id     = 1;
+  string tenant_id   = 2;
+  string plan        = 3;   // "free" | "pro" | "enterprise"
+
+  // Yakuniy subdomain. So'ralgandan farq qilishi mumkin (AP tanlagan bo'lsa).
+  string subdomain   = 4;
+
+  Limits limits      = 5;
+
+  // Ushbu ruxsatning amal qilish muddati (sekund). Edge shu muddat davomida
+  // qayta so'ramasligi mumkin; muddat tugagach yangilaydi.
+  uint32 lease_ttl_s = 6;
+}
+
+message Limits {
+  uint32 max_tunnels          = 1;  // tenant bo'yicha bir vaqtdagi tunnellar
+  uint32 max_conns_per_tunnel = 2;  // core-server'dagi qattiq 24 ning o'rniga
+  uint64 bandwidth_bps        = 3;  // 0 = cheklanmagan
+}
+
+message Denial {
+  DenialCode code    = 1;
+  string     message = 2;  // odam o'qiydigan izoh, CLI'da ko'rsatiladi
+
+  // Kvota oshgan bo'lsa — qachon qayta urinish mumkinligi (sekund).
+  uint32     retry_after_s = 3;
+}
+
+enum DenialCode {
+  DENIAL_CODE_UNSPECIFIED       = 0;
+  DENIAL_CODE_TOKEN_INVALID     = 1;
+  DENIAL_CODE_TOKEN_REVOKED     = 2;
+  DENIAL_CODE_TOKEN_EXPIRED     = 3;
+  DENIAL_CODE_EMAIL_NOT_VERIFIED = 4;
+  DENIAL_CODE_SUBDOMAIN_INVALID = 5;   // format qoidasiga mos emas
+  DENIAL_CODE_SUBDOMAIN_NOT_OWNED = 6; // boshqa tenantga tegishli
+  DENIAL_CODE_SUBDOMAIN_BUSY    = 7;   // hozir ishlatilmoqda
+  DENIAL_CODE_DOMAIN_NOT_VERIFIED = 8;
+  DENIAL_CODE_QUOTA_TUNNELS_EXCEEDED = 9;
+  DENIAL_CODE_PLAN_SUSPENDED    = 10;
+}
+
+// ─────────────────────────── ReportUsage ───────────────────────────
+
+message ReportUsageRequest {
+  repeated UsageWindow windows = 1;
+}
+
+message UsageWindow {
+  string tenant_id    = 1;
+  string tunnel_id    = 2;
+  int64  window_start = 3;  // unix sekund, oynaning boshi
+  int64  window_end   = 4;
+  uint64 bytes_in     = 5;
+  uint64 bytes_out    = 6;
+  uint32 connections  = 7;  // shu oynada qabul qilingan ulanishlar soni
+  uint32 rejected     = 8;  // limit sababli rad etilganlar
+}
+
+message ReportUsageResponse {
+  // AP qabul qilgan oynalar soni. Edge buni navbatidan o'chirish uchun
+  // ishlatadi; farq bo'lsa qayta yuboradi.
+  uint32 accepted = 1;
+}
