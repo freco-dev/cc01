@@ -7,10 +7,10 @@ import (
 	"io"
 	"net"
 	"sync"
-	"time"
 
-	"github.com/azimjohn/cc01/core-server/events"
-	"github.com/azimjohn/cc01/core-server/server"
+	"github.com/freco-dev/cc01/core-server/events"
+	cc01v1 "github.com/freco-dev/cc01/core-server/gen/cc01/v1"
+	"github.com/freco-dev/cc01/core-server/server"
 )
 
 type Tunnel interface {
@@ -28,6 +28,7 @@ type tunnel struct {
 	eventWriter   io.Writer
 	eventWriterMx sync.Mutex
 	privateServer server.TCPServer
+	consMx        sync.Mutex
 	publicCons    map[uint16]net.Conn
 	initialBuffer map[uint16][]byte
 }
@@ -44,6 +45,8 @@ func newTunnel(hostname string, eventWriter io.Writer, maxConsLimit int) tunnel 
 
 func (t *tunnel) Close() {
 	t.privateServer.Stop()
+	t.consMx.Lock()
+	defer t.consMx.Unlock()
 	for port, con := range t.publicCons {
 		con.Close()
 		delete(t.publicCons, port)
@@ -66,26 +69,21 @@ func (t *tunnel) publicConnectionHandler(publicCon net.Conn) error {
 	t.eventWriterMx.Lock()
 	defer t.eventWriterMx.Unlock()
 
+	t.consMx.Lock()
+	defer t.consMx.Unlock()
 	if len(t.publicCons) >= t.maxConsLimit {
-		event := events.Event[events.ConnectionReceived]{
-			Data: &events.ConnectionReceived{
-				ClientIP:    ip,
-				RateLimited: true,
-			},
-		}
 		publicCon.Close()
-		event.Write(t.eventWriter)
+		_ = events.WriteConnectionReceived(t.eventWriter, &cc01v1.ConnectionReceived{
+			ClientIp:    ip,
+			RateLimited: true,
+		})
 		return fmt.Errorf("[connections-limit-reached]: %s", t.hostname)
 	}
 
-	event := events.Event[events.ConnectionReceived]{
-		Data: &events.ConnectionReceived{
-			ClientIP:    ip,
-			ClientPort:  port,
-			RateLimited: false,
-		},
-	}
-	if err := event.Write(t.eventWriter); err != nil {
+	if err := events.WriteConnectionReceived(t.eventWriter, &cc01v1.ConnectionReceived{
+		ClientIp:   ip,
+		ClientPort: uint32(port),
+	}); err != nil {
 		return publicCon.Close()
 	}
 	t.publicCons[port] = publicCon
@@ -100,17 +98,21 @@ func (t *tunnel) privateConnectionHandler(privateCon net.Conn) error {
 	}
 
 	port := binary.LittleEndian.Uint16(buffer)
+	t.consMx.Lock()
 	publicCon, found := t.publicCons[port]
 	if !found {
+		t.consMx.Unlock()
 		return errors.New("public connection not found, cannot pair")
 	}
+	delete(t.publicCons, port)
+	initialBuffer := t.initialBuffer[port]
+	delete(t.initialBuffer, port)
+	t.consMx.Unlock()
 
 	defer publicCon.Close()
-	delete(t.publicCons, port)
-	defer delete(t.initialBuffer, port)
 
-	if len(t.initialBuffer[port]) > 0 {
-		if _, err := privateCon.Write(t.initialBuffer[port]); err != nil {
+	if len(initialBuffer) > 0 {
+		if _, err := privateCon.Write(initialBuffer); err != nil {
 			return err
 		}
 	}
@@ -125,20 +127,21 @@ func Bind(src net.Conn, dst net.Conn, debug io.Writer) error {
 	defer dst.Close()
 	buf := make([]byte, 4096)
 	for {
-		_ = src.SetReadDeadline(time.Now().Add(time.Second))
 		n, err := src.Read(buf)
+		if n > 0 {
+			if _, writeErr := dst.Write(buf[:n]); writeErr != nil {
+				return writeErr
+			}
+			if debug != nil {
+				_, _ = debug.Write(buf[:n])
+			}
+		}
 		if err == io.EOF {
 			break
 		}
-		_ = dst.SetWriteDeadline(time.Now().Add(time.Second))
-		_, err = dst.Write(buf[:n])
 		if err != nil {
 			return err
 		}
-		if debug != nil {
-			debug.Write(buf[:n])
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 	return nil
 }

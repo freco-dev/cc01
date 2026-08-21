@@ -56,9 +56,14 @@ func (s *TCPServer) Stop() error {
 	if s.listener == nil {
 		return nil
 	}
-	return s.listener.Close()
+	err := s.listener.Close()
+	s.listener = nil
+	return err
 }
 
 func (s *TCPServer) Port() uint16 {
+	if s.listener == nil {
+		return 0
+	}
 	return uint16(s.listener.Addr().(*net.TCPAddr).Port)
 }
