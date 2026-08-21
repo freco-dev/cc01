@@ -1,0 +1,47 @@
+# cc01 — lokal ishlab chiqish uchun bog'liqliklar.
+#
+# ⚠️ Buni to'g'ridan-to'g'ri `docker compose` bilan emas, `make dev-up` orqali
+#    ishga tushiring. Makefile docker kontekstining LOKAL ekanini tekshiradi;
+#    bu mashinada standart kontekst masofaviy serverga qaratilgan va ehtiyotsiz
+#    buyruq dev bazasini prod serverda ko'tarib yuborishi mumkin.
+#
+# Portlar ataylab standartdan uzoq tanlangan: bu mashinada 5432, 5433 va 6380
+# allaqachon band (Homebrew postgres va redis). 49152+ ephemeral diapazondan
+# ham qochamiz, aks holda tasodifiy chiquvchi port bilan to'qnashishi mumkin.
+
+name: cc01-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: cc01-dev-postgres
+    environment:
+      POSTGRES_USER: cc01
+      POSTGRES_PASSWORD: cc01_dev_only
+      POSTGRES_DB: cc01_access
+      # Dev muhitda tezroq ishlashi uchun; prod'da HECH QACHON emas.
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    ports:
+      - "15432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cc01 -d cc01_access"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: cc01-dev-redis
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "16379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:

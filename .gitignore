@@ -1,0 +1,21 @@
+# ── OS / muharrir ─────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+
+# ── Sirlar ────────────────────────────────────────────────────
+.env
+*.local.env
+# Dev sertifikatlari bundan mustasno emas — ular ham commit qilinmaydi.
+*.pem
+*.key
+!core-server/server/sample.key
+
+# ── Build artefaktlari ────────────────────────────────────────
+/bin/
+**/bin/
+**/obj/
+
+# go.work ATAYLAB ignore QILINMAYDI: barcha modullar shu repoda,
+# workspace fayli umumiy va commit qilinadi.
+go.work.sum
