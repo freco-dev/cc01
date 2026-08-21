@@ -1,6 +1,9 @@
-@AccessServer.Api_HostAddress = http://localhost:5078
+@host = http://localhost:5078
 
-GET {{AccessServer.Api_HostAddress}}/weatherforecast/
+### Liveness — jarayon tirikmi
+GET {{host}}/healthz
 Accept: application/json
 
-###
+### Readiness — baza javob beradimi
+GET {{host}}/readyz
+Accept: application/json
