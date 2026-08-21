@@ -3,6 +3,9 @@
     <Project Path="src/AccessServer.Api/AccessServer.Api.csproj" />
     <Project Path="src/AccessServer.Application/AccessServer.Application.csproj" />
     <Project Path="src/AccessServer.Domain/AccessServer.Domain.csproj" />
-    <Project Path="src/AccessServer.Insfrastructure/AccessServer.Insfrastructure.csproj" />
+    <Project Path="src/AccessServer.Infrastructure/AccessServer.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AccessServer.IntegrationTests/AccessServer.IntegrationTests.csproj" />
   </Folder>
 </Solution>

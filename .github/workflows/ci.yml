@@ -1,0 +1,179 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Bir PR uchun faqat oxirgi run qoladi — eskilarini bekor qilamiz.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # DEV_SPEC §7.3: o'zgargan yo'lga qarab kerakli yo'llar ishga tushadi.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.filter.outputs.go }}
+      dotnet: ${{ steps.filter.outputs.dotnet }}
+      proto: ${{ steps.filter.outputs.proto }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            go:
+              - 'core-server/**'
+              - 'cli-client/**'
+              - 'daemon/**'
+              - 'go.work'
+              - '.github/workflows/ci.yml'
+            dotnet:
+              - 'access-server/**'
+              - '.github/workflows/ci.yml'
+            proto:
+              - 'proto/**'
+              - '.github/workflows/ci.yml'
+
+  proto:
+    needs: changes
+    if: needs.changes.outputs.proto == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # buf breaking main bilan solishtiradi — tarix kerak.
+          fetch-depth: 0
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ github.token }}
+      - name: buf lint
+        working-directory: proto
+        run: buf lint
+      - name: buf breaking (main'ga nisbatan)
+        if: github.event_name == 'pull_request'
+        working-directory: proto
+        run: buf breaking --against "../.git#branch=origin/main,subdir=proto"
+      - name: Generatsiya qilingan kod yangimi
+        working-directory: proto
+        run: |
+          buf generate
+          if ! git diff --quiet -- ../core-server/gen; then
+            echo "::error::proto o'zgargan, lekin core-server/gen yangilanmagan."
+            echo "Lokal ishga tushiring: make proto"
+            git diff --stat -- ../core-server/gen
+            exit 1
+          fi
+
+  go:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: core-server/go.mod
+          cache-dependency-path: |
+            core-server/go.sum
+            cli-client/go.sum
+            daemon/go.sum
+      - run: go build ./core-server/... ./cli-client/... ./daemon/...
+      - run: go vet ./core-server/... ./cli-client/... ./daemon/...
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
+      - run: go test -race -count=1 ./core-server/... ./cli-client/... ./daemon/...
+      # TUN testlari haqiqiy qurilma yaratadi. GitHub runner'i Linux va
+      # root huquqiga ega, shuning uchun konteyner kerak emas —
+      # /dev/net/tun mavjudligini tekshiramiz.
+      - name: Imtiyozli TUN testlari
+        run: |
+          sudo modprobe tun 2>/dev/null || true
+          if [ ! -e /dev/net/tun ]; then
+            echo "::warning::/dev/net/tun yo'q — TUN testlari o'tkazib yuborildi"
+            exit 0
+          fi
+          sudo -E env "PATH=$PATH" go test -count=1 -run TestDevice ./daemon/tun/...
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./core-server/... ./cli-client/... ./daemon/...
+
+  dotnet:
+    needs: changes
+    if: needs.changes.outputs.dotnet == 'true'
+    runs-on: ubuntu-latest
+
+    # Migratsiya tekshiruvi uchun haqiqiy PostgreSQL kerak — sxemani
+    # in-memory provider bilan tekshirish ma'nosiz (indekslar, filtrlar,
+    # FK xatti-harakati farq qiladi).
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: cc01
+          POSTGRES_PASSWORD: cc01_ci
+          POSTGRES_DB: cc01_access
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cc01 -d cc01_access"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+
+    env:
+      # Migratsiya buyruqlari uchun (design-time factory shuni o'qiydi).
+      CC01_ACCESS_DB: "Host=127.0.0.1;Port=5432;Database=cc01_access;Username=cc01;Password=cc01_ci"
+      # Integration testlar uchun: har bir yugurishda alohida baza yaratadi,
+      # shuning uchun `postgres` ma'muriy bazasiga ulanadi.
+      CC01_TEST_DB: "Host=127.0.0.1;Port=5432;Database=postgres;Username=cc01;Password=cc01_ci"
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Lokal tool'larni tiklash (dotnet-ef)
+        run: dotnet tool restore
+        working-directory: access-server
+      - run: dotnet restore access-server/AccessServer.slnx
+      - run: dotnet build access-server/AccessServer.slnx --no-restore --nologo -warnaserror
+      - name: dotnet format
+        run: dotnet format access-server/AccessServer.slnx --verify-no-changes --no-restore
+      - run: dotnet test access-server/AccessServer.slnx --no-build --nologo
+
+      # DoD: har bir migratsiya `up` va `down` bo'sh bazada tekshirilgan.
+      - name: Migratsiya up → down → up
+        run: |
+          cd access-server
+          ef() { dotnet dotnet-ef "$@" --project src/AccessServer.Infrastructure --no-build; }
+          ef database update
+          ef database update 0
+          ef database update
+
+      # Model o'zgargan, lekin migratsiya yozilmagan holatni tutadi.
+      - name: Kutilmagan model o'zgarishi yo'qmi
+        run: |
+          cd access-server
+          out=$(dotnet dotnet-ef migrations has-pending-model-changes \
+                  --project src/AccessServer.Infrastructure --no-build 2>&1) || true
+          echo "$out"
+          if echo "$out" | grep -q 'Changes have been made'; then
+            echo "::error::Model o'zgargan, migratsiya yo'q. Ishga tushiring: make db-migrate NAME=<nom>"
+            exit 1
+          fi
+      - name: Zaif paketlar (§7.2 S-9)
+        run: |
+          out=$(dotnet list access-server/AccessServer.slnx package --vulnerable --include-transitive 2>&1)
+          echo "$out"
+          if echo "$out" | grep -qE 'High|Critical'; then
+            echo "::error::Yuqori/kritik zaiflik topildi."
+            exit 1
+          fi

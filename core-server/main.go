@@ -5,7 +5,7 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/azimjohn/cc01/core-server/config"
+	"github.com/freco-dev/cc01/core-server/config"
 )
 
 func main() {

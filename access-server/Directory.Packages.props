@@ -1,0 +1,48 @@
+<!-- Markazlashtirilgan paket versiyalari. Versiyani faqat shu yerda
+     o'zgartiring; .csproj fayllarida <PackageReference Version=".."/> yozilmaydi. -->
+<Project>
+
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 10.0.2 tranzitiv ravishda Microsoft.OpenApi 2.0.0 ni tortadi;
+         unda yuqori darajali zaiflik bor (GHSA-v5pm-xwqc-g5wc). -->
+    <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="10.0.11" />
+
+    <!-- gRPC: ichki AP ↔ Edge kontrakti (proto/cc01/v1/access.proto).
+         Kod build vaqtida generatsiya qilinadi, repoga commit qilinmaydi. -->
+    <PackageVersion Include="Grpc.AspNetCore" Version="2.71.0" />
+
+    <!-- EF Core + PostgreSQL -->
+    <PackageVersion Include="Microsoft.EntityFrameworkCore" Version="10.0.11" />
+    <PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.11" />
+    <!-- Oshkora qadalgan: Npgsql 10.0.3 tranzitiv ravishda Relational 10.0.4
+         ni tortadi va u "primary" bo'lib qolib, EF Core 10.0.11 bilan
+         to'qnashadi (MSB3277). Shu qator hammasini 10.0.11 ga birlashtiradi. -->
+    <PackageVersion Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.11" />
+    <PackageVersion Include="Microsoft.Extensions.Diagnostics.HealthChecks.EntityFrameworkCore" Version="10.0.11" />
+    <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
+    <!-- Postgres'da snake_case: qo'shtirnoqsiz identifikatorlar, xom SQL va
+         psql bilan ishlash osonlashadi. -->
+    <PackageVersion Include="EFCore.NamingConventions" Version="10.0.1" />
+
+    <!-- Auth -->
+    <PackageVersion Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.11" />
+    <PackageVersion Include="Microsoft.AspNetCore.Authentication.Google" Version="10.0.11" />
+    <PackageVersion Include="System.IdentityModel.Tokens.Jwt" Version="8.19.2" />
+    <PackageVersion Include="Microsoft.AspNetCore.Cryptography.KeyDerivation" Version="10.0.11" />
+    <PackageVersion Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.11" />
+    <PackageVersion Include="Microsoft.Extensions.Options.DataAnnotations" Version="10.0.11" />
+    <PackageVersion Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="10.0.11" />
+    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.11" />
+
+    <!-- Test -->
+    <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.11" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageVersion Include="xunit" Version="2.9.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
+  </ItemGroup>
+
+</Project>

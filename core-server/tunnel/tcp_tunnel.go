@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/azimjohn/cc01/core-server/server"
+	"github.com/freco-dev/cc01/core-server/server"
 )
 
 type TCPTunnel struct {

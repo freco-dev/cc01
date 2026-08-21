@@ -1,14 +1,20 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/freco-dev/cc01/core-server/access"
 	"github.com/freco-dev/cc01/core-server/config"
 	"github.com/freco-dev/cc01/core-server/events"
+	cc01v1 "github.com/freco-dev/cc01/core-server/gen/cc01/v1"
 	"github.com/freco-dev/cc01/core-server/server"
 	"github.com/freco-dev/cc01/core-server/tunnel"
 )
@@ -18,9 +24,11 @@ const defaultSubdomain = "cc01"
 
 type CC01Server struct {
 	config          config.Config
+	authorizer      access.Authorizer
 	eventServer     server.TCPServer
 	publicServer    server.TCPServer
 	publicServerTLS server.TCPServer
+	tunnelsMx       sync.RWMutex
 	cnameMap        map[string]string
 	tcpTunnels      map[uint16]*tunnel.TCPTunnel
 	httpTunnels     map[string]*tunnel.HTTPTunnel
@@ -28,6 +36,11 @@ type CC01Server struct {
 
 func (j *CC01Server) Init(conf config.Config) error {
 	j.config = conf
+
+	if err := j.initAuthorizer(); err != nil {
+		return err
+	}
+
 	j.cnameMap = make(map[string]string)
 	j.tcpTunnels = make(map[uint16]*tunnel.TCPTunnel)
 	j.httpTunnels = make(map[string]*tunnel.HTTPTunnel)
@@ -40,6 +53,38 @@ func (j *CC01Server) Init(conf config.Config) error {
 	}
 	err := j.publicServerTLS.InitTLS(conf.PublicServerTLSPort, "cc01_public_server_tls", conf.TLSCertFile, conf.TLSKeyFile)
 	return err
+}
+
+func (j *CC01Server) initAuthorizer() error {
+	if j.config.AuthMode == config.AuthDisabled {
+		log.Printf("⚠️  AVTORIZATSIYA O'CHIRILGAN (CC01_AUTH_MODE=disabled). " +
+			"Har qanday token qabul qilinadi va subdomain egaligi tekshirilmaydi. " +
+			"Bu rejim faqat lokal ishlab chiqish uchun.")
+
+		j.authorizer = &access.AllowAll{
+			Limits: access.Grant{
+				Plan:              "disabled",
+				MaxConnsPerTunnel: j.config.MaxConsPerTunnel,
+				MaxTunnels:        1,
+			},
+		}
+		return nil
+	}
+
+	client, err := access.Dial(access.Options{
+		Address: j.config.AccessAddr,
+		Timeout: j.config.AccessTimeout,
+		Grace:   j.config.AccessGrace,
+	})
+	if err != nil {
+		return err
+	}
+
+	log.Printf("avtorizatsiya: access-server %s (grace %s)",
+		j.config.AccessAddr, j.config.AccessGrace)
+
+	j.authorizer = client
+	return nil
 }
 
 func (j *CC01Server) Start() {
@@ -55,8 +100,13 @@ func (j *CC01Server) Stop() error {
 	if err := j.publicServer.Stop(); err != nil {
 		return err
 	}
-	err := j.publicServerTLS.Stop()
-	return err
+	if err := j.publicServerTLS.Stop(); err != nil {
+		return err
+	}
+	if j.authorizer != nil {
+		return j.authorizer.Close()
+	}
+	return nil
 }
 
 func (j *CC01Server) servePublicConn(conn net.Conn) error {
@@ -66,11 +116,14 @@ func (j *CC01Server) servePublicConn(conn net.Conn) error {
 		writeResponse(conn, 400, "Bad Request", "Bad Request")
 		return nil
 	}
+	host = strings.ToLower(host)
+
+	j.tunnelsMx.RLock()
 	if tunnelHost, ok := j.cnameMap[host]; ok && tunnelHost != "" {
 		host = tunnelHost
 	}
-	host = strings.ToLower(host)
 	t, found := j.httpTunnels[host]
+	j.tunnelsMx.RUnlock()
 	if !found {
 		writeResponse(conn, 404, "Not Found", "tunnel not found")
 		return fmt.Errorf("unknown host requested %s", host)
@@ -81,80 +134,188 @@ func (j *CC01Server) servePublicConn(conn net.Conn) error {
 func (j *CC01Server) serveEventConn(conn net.Conn) error {
 	defer conn.Close()
 
-	var event events.Event[events.TunnelRequested]
-	if err := event.Read(conn); err != nil {
-		return err
+	// Preambula: eski gob klienti bu tekshiruvdan o'ta olmaydi va aniq
+	// xato oladi — noto'g'ri parse qilingan baytlar bilan ishlamaymiz.
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if err := events.ReadPreamble(conn); err != nil {
+		return fmt.Errorf("preambula: %w", err)
 	}
 
-	request := event.Data
-	if request.Protocol != events.HTTP && request.Protocol != events.TCP {
-		return events.WriteError(conn, "invalid protocol %s", request.Protocol)
+	frame, err := events.ReadFrame(conn)
+	if err != nil {
+		return fmt.Errorf("tunnel so'rovi: %w", err)
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+
+	request := frame.GetTunnelRequested()
+	if request == nil {
+		return events.WriteError(conn, "PROTOCOL_ERROR",
+			"birinchi freym TunnelRequested bo'lishi kerak")
 	}
 
-	if request.Subdomain == "" {
-		request.Subdomain = defaultSubdomain
+	switch request.GetProtocol() {
+	case cc01v1.Protocol_PROTOCOL_HTTP, cc01v1.Protocol_PROTOCOL_TCP:
+	default:
+		return events.WriteError(conn, "PROTOCOL_INVALID",
+			"protokol qo'llab-quvvatlanmaydi: %s", request.GetProtocol())
 	}
-	if err := validate(&request.Subdomain); err != nil {
-		return events.WriteError(conn, "invalid subdomain %s: %s", request.Subdomain, err.Error())
+
+	// Subdomain va limitlar access-server tomonidan hal qilinadi — edge
+	// o'zi qaror qabul qilmaydi. Faqat format tekshiruvi shu yerda qoladi,
+	// chunki u yaroqsiz so'rovni tarmoqqa chiqarmasdan to'sadi.
+	subdomain := request.GetSubdomain()
+	if subdomain != "" {
+		if err := validate(&subdomain); err != nil {
+			return events.WriteError(conn, "SUBDOMAIN_INVALID",
+				"subdomain yaroqsiz (%s): %s", subdomain, err.Error())
+		}
 	}
-	hostname := fmt.Sprintf("%s.%s", request.Subdomain, j.config.DomainName)
+
+	grant, err := j.authorizer.Authorize(context.Background(), access.Request{
+		Token:        request.GetToken(),
+		Protocol:     protocolName(request.GetProtocol()),
+		Subdomain:    subdomain,
+		CustomDomain: request.GetCustomDomain(),
+		CliVersion:   request.GetCliVersion(),
+		ClientIP:     clientIP(conn),
+	})
+	if err != nil {
+		var denial *access.Denial
+		if errors.As(err, &denial) {
+			return events.WriteError(conn, denial.Code, "%s", denial.Message)
+		}
+		// Tarmoq xatosi va kesh'da yaroqli yozuv yo'q — deny-by-default.
+		return events.WriteError(conn, "SERVICE_UNAVAILABLE",
+			"avtorizatsiya xizmati javob bermadi, keyinroq urinib ko'ring")
+	}
+
+	// Yakuniy nom access-server'dan keladi: klient bo'sh qoldirgan bo'lsa
+	// u hisobdagi mavjud subdomainni tanlaydi.
+	subdomain = grant.Subdomain
+	if subdomain == "" {
+		subdomain = defaultSubdomain
+	}
+
+	hostname := fmt.Sprintf("%s.%s", subdomain, j.config.DomainName)
+	cname := request.GetCustomDomain()
+
+	j.tunnelsMx.Lock()
 	if _, ok := j.httpTunnels[hostname]; ok {
-		return events.WriteError(conn, "subdomain is busy: %s, try another one", request.Subdomain)
+		j.tunnelsMx.Unlock()
+		return events.WriteError(conn, "SUBDOMAIN_BUSY", "subdomain band: %s", subdomain)
 	}
-	cname := request.CanonName
 	if _, ok := j.cnameMap[cname]; ok && cname != "" {
-		return events.WriteError(conn, "cname is busy: %s, try another one", request.CanonName)
+		j.tunnelsMx.Unlock()
+		return events.WriteError(conn, "DOMAIN_BUSY", "domen band: %s", cname)
 	}
+	j.tunnelsMx.Unlock()
 
 	var t tunnel.Tunnel
-	var maxConsLimit = j.config.MaxConsPerTunnel
 
-	switch request.Protocol {
-	case events.HTTP:
+	// Tarif limiti qattiq yozilgan qiymatning o'rnini bosadi.
+	maxConsLimit := grant.MaxConnsPerTunnel
+	if maxConsLimit <= 0 {
+		maxConsLimit = j.config.MaxConsPerTunnel
+	}
+
+	switch request.GetProtocol() {
+	case cc01v1.Protocol_PROTOCOL_HTTP:
 		tn, err := tunnel.NewHTTP(hostname, conn, maxConsLimit)
 		if err != nil {
-			return events.WriteError(conn, "failed to create http tunnel", err.Error())
+			return events.WriteError(conn, "TUNNEL_CREATE_FAILED",
+				"http tunnel yaratilmadi: %s", err.Error())
 		}
-		j.cnameMap[cname] = hostname
+		j.tunnelsMx.Lock()
+		if _, ok := j.httpTunnels[hostname]; ok {
+			j.tunnelsMx.Unlock()
+			tn.Close()
+			return events.WriteError(conn, "SUBDOMAIN_BUSY", "subdomain band: %s", subdomain)
+		}
+		if _, ok := j.cnameMap[cname]; ok && cname != "" {
+			j.tunnelsMx.Unlock()
+			tn.Close()
+			return events.WriteError(conn, "DOMAIN_BUSY", "domen band: %s", cname)
+		}
+		if cname != "" {
+			j.cnameMap[cname] = hostname
+		}
 		j.httpTunnels[hostname] = tn
-		defer delete(j.cnameMap, cname)
-		defer delete(j.httpTunnels, hostname)
+		j.tunnelsMx.Unlock()
+		defer func() {
+			j.tunnelsMx.Lock()
+			if cname != "" {
+				delete(j.cnameMap, cname)
+			}
+			delete(j.httpTunnels, hostname)
+			j.tunnelsMx.Unlock()
+		}()
 		t = tn
-	case events.TCP:
+
+	case cc01v1.Protocol_PROTOCOL_TCP:
 		tn, err := tunnel.NewTCP(hostname, conn, maxConsLimit)
 		if err != nil {
-			return events.WriteError(conn, "failed to create tcp tunnel", err.Error())
+			return events.WriteError(conn, "TUNNEL_CREATE_FAILED",
+				"tcp tunnel yaratilmadi: %s", err.Error())
 		}
+		j.tunnelsMx.Lock()
 		j.tcpTunnels[tn.PublicServerPort()] = tn
-		defer delete(j.tcpTunnels, tn.PublicServerPort())
+		j.tunnelsMx.Unlock()
+		defer func() {
+			j.tunnelsMx.Lock()
+			delete(j.tcpTunnels, tn.PublicServerPort())
+			j.tunnelsMx.Unlock()
+		}()
 		t = tn
 	}
 
-	tunnelId := fmt.Sprintf("%s:%d", t.Hostname(), t.PublicServerPort())
+	tunnelID := fmt.Sprintf("%s:%d", t.Hostname(), t.PublicServerPort())
 
 	t.Open()
 	defer t.Close()
-	opened := events.Event[events.TunnelOpened]{
-		Data: &events.TunnelOpened{
-			Hostname:      t.Hostname(),
-			Protocol:      t.Protocol(),
-			PublicServer:  t.PublicServerPort(),
-			PrivateServer: t.PrivateServerPort(),
-		},
-	}
-	if err := opened.Write(conn); err != nil {
+
+	if err := events.WriteTunnelOpened(conn, &cc01v1.TunnelOpened{
+		Hostname:    t.Hostname(),
+		Protocol:    request.GetProtocol(),
+		PublicPort:  uint32(t.PublicServerPort()),
+		PrivatePort: uint32(t.PrivateServerPort()),
+		TunnelId:    tunnelID,
+	}); err != nil {
 		return err
 	}
 
-	fmt.Printf("%s [tunnel-opened] %s\n", time.Now().Format(dateFormat), tunnelId)
+	fmt.Printf("%s [tunnel-opened] %s tenant=%s plan=%s max_conns=%d\n",
+		time.Now().Format(dateFormat), tunnelID, grant.TenantID, grant.Plan, maxConsLimit)
 
-	buffer := make([]byte, 8) // wait until connection is closed
+	// Ulanish yopilguncha kutamiz. Klient bu kanalga hech narsa yozmaydi;
+	// EOF — u ketganini bildiradi.
+	buffer := make([]byte, 8)
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(time.Minute))
 		if _, err := conn.Read(buffer); err == io.EOF {
 			break
 		}
 	}
-	fmt.Printf("%s [tunnel-closed] %s\n", time.Now().Format(dateFormat), tunnelId)
+	fmt.Printf("%s [tunnel-closed] %s\n", time.Now().Format(dateFormat), tunnelID)
 	return nil
+}
+
+func protocolName(p cc01v1.Protocol) string {
+	switch p {
+	case cc01v1.Protocol_PROTOCOL_HTTP:
+		return "http"
+	case cc01v1.Protocol_PROTOCOL_TCP:
+		return "tcp"
+	default:
+		return ""
+	}
+}
+
+// clientIP audit va rate limit uchun — avtorizatsiya qaroriga ta'sir
+// qilmaydi, shuning uchun aniqlab bo'lmasa bo'sh qoldiriladi.
+func clientIP(conn net.Conn) string {
+	addr, ok := conn.RemoteAddr().(*net.TCPAddr)
+	if !ok {
+		return ""
+	}
+	return addr.IP.String()
 }
