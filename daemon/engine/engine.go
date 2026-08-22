@@ -8,15 +8,19 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
 	"sync"
+	"time"
 
 	"github.com/freco-dev/cc01/daemon/conn"
 	"github.com/freco-dev/cc01/daemon/noise"
+	"github.com/freco-dev/cc01/daemon/relay"
 	"github.com/freco-dev/cc01/daemon/router"
+	"github.com/freco-dev/cc01/daemon/stun"
 )
 
 // Device — engine ishlatadigan paket interfeysi.
@@ -69,6 +73,21 @@ type Engine struct {
 	queuesMu sync.Mutex
 	queues   map[noise.PublicKey][][]byte
 
+	// stun — public manzilni aniqlash uchun. Datapath bilan AYNI
+	// soketdan ishlaydi: NAT bog'lanishi soketga bog'langan, boshqa
+	// soketdan so'ralgan manzil overlay uchun yaroqsiz bo'lardi.
+	stun *stun.Client
+
+	// paths — har bir peer uchun yo'l holati (ADR-005: relay-first,
+	// P2P-upgrade).
+	pathsMu sync.Mutex
+	paths   map[noise.PublicKey]*pathState
+
+	// relayClient — ixtiyoriy. Bo'lsa, to'g'ridan-to'g'ri yo'l
+	// ishlamaganda trafik shu orqali ketadi.
+	relayMu     sync.Mutex
+	relayClient *relay.Client
+
 	startOnce sync.Once
 	closeOnce sync.Once
 	closeErr  error
@@ -99,7 +118,7 @@ func New(cfg Config) (*Engine, error) {
 		logger = slog.Default()
 	}
 
-	return &Engine{
+	e := &Engine{
 		identity:   cfg.Identity,
 		device:     cfg.Device,
 		bind:       cfg.Bind,
@@ -107,8 +126,24 @@ func New(cfg Config) (*Engine, error) {
 		log:        logger.With("component", "engine"),
 		handshakes: make(map[noise.PublicKey]*noise.Handshake),
 		queues:     make(map[noise.PublicKey][][]byte),
+		paths:      make(map[noise.PublicKey]*pathState),
 		closed:     make(chan struct{}),
-	}, nil
+	}
+
+	e.stun = stun.New(e.bind.Send)
+	return e, nil
+}
+
+// DiscoverPublicEndpoint STUN orqali soketning public manzilini
+// aniqlaydi.
+//
+// Natija NAT ortidagi node uchun yagona ishlaydigan endpoint bo'ladi:
+// lokal interfeys manzillari tashqaridan erishib bo'lmaydi.
+func (e *Engine) DiscoverPublicEndpoint(
+	ctx context.Context,
+	server netip.AddrPort,
+) (netip.AddrPort, error) {
+	return e.stun.Discover(ctx, server)
 }
 
 // Router — peerlarni boshqarish uchun.
@@ -168,6 +203,9 @@ func (e *Engine) Close() error {
 	e.wg.Wait()
 	return e.closeErr
 }
+
+// now — testlarda vaqtni boshqarish uchun ajratilgan.
+func (e *Engine) now() time.Time { return time.Now() }
 
 func (e *Engine) isClosed() bool {
 	select {

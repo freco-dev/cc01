@@ -34,6 +34,12 @@ import (
 func main() {
 	var (
 		genKey       = flag.Bool("genkey", false, "yangi kalit jufti yaratadi va chiqaradi")
+		controlAddr  = flag.String("cp", os.Getenv("CC01_CP_ADDR"), "Control Plane manzili (berilsa peerlar avtomatik olinadi)")
+		tenant       = flag.String("tenant", "default", "tenant identifikatori (CP rejimi)")
+		hostname     = flag.String("hostname", "", "node nomi (CP rejimi); bo'sh bo'lsa OS nomi")
+		cpToken      = flag.String("cp-token", os.Getenv("CC01_CP_TOKEN"), "CP bilan kelishilgan sir")
+		advertise    = flag.String("advertise", "", "e'lon qilinadigan underlay manzil host:port")
+		stunServer   = flag.String("stun", os.Getenv("CC01_STUN"), "STUN serveri host:port (NAT ortida public manzilni aniqlash uchun)")
 		privateKey   = flag.String("key", os.Getenv("CC01_PRIVATE_KEY"), "base64 private kalit")
 		listenPort   = flag.Uint("listen", conn.DefaultPort, "overlay UDP porti")
 		ifaceName    = flag.String("iface", tun.DefaultName, "TUN interfeys nomi")
@@ -57,6 +63,48 @@ func main() {
 		level = slog.LevelDebug
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+
+	// CP manzili berilgan bo'lsa — avtomatik rejim: peerlar, manzil va
+	// marshrutlar Control Plane dan keladi.
+	if *controlAddr != "" {
+		name := *hostname
+		if name == "" {
+			name, _ = os.Hostname()
+		}
+
+		var advertised []netip.AddrPort
+		if *advertise != "" {
+			parsed, err := netip.ParseAddrPort(*advertise)
+			if err != nil {
+				fail(fmt.Errorf("-advertise: %w", err))
+			}
+			advertised = []netip.AddrPort{parsed}
+		}
+
+		var stunAddr netip.AddrPort
+		if *stunServer != "" {
+			parsed, err := netip.ParseAddrPort(*stunServer)
+			if err != nil {
+				fail(fmt.Errorf("-stun: %w", err))
+			}
+			stunAddr = parsed
+		}
+
+		if err := runWithControlPlane(controlConfig{
+			privateKey:  *privateKey,
+			controlAddr: *controlAddr,
+			tenant:      *tenant,
+			hostname:    name,
+			authToken:   *cpToken,
+			listenPort:  uint16(*listenPort),
+			ifaceName:   *ifaceName,
+			advertised:  advertised,
+			stunServer:  stunAddr,
+		}, logger); err != nil {
+			fail(err)
+		}
+		return
+	}
 
 	if err := run(config{
 		privateKey:   *privateKey,

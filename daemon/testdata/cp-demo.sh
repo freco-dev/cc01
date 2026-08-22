@@ -1,0 +1,72 @@
+#!/bin/sh
+# Control Plane bilan avtomatik mesh: uchta node QO'LDA PEER
+# KONFIGURATSIYASIZ bir-birini topadi.
+#
+# Har bir node faqat CP manzilini biladi. Manzil, peerlar va
+# marshrutlar — hammasi CP dan keladi.
+set -e
+
+DOCKER="docker --context desktop-linux"
+NET=cc01-cp-demo
+IMAGE=cc01-cp-demo
+TOKEN=demo-shared-secret-0123456789
+
+cleanup() {
+  $DOCKER rm -f cc01-cp cc01-n1 cc01-n2 cc01-n3 >/dev/null 2>&1 || true
+  $DOCKER network rm $NET >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+cleanup
+
+echo "── image quriladi ──"
+$DOCKER build -q -t $IMAGE -f daemon/testdata/Dockerfile.cp . >/dev/null
+
+echo "── tarmoq ──"
+$DOCKER network create --subnet 172.32.88.0/24 $NET >/dev/null
+
+echo "── Control Plane ──"
+$DOCKER run -d --name cc01-cp --network $NET --ip 172.32.88.5 \
+  --entrypoint cc01-cp $IMAGE \
+  -listen :8443 -tenant-net 'fd00:cc01:c0de::/64' -auth-token "$TOKEN" >/dev/null
+sleep 2
+
+for i in 1 2 3; do
+  echo "── node $i ──"
+  $DOCKER run -d --name "cc01-n$i" --network $NET --ip "172.32.88.1$i" \
+    --cap-add NET_ADMIN --device /dev/net/tun \
+    --entrypoint cc01d $IMAGE \
+    -key "$($DOCKER run --rm --entrypoint cc01d $IMAGE -genkey 2>/dev/null)" \
+    -cp 172.32.88.5:8443 -cp-token "$TOKEN" \
+    -hostname "node-$i" -listen 51820 >/dev/null
+done
+
+echo "── peerlar topilishini kutamiz ──"
+sleep 6
+
+echo
+echo "═══ CP ro'yxati ═══"
+$DOCKER logs cc01-cp 2>&1 | grep 'ro.yxatdan o.tdi' || true
+
+echo
+echo "═══ node 1 nimani ko'rdi ═══"
+$DOCKER logs cc01-n1 2>&1 | grep -E 'tayyor|peer qo' || true
+
+ADDR() { $DOCKER logs "cc01-n$1" 2>&1 | grep -o 'addr=fd00:[^ ]*' | head -1 | cut -d= -f2 | cut -d/ -f1; }
+A1=$(ADDR 1); A2=$(ADDR 2); A3=$(ADDR 3)
+echo
+echo "═══ CP bergan manzillar ═══"
+echo "  node-1: $A1"
+echo "  node-2: $A2"
+echo "  node-3: $A3"
+
+echo
+echo "═══ node-1 → node-2 ═══"
+$DOCKER exec cc01-n1 ping -6 -c 3 -W 3 "$A2"
+
+echo
+echo "═══ node-1 → node-3 ═══"
+$DOCKER exec cc01-n1 ping -6 -c 3 -W 3 "$A3"
+
+echo
+echo "═══ node-3 → node-2 ═══"
+$DOCKER exec cc01-n3 ping -6 -c 2 -W 3 "$A2"

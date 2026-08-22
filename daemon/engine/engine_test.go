@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"io"
 	"log/slog"
+	"net"
 	"net/netip"
 	"strings"
 	"sync"
@@ -14,7 +15,9 @@ import (
 
 	"github.com/freco-dev/cc01/daemon/conn"
 	"github.com/freco-dev/cc01/daemon/noise"
+	"github.com/freco-dev/cc01/daemon/path"
 	"github.com/freco-dev/cc01/daemon/router"
+	pion "github.com/pion/stun/v3"
 )
 
 // node — sinov uchun to'liq jihozlangan mesh a'zosi.
@@ -435,4 +438,155 @@ func (c *logCapture) sawSpoofWarning() bool {
 		}
 	}
 	return false
+}
+
+// STUN javoblari datapath bilan bir xil soketga keladi. Ular
+// bir-birini buzmasligi kerak: STUN paketlari cc01 sifatida
+// parse qilinmasin, cc01 paketlari esa STUN klienti tomonidan
+// yutib yuborilmasin.
+func TestEngine_StunSharesSocketWithDatapath(t *testing.T) {
+	alice := newNode(t, "2a0e:1234:1::/64")
+	bob := newNode(t, "2a0e:1234:2::/64")
+	link(t, alice, bob)
+
+	stunServer := startTestStunServer(t)
+
+	// Avval trafik oqsin — sessiya o'rnatilsin.
+	alice.device.inject(ipv6Packet("2a0e:1234:1::1", "2a0e:1234:2::1", 'a'))
+	expectPacket(t, bob, 5*time.Second)
+
+	// Endi o'sha soketdan STUN so'raymiz.
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	mapped, err := alice.engine.DiscoverPublicEndpoint(ctx, stunServer)
+	if err != nil {
+		t.Fatalf("DiscoverPublicEndpoint: %v", err)
+	}
+
+	// STUN server bizning soketimizning manzilini ko'rishi kerak.
+	if mapped.Port() != alice.bind.Port() {
+		t.Errorf("port %d kutilgan, %d olindi", alice.bind.Port(), mapped.Port())
+	}
+
+	// STUN'dan keyin datapath ishlashda davom etishi kerak.
+	alice.device.inject(ipv6Packet("2a0e:1234:1::1", "2a0e:1234:2::1", 'b'))
+	if got := expectPacket(t, bob, 5*time.Second); got[40] != 'b' {
+		t.Errorf("STUN'dan keyingi paket: %q", got[40])
+	}
+}
+
+// startTestStunServer minimal STUN javob beruvchi ishga tushiradi.
+func startTestStunServer(t *testing.T) netip.AddrPort {
+	t.Helper()
+
+	socket, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv6loopback})
+	if err != nil {
+		t.Fatalf("STUN soketi: %v", err)
+	}
+	t.Cleanup(func() { _ = socket.Close() })
+
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			n, from, err := socket.ReadFromUDPAddrPort(buf)
+			if err != nil {
+				return
+			}
+
+			request := &pion.Message{Raw: append([]byte(nil), buf[:n]...)}
+			if request.Decode() != nil {
+				continue
+			}
+
+			response, err := pion.Build(request, pion.BindingSuccess,
+				&pion.XORMappedAddress{
+					IP:   net.IP(from.Addr().AsSlice()),
+					Port: int(from.Port()),
+				})
+			if err != nil {
+				continue
+			}
+			_, _ = socket.WriteToUDPAddrPort(response.Raw, from)
+		}
+	}()
+
+	return socket.LocalAddr().(*net.UDPAddr).AddrPort()
+}
+
+// ═══════════════ Yo'l tanlash ═══════════════
+
+// Probe javoblari kelgach to'g'ridan-to'g'ri yo'l tasdiqlanishi kerak
+// (ADR-005 dagi "P2P-upgrade" qismi).
+func TestEngine_ConfirmsDirectPathThroughProbes(t *testing.T) {
+	alice := newNode(t, "2a0e:1234:1::/64")
+	bob := newNode(t, "2a0e:1234:2::/64")
+	link(t, alice, bob)
+
+	// Sessiya o'rnatilsin.
+	alice.device.inject(ipv6Packet("2a0e:1234:1::1", "2a0e:1234:2::1", 'x'))
+	expectPacket(t, bob, 5*time.Second)
+
+	// Probe'lar taymer orqali yuboriladi; UpgradeSamples ta javob
+	// kerak.
+	deadline := time.After(15 * time.Second)
+	for {
+		state, rtt, ok := alice.engine.PathState(bob.identity.PublicKey())
+		if ok && state == path.StateDirectActive {
+			if rtt <= 0 {
+				t.Errorf("RTT o'lchanishi kerak edi: %v", rtt)
+			}
+			return
+		}
+
+		select {
+		case <-deadline:
+			t.Fatalf("to'g'ridan-to'g'ri yo'l tasdiqlanmadi: %v", state)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// Disco paketlari TUN'ga chiqmasligi kerak — ular yo'l o'lchash
+// uchun, foydali yuk emas.
+func TestEngine_DiscoPacketsDoNotReachTUN(t *testing.T) {
+	alice := newNode(t, "2a0e:1234:1::/64")
+	bob := newNode(t, "2a0e:1234:2::/64")
+	link(t, alice, bob)
+
+	alice.device.inject(ipv6Packet("2a0e:1234:1::1", "2a0e:1234:2::1", 'x'))
+
+	// Birinchi paket — bizniki.
+	if got := expectPacket(t, bob, 5*time.Second); got[40] != 'x' {
+		t.Fatalf("kutilmagan paket: %q", got[40])
+	}
+
+	// Probe'lar oqib turgan bo'lsa ham TUN'ga boshqa hech narsa
+	// chiqmasligi kerak.
+	select {
+	case packet := <-bob.device.inbound:
+		t.Fatalf("TUN'ga ortiqcha paket chiqdi: %x", packet[:min(48, len(packet))])
+	case <-time.After(2 * time.Second):
+	}
+}
+
+// Yo'l holati `cc01 status` uchun ochiq bo'lishi kerak.
+func TestEngine_ReportsPathState(t *testing.T) {
+	alice := newNode(t, "2a0e:1234:1::/64")
+	bob := newNode(t, "2a0e:1234:2::/64")
+	link(t, alice, bob)
+
+	// Noma'lum peer uchun holat bo'lmasligi kerak.
+	var unknown noise.PublicKey
+	unknown[0] = 0xaa
+	if _, _, ok := alice.engine.PathState(unknown); ok {
+		t.Error("noma'lum peer uchun holat qaytarildi")
+	}
+
+	alice.device.inject(ipv6Packet("2a0e:1234:1::1", "2a0e:1234:2::1", 'x'))
+	expectPacket(t, bob, 5*time.Second)
+
+	if _, _, ok := alice.engine.PathState(bob.identity.PublicKey()); !ok {
+		t.Error("peer uchun holat kutilgan edi")
+	}
 }

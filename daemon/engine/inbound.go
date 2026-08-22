@@ -6,6 +6,7 @@ import (
 
 	"github.com/freco-dev/cc01/daemon/conn"
 	"github.com/freco-dev/cc01/daemon/noise"
+	"github.com/freco-dev/cc01/daemon/relay"
 	"github.com/freco-dev/cc01/daemon/tun"
 )
 
@@ -47,6 +48,25 @@ func (e *Engine) readUDP() {
 
 // dispatch paket turiga qarab yo'naltiradi.
 func (e *Engine) dispatch(packet []byte, from netip.AddrPort, outbound []byte) {
+	// STUN javoblari o'sha soketga keladi. Ularni cc01 paketlaridan
+	// magic cookie bo'yicha ajratamiz; sessiya indekslari ataylab shu
+	// qiymatdan qochadi, ya'ni ajratish aniq (noise.randomIndex).
+	if e.stun.Handle(packet) {
+		return
+	}
+
+	// Relaydan kelgan paketlar o'ram ichida bo'ladi. Uni yechib,
+	// ichkarisini oddiy paket sifatida qayta ishlaymiz.
+	if received, mine := e.relayReceive(packet, from); mine {
+		if received != nil {
+			// `from` — RELAYNING manzili, peerniki emas. Shuning uchun
+			// uni endpoint sifatida yozib qo'yish MUMKIN EMAS: bu
+			// to'g'ridan-to'g'ri yo'lni buzardi.
+			e.dispatchInner(received.Inner, outbound)
+		}
+		return
+	}
+
 	header, err := noise.ParseHeader(packet)
 	if err != nil {
 		e.log.Debug("yaroqsiz paket", "from", from, "err", err)
@@ -55,25 +75,63 @@ func (e *Engine) dispatch(packet []byte, from netip.AddrPort, outbound []byte) {
 
 	switch header.Type {
 	case noise.TypeHandshakeInit:
-		e.handleInitiation(packet, from)
+		e.acceptInitiation(packet, from, true)
 
 	case noise.TypeHandshakeResp:
-		e.handleResponse(packet, from)
+		e.acceptResponse(packet, from, true)
 
-	case noise.TypeData, noise.TypeKeepalive:
-		e.handleTransport(header, packet, from, outbound)
+	case noise.TypeData, noise.TypeKeepalive, noise.TypeDisco:
+		e.acceptTransport(header, packet, from, outbound, true)
 
 	default:
 		e.log.Debug("qo'llab-quvvatlanmaydigan tur", "type", header.Type, "from", from)
 	}
 }
 
-// handleTransport shifrlangan paketni ochadi va TUN'ga yozadi.
-func (e *Engine) handleTransport(
+// relayReceive relaydan kelgan paketni yechadi.
+func (e *Engine) relayReceive(packet []byte, from netip.AddrPort) (*relay.Received, bool) {
+	e.relayMu.Lock()
+	client := e.relayClient
+	e.relayMu.Unlock()
+
+	if client == nil {
+		return nil, false
+	}
+	return client.Handle(packet, from)
+}
+
+// dispatchInner relay o'ramidan chiqqan paketni qayta ishlaydi.
+//
+// Endpoint YANGILANMAYDI: paket relaydan kelgan, ya'ni uning manba
+// manzili peerning haqiqiy manzili emas.
+func (e *Engine) dispatchInner(packet []byte, outbound []byte) {
+	header, err := noise.ParseHeader(packet)
+	if err != nil {
+		return
+	}
+
+	switch header.Type {
+	case noise.TypeHandshakeInit:
+		e.handleInitiationViaRelay(packet)
+
+	case noise.TypeHandshakeResp:
+		e.handleResponseViaRelay(packet)
+
+	case noise.TypeData, noise.TypeKeepalive, noise.TypeDisco:
+		e.handleTransportViaRelay(header, packet, outbound)
+	}
+}
+
+// acceptTransport shifrlangan paketni ochadi va TUN'ga yozadi.
+//
+// `learnEndpoint` — paket to'g'ridan-to'g'ri kelganmi. Relay orqali
+// kelgan bo'lsa `false`: manba manzili relayniki, peerniki emas.
+func (e *Engine) acceptTransport(
 	header noise.Header,
 	packet []byte,
 	from netip.AddrPort,
 	outbound []byte,
+	learnEndpoint bool,
 ) {
 	peer, session, err := e.router.SessionFor(header.ReceiverIndex)
 	if err != nil {
@@ -94,7 +152,17 @@ func (e *Engine) handleTransport(
 	// (roaming va NAT jadvalini kuzatish). Buni faqat autentifikatsiya
 	// qilingan paketdan keyin qilamiz, aks holda soxta paket peerni
 	// boshqa manzilga "ko'chirib" yuborardi.
-	peer.SetEndpoint(from)
+	if learnEndpoint {
+		peer.SetEndpoint(from)
+	}
+
+	// Disco — yo'l o'lchash paketi. U TUN'ga chiqmaydi va ichida
+	// IPv6 paketi ham yo'q, shuning uchun cryptokey tekshiruvidan
+	// oldin ajratiladi.
+	if header.Type == noise.TypeDisco {
+		e.handleDisco(peer, session, inner)
+		return
+	}
 
 	// Keepalive'da ichki paket YO'Q — tekshiradigan ham, TUN'ga
 	// yozadigan ham narsa yo'q.
