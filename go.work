@@ -1,7 +1,9 @@
 go 1.25.0
 
 use (
+	./proto
 	./core-server
 	./cli-client
 	./daemon
+	./control
 )

@@ -117,6 +117,7 @@ cc01/
 ├── core-server/     Go modul — tunnel serveri (event :4321, public :80, TLS :443)
 ├── cli-client/      Go modul — minimal klient; `replace` orqali core-server'ga bog'langan
 ├── daemon/          Go modul — mesh datapath (Faza 1 da boshlandi)
+├── control/         Go modul — Control Plane (Faza 1 da boshlandi)
 ├── access-server/   .NET solution — Account Plane
 └── docs/            ARCHITECTURE.md · DEV_SPEC.md · adr/
 ```
@@ -127,11 +128,14 @@ cc01/
 cc01/
 ├── go.work                    # core-server + cli-client
 ├── Makefile                   # build · test · lint · proto · dotnet
-├── proto/cc01/v1/             # ⭐ yagona kontrakt — Go va C# uchun generatsiya
-│   ├── tunnel.proto           #   gob o'rniga (events paketi)
-│   ├── access.proto           #   AP ↔ Edge ichki kontrakti
+├── proto/                     # ⭐ yagona kontrakt — ALOHIDA Go moduli
+│   ├── go.mod                 #   github.com/freco-dev/cc01/proto
+│   ├── cc01/v1/tunnel.proto   #   klient ↔ edge boshqaruv protokoli
+│   ├── cc01/v1/access.proto   #   AP ↔ Edge ichki kontrakti
+│   ├── cc01/v1/control.proto  #   node ↔ CP protokoli
+│   ├── gen/                   #   generatsiya qilingan Go kodi (commit qilinadi)
 │   └── buf.yaml · buf.gen.yaml
-├── core-server/ · cli-client/ · daemon/ · access-server/
+├── core-server/ · cli-client/ · daemon/ · control/ · access-server/
 ├── deploy/docker-compose.dev.yml   # postgres + redis + core + access
 └── test/contract/             # AP ↔ Edge kontrakt testlari
 ```
@@ -154,6 +158,15 @@ cc01/
 | `daemon/conn/` | `internal/daemon/conn/` | UDP transport, batch I/O |
 | `daemon/engine/` | `internal/daemon/engine/` | Datapath: TUN ↔ router ↔ noise ↔ UDP |
 | `daemon/cmd/cc01d/` | `cmd/cc01d/` | Daemon binari (hozircha statik peer konfiguratsiyasi) |
+| `control/ipam/` | `internal/control/ipam/` | IPv6 taqsimlagich, ijara hayot sikli, Store abstraksiyasi |
+| `control/registry/` | `internal/control/disco/` + `mapper/` | Node registri, NetworkMap, delta sync |
+| `control/server/` | `internal/control/` | ControlService gRPC implementatsiyasi |
+| `control/cmd/cc01-cp/` | `cmd/cc01-cp/` | Control Plane binari |
+| `daemon/control/` | `internal/daemon/engine/` | CP klienti: NetworkMap → router peerlari |
+| `daemon/stun/` | `internal/daemon/disco/` | STUN klienti (datapath soketi ustida) |
+| `daemon/relay/` | `internal/edge/relaysvc/` (server) + `internal/daemon/relay/` (klient) | Relay: ko'r uzatuvchi |
+| `daemon/path/` | `internal/daemon/disco/` | Yo'l holat mashinasi, disco ping/pong |
+| `control/stunserver/` | `internal/control/signal/` | STUN binding serveri |
 | `access-server/` | `access-server/` — **joyida qoladi** | .NET solution, Go workspace'dan tashqarida (ADR-009) |
 
 **Qoida:** har bir ko'chirish alohida PR; funksionallik o'zgarishi va joy o'zgarishi bitta PR'da aralashtirilmaydi.
@@ -1404,10 +1417,14 @@ Faza 0 dan farqli — bu yerda haqiqiy overlay boshlanadi. Foundation ishlari (T
 | Crypto router (cryptokey routing) | `inner_src ∈ peer.allowed_ips` — 100% drop | ✅ `daemon/router` |
 | UDP transport (batch I/O) | `recvmmsg`/`sendmmsg` Linux'da | ✅ `daemon/conn` |
 | Datapath engine (goroutine'lar, handshake, keepalive, rekey) | Ikki node o'rtasida shifrlangan `ping6` | ✅ `daemon/engine` |
-| Control Plane: register, NetworkMap, Raft KV | 3 replika, leader failover < 5 s | ⏳ |
-| IPAM: `/128` allocate/renew/release | 1000 node, double-allocation 0 | ⏳ |
-| STUN + UDP hole punching | Full/Restricted cone NAT'da P2P ≥ 90% muvaffaqiyat | ⏳ |
-| Relay servisi + fallback | Symmetric NAT'da 100% ulanish, switch < 300 ms | ⏳ |
+| Control Plane: register, NetworkMap | Tenant izolyatsiyasi, delta sync | ✅ `control/registry` + `control/server` |
+| `cc01d` CP rejimi | Peerlar qo'lda emas, CP dan avtomatik | ✅ `daemon/control` |
+| Control Plane: Raft KV | 3 replika, leader failover < 5 s | ⏳ `Store` interfeysi tayyor |
+| IPAM: `/128` allocate/renew/release | 1000 node, double-allocation 0 | ✅ `control/ipam` |
+| STUN: public manzilni aniqlash | NAT ortidagi node ikki tomonlama ulanadi | ✅ `daemon/stun` + `control/stunserver` |
+| UDP hole punching (symmetric NAT) | Birthday-paradox punching | ⏳ |
+| Relay servisi + fallback | Symmetric NAT'da ulanish; relay yukni ocha olmaydi | ✅ `make relay-demo` |
+| Yo'l tanlash + avtomatik fallback | Relay-first, P2P-upgrade; degradatsiyada relayga qaytish | ✅ `daemon/path` |
 | Marshrut sinxronizatsiyasi (reconciliation) | `cc01 down` keyin 0 orphan marshrut | ⏳ |
 | CLI: `up`, `down`, `status`, `peer list/ping` | UX review o'tgan | ⏳ |
 | Linux paketlar (deb/rpm) + systemd unit | Toza VM'da 1 buyruq bilan o'rnatish | ⏳ |
@@ -1428,8 +1445,193 @@ Faza 0 dan farqli — bu yerda haqiqiy overlay boshlanadi. Foundation ishlari (T
 Marshrutlash va xavfsizlik tekshiruvi kripto ustiga **o'lchanadigan yuk qo'shmadi** —
 qidiruv 46 ns, shifrlash esa 2.4 µs.
 
-**Uchidan uchiga tekshirilgan** (`make mesh-demo`): ikkita konteyner, har biri
-o'z tarmoq namespace'ida, haqiqiy TUN va UDP bilan:
+**IPAM unumdorligi** (`control/ipam`). Dastlabki implementatsiya har bir
+taqsimlashda butun holatni nusxalardi; bu 100 000 tenant maqsadida (§8)
+ishlamas edi:
+
+| Bosqich | Vaqt | Xotira | Ajratmalar |
+| --- | --- | --- | --- |
+| Butun holatni nusxalash | 1.47 ms | 3.1 MB | 5121 |
+| `ByParent` indeksi + nusxalashsiz | 239 µs | 1.7 KB | 14 |
+| Tozalashni faqat pool to'lganda | **3.3 µs** | 1.8 KB | 14 |
+
+Ikkita qaror shundan kelib chiqdi:
+
+1. **`Store.Update` xatoda avtomatik orqaga qaytarmaydi.** Butun holatni
+   nusxalash `O(N)`. Buning o'rniga kelishuv: `fn` avval tekshiradi,
+   keyin o'zgartiradi. Raft'da ham xuddi shunday — `Apply` allaqachon
+   commit qilingan buyruqni qo'llaydi. Sticky tiklashdagi yagona
+   istisno oshkora qo'lda qaytariladi.
+2. **Muddati o'tgan ijaralarni tozalash faqat pool to'lgandek
+   ko'ringanda ishlaydi**, har bir taqsimlashda emas. Odatiy yo'l
+   `O(1)`, kamdan-kam uchraydigan yo'l `O(N)` to'laydi.
+
+**Delta sync o'lchovi** (`control/registry`, 500 peerli tenant). Hujjatdagi
+bashorat (§3.1.2: "to'liq map ~200 KB, delta odatda < 2 KB") tasdiqlandi:
+
+| So'rov | Vaqt | Xotira |
+| --- | --- | --- |
+| To'liq map (500 peer) | 99 µs | 159 KB |
+| Delta (o'zgarishsiz) | **139 ns** | **384 B** |
+
+Uchta xatti-harakat alohida qo'riqlanadi:
+
+- **Heartbeat versiyani oshirmaydi**, agar endpointlar o'zgarmagan bo'lsa.
+  Aks holda har 30 sekundda butun tenantga delta yuborilardi.
+- **Bir nodening ketma-ket o'zgarishlari deltada bir marta** ko'rinadi —
+  klientga oraliq holatlar kerak emas, faqat oxirgisi.
+- **Jurnal kesilganda to'liq map** qaytariladi. Juda orqada qolgan klient
+  o'zgarishlarni jimgina o'tkazib yubormasligi kerak.
+
+**Relay orqali ulanish** (`make relay-demo`). Ikkita node, **har biri
+o'z NAT'i ortida** — ular bir-birini to'g'ridan-to'g'ri ko'ra olmaydi:
+
+```
+net-public  172.34.0.0/24   cp + stun + relay, gw-a, gw-b
+net-a       172.34.1.0/24   node-1  → gw-a (172.34.0.2)
+net-b       172.34.2.0/24   node-2  → gw-b (172.34.0.3)
+
+node-1: "public manzil aniqlandi" 172.34.0.2:51820
+node-1: "relayga ulandi" relay-1
+node-2: "relayga ulandi" relay-1
+
+node-1 → node-2:  0% yo'qotish, ~1.4 ms
+node-2 → node-1:  0% yo'qotish, ~1.1 ms
+
+sessiya: via=relay
+```
+
+node-1 node-2 ning NAT manziliga to'g'ridan-to'g'ri yubora olmaydi:
+gw-b da mos conntrack yozuvi yo'q. Yagona yo'l — relay, va datapath
+unga **avtomatik** o'tadi.
+
+CP relay ro'yxatini NetworkMap orqali tarqatadi (`relays[]`). Ro'yxat
+har bir javobda to'liq yuboriladi — u kichik va kamdan-kam o'zgaradi,
+ya'ni delta hisoblash ortiqcha murakkablik bo'lardi.
+
+**Yo'l tanlash** (`daemon/path`) — ADR-005: *relay-first, P2P-upgrade*.
+Ulanish darhol relaydan boshlanadi, to'g'ridan-to'g'ri yo'l esa fon
+rejimida sinaladi va tasdiqlangach unga o'tiladi.
+
+`§6.2` holat mashinasi to'liq amalga oshirilgan:
+
+```
+discovering → relay-active → probing → direct-active
+                                 ↑          ↓ 3 javobsizlik
+                                 └──────  degraded
+                                      5 javobsizlik
+```
+
+`§6.3` taymerlari:
+
+| Chegara | Qiymat | Nima uchun |
+| --- | --- | --- |
+| Tasdiqlangan yo'lni o'lchash | 5 s | Sifatni kuzatish |
+| Tasdiqlanmagan yo'lni sinash | **500 ms** | Quyida |
+| Javobsizlikdan keyin | 250 ms | Uzilishni tez aniqlash |
+| Degradatsiya | 3 javobsizlik (750 ms) | Hali direct'da qoladi |
+| Relayga qaytish | 5 javobsizlik (1250 ms) | Hot switch |
+| Upgrade sharti | 15% tez, 3 o'lchov | Flapping'ning oldini olish |
+
+**Dastlabki probe davri ataylab tezroq.** 5 soniyalik davrda tasdiqlash
+`3 × 5 = 15` soniya olardi — ya'ni foydalanuvchi shuncha vaqt relayda
+o'tirardi. Bu ADR-005 ning maqsadiga zid: relay **boshlanish** uchun,
+doimiy yo'l uchun emas. O'lchov: tasdiqlash **10.6 s → 1.53 s**.
+
+**Disco ping/pong** uchun yangi paket turi qo'shildi: `0x07`. Asl
+ro'yxat `0x01–0x06` edi; keepalive javob kutmagani uchun kechikishni
+o'lchay olmaydi. Xabar 9 bayt: tur + nonce. Vaqt tamg'asi yuborilmaydi —
+RTT ni jo'natuvchi o'zi o'lchaydi, ya'ni soatlar mos kelishi shart emas.
+
+**Relay orqali kelgan paketda endpoint O'RGANILMAYDI.** Manba manzili
+relayniki, peerniki emas; uni yozib qo'yish to'g'ridan-to'g'ri yo'lni
+buzardi. `acceptTransport` va handshake ishlovchilari `learnEndpoint`
+bayrog'ini oladi.
+
+**Relay** (`daemon/relay`). Ikki qatlamli shifrlash bilan:
+
+```
+[ node ↔ relay Noise sessiyasi           ]  ← relay ochadi
+    [ dst_node_id | peer↔peer shifr matn ]  ← relay OCHA OLMAYDI
+```
+
+Tashqi qatlam metadata'ni himoyalaydi: tarmoqni kuzatayotgan tomon kim
+kim bilan gaplashayotganini ko'rmaydi. Ichki qatlam esa relayning o'zidan
+himoyalaydi — u faqat `node_id` ni ko'radi (`ARCHITECTURE.md` §5.1 dagi
+kompromis radiusi jadvali aynan shuni va'da qiladi).
+
+Ikkita xususiyat alohida test bilan qo'riqlanadi:
+
+| Xususiyat | Nima uchun |
+| --- | --- |
+| Relay ichki yukni ocha olmaydi | Uning butun ma'nosi shu; test ochiq matn uzatilgan baytlarda yo'qligini tekshiradi |
+| Jo'natuvchini soxtalashtirib bo'lmaydi | `node_id` klient yuborgan qiymatdan emas, **autentifikatsiya qilingan sessiyadan** olinadi |
+
+`node_id` relay tomonidan Noise IK handshake'ida bilib olingan public
+kalitdan hisoblanadi — ya'ni boshqa nodening nomidan ro'yxatdan o'tish
+imkonsiz.
+
+**NAT ortidan ulanish** (`make nat-demo`). Docker'da MASQUERADE qiluvchi
+shlyuz orqali haqiqiy NAT simulyatsiya qilinadi:
+
+```
+net-public   172.33.0.0/24   cc01-cp, node-2, gw:eth0
+net-private  172.33.1.0/24   gw:eth1, node-1   ← default route → gw
+
+node-1: "public manzil aniqlandi" endpoint=172.33.0.2:51820   ← STUN
+node-2: "peer qo'shildi" node-1 endpoint=172.33.0.2:51820     ← CP orqali
+
+node-1 → node-2:  0% yo'qotish
+node-2 → node-1:  0% yo'qotish   ← NAT ICHIGA kirish
+```
+
+Ikkinchi yo'nalish muhimroq: u faqat STUN node-1 ning tashqi manzilini
+topgani va CP uni node-2 ga yetkazgani uchun ishlaydi. STUN'siz node-1
+o'zining `172.33.1.11` manzilini e'lon qilardi — unga tashqaridan
+erishib bo'lmaydi.
+
+**Ikkita qoida shu ishdan chiqdi:**
+
+1. **STUN datapath bilan AYNI soketdan** yuborilishi shart. NAT
+   bog'lanishi soketga bog'langan; boshqa soketdan so'ralgan manzil
+   overlay uchun yaroqsiz bo'ladi.
+2. **Engine ishga tushishidan oldingi o'qish sinxron bo'lishi shart.**
+   Dastlabki versiya alohida goroutine'da o'qirdi va u `Receive` da
+   bloklangan holda qolib ketardi — keyinchalik u datapath'ning
+   birinchi paketini (handshake initiation) o'g'irlab, mesh'ni
+   **jimgina** ishlamaydigan qilib qo'yardi. `stun.DiscoverOnce`
+   o'qishni chaqiruvchi goroutine'da bajaradi va regressiya testi
+   buni qo'riqlaydi.
+
+**Paketlarni ajratish aniq, ehtimolli emas.** STUN javoblari o'sha
+soketga keladi va ular `magic cookie` (0x2112A442) bo'yicha ajratiladi.
+cc01 sarlavhasida o'sha o'rinda `receiver_index` turadi — shuning uchun
+`noise.randomIndex()` mos keladigan yagona qiymatni (`0x42A41221`)
+ataylab chetlab o'tadi.
+
+**Avtomatik mesh** (`make cp-demo`): Control Plane va uchta node, hech
+qanday qo'lda peer konfiguratsiyasisiz. Har bir node faqat CP manzilini
+biladi:
+
+```
+cc01-cp  -tenant-net fd00:cc01:c0de::/64
+cc01d    -cp 172.32.88.5:8443            ← peer flaglari YO'Q
+
+CP:      node-1 → fd00:cc01:c0de:0:59c4:775:545c:3224/128
+         node-2 → fd00:cc01:c0de:0:c6ad:d1c:161d:9e3b/128
+         node-3 → fd00:cc01:c0de:0:987d:e17:dc4e:49b2/128
+
+node-1:  "peer qo'shildi" node-2 endpoint=172.32.88.12:51820
+         "peer qo'shildi" node-3 endpoint=172.32.88.13:51820
+
+ping6:   1→2, 1→3, 3→2 — hammasi 0% yo'qotish
+```
+
+Ketma-ketlik muhim: UDP soketi ochiladi (endpoint uchun port kerak) →
+CP da ro'yxatdan o'tiladi (manzil shu yerda beriladi) → TUN yaratiladi →
+engine ishga tushadi → CP stream'i peerlarni to'ldiradi.
+
+**Ikki node, statik konfiguratsiya bilan** (`make mesh-demo`):
 
 ```
 $ ping -6 -c 4 fd00:cc01:beef::2

@@ -108,12 +108,17 @@ Bu hujjat **maqsadli** arxitekturani tasvirlaydi. Repozitoriyda hozir mavjud kod
 | AP ↔ Edge avtorizatsiyasi (§3.4.3) | `core-server/access/` — gRPC klient, kesh, fail-static | ✅ ishlaydi; mTLS Faza 1 da |
 | Klient daemon `cc01d` + CLI `cc01` | `cli-client/` — 173 qatorli `flag` asosidagi klient | Daemon, IPC, holat mashinasi, buyruq daraxti yo'q |
 | Account Plane (`access-server`) | `access-server/` — auth, OAuth (GitHub/Google), API token, subdomain egaligi, tunnel avtorizatsiyasi | ✅ ishlaydi; billing va usage hisobi Faza 1/3 da |
-| Control Plane (idp/disco/ipam/signal/policy) | — | Butunlay yo'q |
+| Control Plane — `cc01-ipam` | `control/ipam/` — ijara hayot sikli, sticky taqsimlash, karantin | ✅ `Register` da manzil beradi; Raft store keyingi qadam |
+| Control Plane — `cc01-disco` | `control/registry/` + `control/server/` — registri, NetworkMap, delta sync, gRPC stream | ✅ `cc01d` peerlarni avtomatik oladi |
+| Control Plane — idp / policy | — | Hali yo'q |
 | Mesh VPN — kripto qatlami | `daemon/noise/` — Noise IK handshake, sessiya, rekey, replay oynasi | ✅ ishlaydi va sinalgan (UDP orqali ham) |
 | Mesh VPN — TUN qurilmasi | `daemon/tun/` — qurilma, manzil, ajratilgan routing jadvali (51820), policy qoidalari | ✅ Linux'da ICMPv6 aylanishi bilan tasdiqlangan; macOS fallback |
 | Mesh VPN — crypto router | `daemon/router/` — peer registri, `allowed_ips` LPM trie, cryptokey routing | ✅ soxtalashtirishga qarshi testlar bilan |
 | Mesh VPN — UDP transport va datapath | `daemon/conn/`, `daemon/engine/` — batch I/O, handshake, keepalive, rekey | ✅ ikki konteyner o'rtasida shifrlangan `ping6` |
-| Mesh VPN — ICE, hole punching, relay | — | Hali yo'q (Faza 1 davomi) |
+| Mesh VPN — STUN (`cc01-signal`) | `daemon/stun/` + `control/stunserver/` — public manzilni aniqlash | ✅ NAT ortidan ikki tomonlama ulanish |
+| Mesh VPN — relay (§3.3.2) | `daemon/relay/` — ko'r uzatuvchi, ikki qatlamli shifrlash; CP `relays[]` ni tarqatadi | ✅ symmetric NAT ortidagi nodelar ulanadi |
+| Mesh VPN — yo'l tanlash (§6.2) | `daemon/path/` — holat mashinasi, disco ping/pong, gisterezis | ✅ relay-first, P2P-upgrade |
+| Mesh VPN — ICE, hole punching | — | Hali yo'q (Faza 1 davomi) |
 | eBPF/XDP pipeline | — | Butunlay yo'q |
 | Public IPv6 / BGP / TasIX PoP | — | Butunlay yo'q |
 
@@ -423,7 +428,12 @@ Paket formati (WireGuard-mos, kengaytmalar bilan):
 
  type: 0x01 handshake_init  0x02 handshake_resp  0x03 cookie
        0x04 data            0x05 keepalive       0x06 relay_wrap
+       0x07 disco
 ```
+
+> `0x07 disco` — yo'l sifatini o'lchash uchun ping/pong (§6.3).
+> Dastlabki ro'yxatga keyin qo'shilgan: keepalive javob kutmaydi,
+> ya'ni kechikishni o'lchash uchun yaroqsiz.
 
 `0x06 relay_wrap` — relay uchun tashqi konvert: `{dst_node_id (32B), inner_packet}`. Relay faqat `dst_node_id`ni ko'radi, ichkarisini deshifrlay olmaydi.
 
