@@ -104,3 +104,67 @@ func (e *Engine) PathState(key noise.PublicKey) (path.State, time.Duration, bool
 	rtt, _ := state.tracker.RTT()
 	return state.tracker.State(), rtt, true
 }
+
+// PeerSnapshot — peerning `cc01 peer list` uchun holati.
+type PeerSnapshot struct {
+	PublicKey  noise.PublicKey
+	AllowedIPs []netipPrefix
+
+	// Path — hozir ishlatilayotgan yo'l turi.
+	Path path.Kind
+
+	// State — yo'l holat mashinasidagi holat (§6.2).
+	State path.State
+
+	// Endpoint — yo'lning underlay manzili. Relay orqali bo'lsa —
+	// relayning manzili.
+	Endpoint netipAddrPort
+
+	RTT time.Duration
+
+	// Online — peer bilan sessiya bormi.
+	Online bool
+
+	// SessionAge — sessiya qancha vaqtdan beri ochiq.
+	SessionAge time.Duration
+}
+
+// Snapshot barcha peerlarning holatini qaytaradi.
+//
+// Nusxa qaytariladi: chaqiruvchi (IPC serveri) uni tarmoqqa
+// yuborishdan oldin ichki holat o'zgarib ketishi mumkin.
+func (e *Engine) Snapshot() []PeerSnapshot {
+	peers := e.router.Peers()
+	out := make([]PeerSnapshot, 0, len(peers))
+
+	for _, peer := range peers {
+		state := e.pathFor(peer)
+
+		kind, endpoint, _ := state.tracker.Best()
+		rtt, _ := state.tracker.RTT()
+
+		snapshot := PeerSnapshot{
+			PublicKey:  peer.PublicKey,
+			AllowedIPs: peer.AllowedIPs(),
+			Path:       kind,
+			State:      state.tracker.State(),
+			Endpoint:   endpoint,
+			RTT:        rtt,
+		}
+
+		if session := peer.Session(); session != nil {
+			snapshot.Online = true
+			snapshot.SessionAge = session.Age()
+		}
+
+		out = append(out, snapshot)
+	}
+
+	return out
+}
+
+// ListenPort — overlay UDP porti.
+func (e *Engine) ListenPort() uint16 { return e.bind.Port() }
+
+// InterfaceName — TUN interfeysi nomi.
+func (e *Engine) InterfaceName() string { return e.device.Name() }

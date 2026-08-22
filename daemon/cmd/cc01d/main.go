@@ -27,9 +27,12 @@ import (
 
 	"github.com/freco-dev/cc01/daemon/conn"
 	"github.com/freco-dev/cc01/daemon/engine"
+	"github.com/freco-dev/cc01/daemon/ipc"
 	"github.com/freco-dev/cc01/daemon/noise"
 	"github.com/freco-dev/cc01/daemon/tun"
 )
+
+const version = "dev"
 
 func main() {
 	var (
@@ -40,6 +43,7 @@ func main() {
 		cpToken      = flag.String("cp-token", os.Getenv("CC01_CP_TOKEN"), "CP bilan kelishilgan sir")
 		advertise    = flag.String("advertise", "", "e'lon qilinadigan underlay manzil host:port")
 		stunServer   = flag.String("stun", os.Getenv("CC01_STUN"), "STUN serveri host:port (NAT ortida public manzilni aniqlash uchun)")
+		socketPath   = flag.String("socket", ipc.DefaultSocket, "IPC soketi (`cc01` CLI uchun)")
 		privateKey   = flag.String("key", os.Getenv("CC01_PRIVATE_KEY"), "base64 private kalit")
 		listenPort   = flag.Uint("listen", conn.DefaultPort, "overlay UDP porti")
 		ifaceName    = flag.String("iface", tun.DefaultName, "TUN interfeys nomi")
@@ -100,6 +104,7 @@ func main() {
 			ifaceName:   *ifaceName,
 			advertised:  advertised,
 			stunServer:  stunAddr,
+			socketPath:  *socketPath,
 		}, logger); err != nil {
 			fail(err)
 		}

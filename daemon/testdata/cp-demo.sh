@@ -70,3 +70,15 @@ $DOCKER exec cc01-n1 ping -6 -c 3 -W 3 "$A3"
 echo
 echo "═══ node-3 → node-2 ═══"
 $DOCKER exec cc01-n3 ping -6 -c 2 -W 3 "$A2"
+
+echo
+echo "═══ cc01 status (node-1) ═══"
+$DOCKER exec cc01-n1 cc01 status
+
+echo
+echo "═══ cc01 peer list (node-1) ═══"
+$DOCKER exec cc01-n1 cc01 peer list
+
+echo
+echo "═══ cc01 doctor (node-1) ═══"
+$DOCKER exec cc01-n1 cc01 doctor

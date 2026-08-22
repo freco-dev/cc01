@@ -1,0 +1,143 @@
+syntax = "proto3";
+
+package cc01.v1;
+
+option go_package = "github.com/freco-dev/cc01/proto/gen/cc01/v1;cc01v1";
+option csharp_namespace = "Cc01.V1";
+
+// Daemon — CLI (`cc01`) va demon (`cc01d`) o'rtasidagi mahalliy
+// protokol (DEV_SPEC §5.2).
+//
+// Transport: UNIX domain socket. Tarmoq orqali ochilmaydi — bu
+// mahalliy boshqaruv interfeysi va u autentifikatsiyani soket
+// ruxsatlariga tayanadi.
+
+service DaemonService {
+  // Status — demonning joriy holati.
+  rpc Status (StatusRequest) returns (StatusResponse);
+
+  // WatchStatus — real vaqtdagi holat (TUI uchun).
+  rpc WatchStatus (WatchStatusRequest) returns (stream WatchStatusResponse);
+
+  // Peers — peerlar ro'yxati va ular bilan qaysi yo'l ishlatilayotgani.
+  rpc Peers (PeersRequest) returns (PeersResponse);
+
+  // Doctor — muhit tekshiruvi: yadro, imtiyozlar, qurilmalar.
+  rpc Doctor (DoctorRequest) returns (DoctorResponse);
+}
+
+message StatusRequest {}
+
+message WatchStatusRequest {
+  // IntervalSeconds — yangilanish davri. 0 bo'lsa har o'zgarishda.
+  uint32 interval_seconds = 1;
+}
+
+// Stream'da yuboriladigan holat.
+message WatchStatusResponse {
+  StatusResponse status = 1;
+}
+
+message StatusResponse {
+  // Connected — mesh'ga ulanganmi.
+  bool connected = 1;
+
+  // NodeId, PublicKey — shu nodening identifikatori.
+  string node_id    = 2;
+  string public_key = 3;
+
+  string hostname   = 4;
+  string tenant     = 5;
+
+  // Address — overlay manzili, masalan "fd00:cc01::b7f2/128".
+  string address    = 6;
+
+  // Interface — TUN interfeysi nomi.
+  string interface  = 7;
+
+  // ListenPort — overlay UDP porti.
+  uint32 listen_port = 8;
+
+  // Endpoints — e'lon qilingan underlay manzillar.
+  repeated string endpoints = 9;
+
+  // ControlPlane — CP manzili; bo'sh bo'lsa statik rejim.
+  string control_plane = 10;
+
+  // RelayId — ulangan relay; bo'sh bo'lsa relay yo'q.
+  string relay_id = 11;
+
+  // PeerCount — mesh'dagi peerlar soni.
+  uint32 peer_count = 12;
+
+  // UptimeSeconds — demon qancha vaqtdan beri ishlayapti.
+  uint64 uptime_seconds = 13;
+
+  string version = 14;
+}
+
+message PeersRequest {
+  // OnlineOnly — faqat sessiyasi bor peerlarni qaytarish.
+  bool online_only = 1;
+}
+
+message PeersResponse {
+  repeated PeerStatus peers = 1;
+}
+
+message PeerStatus {
+  string node_id    = 1;
+  string public_key = 2;
+  string hostname   = 3;
+
+  // Addresses — peerning allowed_ips i.
+  repeated string addresses = 4;
+
+  // Path — qaysi yo'l ishlatilyapti: "direct", "relay" yoki "none".
+  string path = 5;
+
+  // PathState — yo'l holat mashinasidagi holat
+  // (ARCHITECTURE.md §6.2): "relay-active", "probing",
+  // "direct-active", "degraded".
+  string path_state = 6;
+
+  // Endpoint — hozirgi underlay manzil.
+  string endpoint = 7;
+
+  // RttMicros — o'lchangan kechikish. 0 — hali o'lchanmagan.
+  uint64 rtt_micros = 8;
+
+  // Online — peer bilan sessiya bormi.
+  bool online = 9;
+
+  // SessionAgeSeconds — sessiya qancha vaqtdan beri ochiq.
+  uint64 session_age_seconds = 10;
+}
+
+message DoctorRequest {}
+
+message DoctorResponse {
+  repeated Check checks = 1;
+
+  // Healthy — barcha majburiy tekshiruvlar o'tdimi.
+  bool healthy = 2;
+}
+
+// Check — bitta muhit tekshiruvi.
+message Check {
+  string name   = 1;
+  Status status = 2;
+  string detail = 3;
+
+  // Remediation — muammoni qanday tuzatish. Xato bo'lganda
+  // to'ldiriladi: foydalanuvchi "nima qilishim kerak" degan savolga
+  // javobni shu yerdan oladi (DEV_SPEC §3.1).
+  string remediation = 4;
+
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_OK          = 1;
+    STATUS_WARN        = 2;
+    STATUS_FAIL        = 3;
+  }
+}

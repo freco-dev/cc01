@@ -132,6 +132,17 @@ func (l *relayLink) keepalive(client *relay.Client) {
 	}
 }
 
+// activeID — ulangan relayning ID'si; ulanmagan bo'lsa bo'sh.
+func (l *relayLink) activeID() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.current == nil {
+		return ""
+	}
+	return l.active
+}
+
 func (l *relayLink) close() {
 	l.mu.Lock()
 	defer l.mu.Unlock()

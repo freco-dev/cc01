@@ -23,6 +23,7 @@ type controlConfig struct {
 	authToken   string
 	listenPort  uint16
 	ifaceName   string
+	socketPath  string
 	advertised  []netip.AddrPort
 
 	// stunServer — bo'sh bo'lmasa, ro'yxatdan o'tishdan OLDIN public
@@ -129,6 +130,16 @@ func runWithControlPlane(cfg controlConfig, logger *slog.Logger) error {
 	client.SetRouter(datapath.Router())
 	relayLink.attach(datapath)
 	datapath.Start()
+
+	// IPC — `cc01 status` va `cc01 peer list` uchun. Xato bo'lsa
+	// demon ishlashda davom etadi: kuzatuv interfeysi yo'qligi
+	// mesh'ni to'xtatish uchun sabab emas.
+	ipcServer, err := startIPC(cfg, datapath, registration, endpoints, relayLink, logger)
+	if err != nil {
+		logger.Warn("IPC ochilmadi, `cc01 status` ishlamaydi", "err", err)
+	} else {
+		defer ipcServer.Close()
+	}
 
 	logger.Info("cc01d tayyor (CP rejimi)",
 		"pubkey", identity.PublicKey().String(),

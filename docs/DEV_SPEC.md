@@ -784,13 +784,15 @@ NetworkMap / Policy o'zgardi
 
 ### 5.1 CLI buyruqlar daraxti
 
+`✅` — amalga oshirilgan, `⏳` — rejalashtirilgan:
+
 ```
 cc01
-├── up [--auth-key KEY] [--accept-routes] [--exit-node NODE] [--hostname NAME]
-├── down                                     # mesh'dan uzilish (daemon ishlaydi)
-├── status [--json] [--peers] [--watch]
-├── doctor                                   # preflight/diagnostika hisoboti
-├── version
+├── up [--auth-key KEY] [--accept-routes] [--exit-node NODE] [--hostname NAME]   ⏳
+├── down                                     # mesh'dan uzilish (daemon ishlaydi)  ⏳
+├── status [--json] [--watch]                                                    ✅
+├── doctor                                   # preflight/diagnostika hisoboti     ✅
+├── version                                                                      ✅
 │
 ├── tunnel                                   # ── ngrok funksiyasi ──
 │   ├── http <port|url> [--subdomain S] [--domain D] [--auth user:pass]
@@ -804,10 +806,10 @@ cc01
 │   └── inspect <tunnel-id>                  # so'rovlar oqimi (ngrok inspector analogi)
 │
 ├── peer                                     # ── mesh boshqaruvi ──
-│   ├── list [--json] [--online]
-│   ├── ping <node|ipv6> [--count N] [--path direct|relay]
-│   ├── route <node>                         # joriy yo'lni ko'rsatish (traceroute-like)
-│   └── forget <node>
+│   ├── list [--json] [--online]                                                 ✅
+│   ├── ping <node|ipv6> [--count N] [--path direct|relay]                       ⏳
+│   ├── route <node>                         # joriy yo'lni ko'rsatish            ⏳
+│   └── forget <node>                                                            ⏳
 │
 ├── ip                                       # ── IPv6 ──
 │   ├── show                                 # joriy GUA/ULA, lease TTL, anchor PoP
@@ -875,56 +877,59 @@ $ cc01 firewall add --deny --src ::/0 --dst 2a0X:1234:1::4c1a/128 --proto tcp --
 | Windows | Named pipe `\\.\pipe\cc01` |
 | Kuzatuv | `WatchStatus` — server-streaming (real-time TUI uchun) |
 
-**`proto/cc01/v1/daemon.proto`:**
+**`proto/cc01/v1/daemon.proto` — hozirgi holat.** Faqat *o'qish* buyruqlari
+amalga oshirilgan: ular ishlab turgan demonni ko'rish imkonini beradi va
+yozish operatsiyalaridan farqli o'laroq holatni o'zgartirmaydi, shuning
+uchun ular birinchi bo'lib qurildi.
 
 ```protobuf
-service Daemon {
-  rpc Up            (UpRequest)          returns (UpResponse);
-  rpc Down          (DownRequest)        returns (DownResponse);
-  rpc GetStatus     (StatusRequest)      returns (StatusResponse);
-  rpc WatchStatus   (StatusRequest)      returns (stream StatusResponse);
-  rpc Doctor        (DoctorRequest)      returns (DoctorResponse);
+service DaemonService {
+  rpc Status      (StatusRequest)      returns (StatusResponse);          // ✅
+  rpc WatchStatus (WatchStatusRequest) returns (stream WatchStatusResponse); // ✅
+  rpc Peers       (PeersRequest)       returns (PeersResponse);           // ✅
+  rpc Doctor      (DoctorRequest)      returns (DoctorResponse);          // ✅
+}
+```
+
+`StatusResponse` mesh holatini beradi (`connected`, `node_id`, `address`,
+`interface`, `listen_port`, `endpoints`, `control_plane`, `relay_id`,
+`peer_count`, `uptime_seconds`). `PeerStatus` har bir peer uchun **yo'l
+holatini** ochadi — `path` (`direct`/`relay`/`none`), `path_state`
+(ARCHITECTURE.md §6.2 holat mashinasi) va `rtt_micros`. Bu maydonlarsiz
+relay→direct ko'tarilishini tashqaridan kuzatib bo'lmaydi.
+
+`Check.remediation` — xato bo'lganda "nima qilishim kerak" degan savolga
+javob; §3.1 talabi.
+
+**Hali qurilmagan** (`Up`/`Down` demon hayot siklini, qolgan ikkitasi
+o'z quyi tizimini kutadi):
+
+```protobuf
+service DaemonService {                     // qo'shiladi
+  rpc Up   (UpRequest)   returns (UpResponse);      // ⏳
+  rpc Down (DownRequest) returns (DownResponse);    // ⏳
 }
 
-service Tunnels {
+service Tunnels {                                   // ⏳ §5.3 bilan birga
   rpc Open   (OpenTunnelRequest)  returns (TunnelInfo);
   rpc Close  (CloseTunnelRequest) returns (CloseTunnelResponse);
   rpc List   (ListTunnelsRequest) returns (ListTunnelsResponse);
   rpc Inspect(InspectRequest)     returns (stream RequestTrace);
 }
 
-service Firewall {
-  rpc AddRule  (AddRuleRequest)  returns (RuleResponse);
-  rpc DelRule  (DelRuleRequest)  returns (RuleResponse);
+service Firewall {                                  // ⏳ §4 (eBPF) bilan birga
+  rpc AddRule  (AddRuleRequest)   returns (RuleResponse);
+  rpc DelRule  (DelRuleRequest)   returns (RuleResponse);
   rpc ListRules(ListRulesRequest) returns (ListRulesResponse);
-  rpc TestRule (TestRuleRequest) returns (TestRuleResponse);
-  rpc SetMode  (SetModeRequest)  returns (SetModeResponse);
-}
-
-message OpenTunnelRequest {
-  enum Proto { HTTP = 0; TCP = 1; UDP = 2; TLS = 3; }
-  Proto  proto          = 1;
-  string local_addr     = 2;   // "127.0.0.1:8080"
-  string subdomain      = 3;
-  string custom_domain  = 4;
-  uint32 remote_port    = 5;   // 0 = avtomatik
-  string region         = 6;   // "tas1"
-  TlsMode tls_mode      = 7;   // EDGE_TERMINATE | PASSTHROUGH | E2E_REENCRYPT
-  repeated string ip_allowlist = 8;
-  AuthConfig auth       = 9;   // basic | oauth | none
-  uint32 max_conns      = 10;
-}
-
-message TunnelInfo {
-  string tunnel_id   = 1;
-  string public_url  = 2;
-  string local_addr  = 3;
-  string region      = 4;
-  int64  created_at  = 5;
-  TunnelStats stats  = 6;   // conns, bytes_in/out, p50/p95 latency, error_rate
-  CertInfo cert      = 7;
+  rpc TestRule (TestRuleRequest)  returns (TestRuleResponse);
+  rpc SetMode  (SetModeRequest)   returns (SetModeResponse);
 }
 ```
+
+**Soket yo'li uzunligi.** `sockaddr_un.sun_path` qat'iy o'lchamda —
+Linux'da 108 bayt, macOS/BSD'da 104. Chegaradan oshsa yadro
+`invalid argument` qaytaradi va sababni ko'rsatmaydi, shuning uchun
+`ipc.Listen` yo'lni oldindan o'lchaydi va tushunarli xato beradi.
 
 **Xato kodlari (gRPC status → CLI exit code):**
 
@@ -1426,7 +1431,9 @@ Faza 0 dan farqli — bu yerda haqiqiy overlay boshlanadi. Foundation ishlari (T
 | Relay servisi + fallback | Symmetric NAT'da ulanish; relay yukni ocha olmaydi | ✅ `make relay-demo` |
 | Yo'l tanlash + avtomatik fallback | Relay-first, P2P-upgrade; degradatsiyada relayga qaytish | ✅ `daemon/path` |
 | Marshrut sinxronizatsiyasi (reconciliation) | `cc01 down` keyin 0 orphan marshrut | ⏳ |
-| CLI: `up`, `down`, `status`, `peer list/ping` | UX review o'tgan | ⏳ |
+| CLI ↔ demon IPC (UNIX soket, gRPC) | `SO_PEERCRED`, `0660`, exit kodlari §5.2 | ✅ `daemon/ipc` |
+| CLI: `status`, `peer list`, `doctor` | Ishlab turgan mesh'da yo'l holati ko'rinadi | ✅ `make cp-demo` |
+| CLI: `up`, `down` (demon hayot sikli) | UX review o'tgan | ⏳ |
 | Linux paketlar (deb/rpm) + systemd unit | Toza VM'da 1 buyruq bilan o'rnatish | ⏳ |
 | AP: `Plan`, `Subscription`, kvota modeli | Tarif o'zgarishi 60 s ichida edge'da kuchga kiradi | ⏳ |
 | **MVP demo** | 3 shahar, 3 node, o'zaro ping < 50 ms, public IPv6 internetdan erishiladi | ⏳ |
