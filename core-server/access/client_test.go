@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	cc01v1 "github.com/freco-dev/cc01/core-server/gen/cc01/v1"
+	cc01v1 "github.com/freco-dev/cc01/proto/gen/cc01/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"

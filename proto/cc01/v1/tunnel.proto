@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package cc01.v1;
 
-option go_package = "github.com/freco-dev/cc01/core-server/gen/cc01/v1;cc01v1";
+option go_package = "github.com/freco-dev/cc01/proto/gen/cc01/v1;cc01v1";
 option csharp_namespace = "Cc01.V1";
 
 // Tunnel — klient (cc01 CLI / cc01d) va edge server o'rtasidagi boshqaruv

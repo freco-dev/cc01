@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"io"
 
-	cc01v1 "github.com/freco-dev/cc01/core-server/gen/cc01/v1"
+	cc01v1 "github.com/freco-dev/cc01/proto/gen/cc01/v1"
 	"google.golang.org/protobuf/proto"
 )
 

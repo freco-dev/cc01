@@ -463,8 +463,8 @@ const file_cc01_v1_tunnel_proto_rawDesc = "" +
 	"\bProtocol\x12\x18\n" +
 	"\x14PROTOCOL_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rPROTOCOL_HTTP\x10\x01\x12\x10\n" +
-	"\fPROTOCOL_TCP\x10\x02B\x91\x01\n" +
-	"\vcom.cc01.v1B\vTunnelProtoP\x01Z8github.com/freco-dev/cc01/core-server/gen/cc01/v1;cc01v1\xa2\x02\x03CXX\xaa\x02\aCc01.V1\xca\x02\aCc01\\V1\xe2\x02\x13Cc01\\V1\\GPBMetadata\xea\x02\bCc01::V1b\x06proto3"
+	"\fPROTOCOL_TCP\x10\x02B\x8b\x01\n" +
+	"\vcom.cc01.v1B\vTunnelProtoP\x01Z2github.com/freco-dev/cc01/proto/gen/cc01/v1;cc01v1\xa2\x02\x03CXX\xaa\x02\aCc01.V1\xca\x02\aCc01\\V1\xe2\x02\x13Cc01\\V1\\GPBMetadata\xea\x02\bCc01::V1b\x06proto3"
 
 var (
 	file_cc01_v1_tunnel_proto_rawDescOnce sync.Once

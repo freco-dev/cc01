@@ -5,7 +5,7 @@ package cc01.v1;
 // `Protocol` enumi shu yerda ta'riflangan.
 import "cc01/v1/tunnel.proto";
 
-option go_package = "github.com/freco-dev/cc01/core-server/gen/cc01/v1;cc01v1";
+option go_package = "github.com/freco-dev/cc01/proto/gen/cc01/v1;cc01v1";
 option csharp_namespace = "Cc01.V1";
 
 // Access — Account Plane (access-server, .NET) va Edge (core-server, Go)

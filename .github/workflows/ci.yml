@@ -31,6 +31,7 @@ jobs:
               - 'core-server/**'
               - 'cli-client/**'
               - 'daemon/**'
+              - 'control/**'
               - 'go.work'
               - '.github/workflows/ci.yml'
             dotnet:
@@ -83,13 +84,14 @@ jobs:
             core-server/go.sum
             cli-client/go.sum
             daemon/go.sum
-      - run: go build ./core-server/... ./cli-client/... ./daemon/...
-      - run: go vet ./core-server/... ./cli-client/... ./daemon/...
+            control/go.sum
+      - run: go build ./core-server/... ./cli-client/... ./daemon/... ./control/...
+      - run: go vet ./core-server/... ./cli-client/... ./daemon/... ./control/...
       - uses: golangci/golangci-lint-action@v6
         with:
           version: latest
           args: --timeout=5m
-      - run: go test -race -count=1 ./core-server/... ./cli-client/... ./daemon/...
+      - run: go test -race -count=1 ./core-server/... ./cli-client/... ./daemon/... ./control/...
       # TUN testlari haqiqiy qurilma yaratadi. GitHub runner'i Linux va
       # root huquqiga ega, shuning uchun konteyner kerak emas —
       # /dev/net/tun mavjudligini tekshiramiz.
@@ -105,7 +107,7 @@ jobs:
       - name: govulncheck
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./core-server/... ./cli-client/... ./daemon/...
+          govulncheck ./core-server/... ./cli-client/... ./daemon/... ./control/...
 
   dotnet:
     needs: changes

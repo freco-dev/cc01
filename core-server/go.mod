@@ -3,6 +3,7 @@ module github.com/freco-dev/cc01/core-server
 go 1.25.0
 
 require (
+	github.com/freco-dev/cc01/proto v0.0.0-00010101000000-000000000000
 	google.golang.org/grpc v1.83.1
 	google.golang.org/protobuf v1.36.12
 )
@@ -13,3 +14,6 @@ require (
 	golang.org/x/text v0.37.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 )
+
+// Yagona kontrakt moduli — repo ichida, hali versiyalanmagan.
+replace github.com/freco-dev/cc01/proto => ../proto

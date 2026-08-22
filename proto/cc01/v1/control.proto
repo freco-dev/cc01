@@ -1,0 +1,181 @@
+syntax = "proto3";
+
+package cc01.v1;
+
+option go_package = "github.com/freco-dev/cc01/proto/gen/cc01/v1;cc01v1";
+option csharp_namespace = "Cc01.V1";
+
+// Control — node (cc01d) va Control Plane o'rtasidagi protokol
+// (ARCHITECTURE.md §3.1.2).
+//
+// Asosiy g'oya delta sync: to'liq NetworkMap 500 peerda ~160 KB, uni
+// har bir o'zgarishda qayta yuborish behuda. Har bir o'zgarish monoton
+// `version` oladi; klient "menda N bor" deb aytadi va faqat N dan
+// keyingi o'zgarishlarni oladi.
+
+service ControlService {
+  // Register nodeni ro'yxatga oladi va unga IPv6 manzil beradi.
+  //
+  // Idempotent: bir xil public kalit bilan qayta chaqirish yangi node
+  // yaratmaydi va (sticky taqsimlash tufayli) o'sha manzilni qaytaradi.
+  rpc Register (RegisterRequest) returns (RegisterResponse);
+
+  // WatchNetworkMap uzun yashovchi stream: har bir o'zgarishda yangi
+  // map yoki delta yuboriladi.
+  //
+  // Birinchi javob har doim to'liq map bo'ladi (`full = true`).
+  rpc WatchNetworkMap (WatchNetworkMapRequest) returns (stream WatchNetworkMapResponse);
+
+  // Heartbeat nodening ijarasini va ro'yxatdagi holatini uzaytiradi.
+  //
+  // Endpointlar o'zgarmagan bo'lsa CP versiyani OSHIRMAYDI — aks holda
+  // har bir heartbeat butun tenantga delta yuborishga sabab bo'lardi.
+  rpc Heartbeat (HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+// ─────────────────────────── Register ───────────────────────────
+
+message RegisterRequest {
+  // Curve25519 public kaliti (32 bayt). node_id = SHA-256(pubkey),
+  // ya'ni identifikatorni klient tanlay olmaydi.
+  bytes public_key = 1;
+
+  string tenant   = 2;
+  string hostname = 3;
+
+  // Underlay manzillar: LAN, STUN topgan public manzil va h.k.
+  repeated string endpoints = 4;
+
+  // Mikrosegmentatsiya uchun ("tag:prod", "tag:db").
+  repeated string tags = 5;
+
+  // Oldingi manzil (sticky taqsimlash). Node qayta ulanganda IP
+  // o'zgarmasligi uchun.
+  string preferred_address = 6;
+
+  // ⚠️ Autentifikatsiya. Hozircha oldindan kelishilgan sir bilan
+  // solishtiriladi; node sertifikatlari `cc01-idp` bilan keladi
+  // (ARCHITECTURE.md §3.1.1).
+  string auth_token = 7;
+
+  string cc01d_version = 8;
+}
+
+message RegisterResponse {
+  string node_id = 1;
+
+  // Nodega berilgan manzil, masalan "2a0e:1234:1::b7f2/128".
+  string address = 2;
+
+  // Tenant segmenti, masalan "2a0e:1234:1::/64".
+  string tenant_cidr = 3;
+
+  string lease_id = 4;
+
+  // unix sekund.
+  int64 lease_expires_at = 5;
+
+  // Klient shu oraliqda Heartbeat yuborishi kerak (sekund).
+  uint32 heartbeat_interval_s = 6;
+}
+
+// ─────────────────────── WatchNetworkMap ───────────────────────
+
+message WatchNetworkMapRequest {
+  string node_id = 1;
+
+  // Klientdagi versiya. 0 — to'liq map so'raladi.
+  uint64 since = 2;
+
+  string auth_token = 3;
+}
+
+// Stream'da yuboriladigan NetworkMap.
+message WatchNetworkMapResponse {
+  string tenant  = 1;
+
+  // Monoton oshuvchi. Klient keyingi safar shu qiymatni `since`
+  // sifatida yuboradi.
+  uint64 version = 2;
+
+  // So'ragan nodening o'z yozuvi. `peers` ro'yxatida BO'LMAYDI —
+  // node o'zi bilan sessiya qurmaydi.
+  Node self = 3;
+
+  // Qo'shilgan yoki o'zgargan peerlar.
+  repeated Node peers = 4;
+
+  // Olib tashlangan peerlarning node_id lari. Faqat deltada to'ladi.
+  repeated string removed = 5;
+
+  // true — bu to'liq map, false — delta.
+  //
+  // To'liq map jurnal kesilganda ham qaytariladi: juda orqada qolgan
+  // klient o'zgarishlarni jimgina o'tkazib yubormasligi kerak.
+  bool full = 6;
+
+  int64 generated_at = 7;
+
+  // Mavjud relay tugunlari.
+  //
+  // Har bir javobda to'liq ro'yxat yuboriladi — u kichik va kamdan-kam
+  // o'zgaradi, ya'ni delta hisoblashning ma'nosi yo'q.
+  repeated Relay relays = 8;
+}
+
+// Relay — P2P imkonsiz bo'lganda trafikni uzatuvchi tugun
+// (ARCHITECTURE.md §3.3.2).
+message Relay {
+  string id = 1;
+
+  // Relayning Curve25519 public kaliti. Klient u bilan Noise
+  // sessiyasi quradi, ya'ni kalitni OLDINDAN bilishi shart.
+  bytes public_key = 2;
+
+  // Underlay manzili host:port.
+  string endpoint = 3;
+
+  // PoP identifikatori ("tas1", "fra1"). Yaqinroq relayni tanlash
+  // uchun (ARCHITECTURE.md §6.4).
+  string region = 4;
+
+  // Kichikroq qiymat — yuqoriroq ustuvorlik.
+  uint32 priority = 5;
+}
+
+message Node {
+  string node_id    = 1;
+  bytes  public_key = 2;
+  string hostname   = 3;
+
+  // Peer tomonda bu ro'yxat `allowed_ips` ga aylanadi va IKKI vazifani
+  // bajaradi: chiqishda marshrutlash jadvali, kirishda cryptokey
+  // routing ruxsat ro'yxati (ARCHITECTURE.md §4.2).
+  repeated string addresses = 4;
+
+  repeated string endpoints  = 5;
+  repeated string tags       = 6;
+  string          relay_home = 7;
+
+  int64 last_seen = 8;
+  bool  online    = 9;
+}
+
+// ─────────────────────────── Heartbeat ───────────────────────────
+
+message HeartbeatRequest {
+  string node_id = 1;
+
+  // Bo'sh bo'lsa endpointlar o'zgarmagan hisoblanadi.
+  repeated string endpoints = 2;
+
+  string auth_token = 3;
+}
+
+message HeartbeatResponse {
+  int64 lease_expires_at = 1;
+
+  // CP dagi joriy versiya. Klient bu o'zinikidan katta bo'lsa
+  // WatchNetworkMap stream'i uzilib qolganini biladi.
+  uint64 map_version = 2;
+}

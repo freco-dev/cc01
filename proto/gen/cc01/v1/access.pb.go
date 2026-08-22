@@ -723,8 +723,8 @@ const file_cc01_v1_access_proto_rawDesc = "" +
 	"2\xb7\x01\n" +
 	"\x15AccessInternalService\x12T\n" +
 	"\x0fAuthorizeTunnel\x12\x1f.cc01.v1.AuthorizeTunnelRequest\x1a .cc01.v1.AuthorizeTunnelResponse\x12H\n" +
-	"\vReportUsage\x12\x1b.cc01.v1.ReportUsageRequest\x1a\x1c.cc01.v1.ReportUsageResponseB\x91\x01\n" +
-	"\vcom.cc01.v1B\vAccessProtoP\x01Z8github.com/freco-dev/cc01/core-server/gen/cc01/v1;cc01v1\xa2\x02\x03CXX\xaa\x02\aCc01.V1\xca\x02\aCc01\\V1\xe2\x02\x13Cc01\\V1\\GPBMetadata\xea\x02\bCc01::V1b\x06proto3"
+	"\vReportUsage\x12\x1b.cc01.v1.ReportUsageRequest\x1a\x1c.cc01.v1.ReportUsageResponseB\x8b\x01\n" +
+	"\vcom.cc01.v1B\vAccessProtoP\x01Z2github.com/freco-dev/cc01/proto/gen/cc01/v1;cc01v1\xa2\x02\x03CXX\xaa\x02\aCc01.V1\xca\x02\aCc01\\V1\xe2\x02\x13Cc01\\V1\\GPBMetadata\xea\x02\bCc01::V1b\x06proto3"
 
 var (
 	file_cc01_v1_access_proto_rawDescOnce sync.Once

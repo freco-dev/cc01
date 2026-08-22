@@ -3,7 +3,7 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-GO_MODULES  := ./core-server/... ./cli-client/... ./daemon/...
+GO_MODULES  := ./proto/... ./core-server/... ./cli-client/... ./daemon/... ./control/...
 PROTO_DIR   := proto
 DOTNET_SLN  := access-server/AccessServer.slnx
 
@@ -55,11 +55,24 @@ lint: vet ## golangci-lint (o'rnatilgan bo'lsa) + go vet
 	  echo "  O'rnatish: https://golangci-lint.run/welcome/install/"; \
 	fi
 
+.PHONY: check-modules
+check-modules: ## Har bir modul workspace'siz ham quriladimi
+	@echo "go.work modullar orasidagi bog'liqlikni yashiradi —"
+	@echo "Docker build esa GOWORK=off bilan ishlaydi, shuning uchun"
+	@echo "har bir modulni alohida tekshiramiz."
+	@for m in proto core-server cli-client daemon control; do \
+	  printf "  %-12s " "$$m"; \
+	  (cd $$m && GOWORK=off go build ./... >/dev/null 2>&1) && echo "OK" \
+	    || { echo "FAIL"; exit 1; }; \
+	done
+
 .PHONY: tidy
 tidy: ## Har bir modulda go mod tidy
 	cd core-server && go mod tidy
 	cd cli-client && go mod tidy
 	cd daemon && go mod tidy
+	cd control && go mod tidy
+	cd proto && go mod tidy
 
 # ── Proto ─────────────────────────────────────────────────────────────────
 
@@ -89,6 +102,18 @@ test-linux: check-docker ## Imtiyozli TUN testlarini Linux konteynerida ishga tu
 .PHONY: mesh-demo
 mesh-demo: check-docker ## Ikkita konteynerda shifrlangan overlay va ping6
 	sh daemon/testdata/mesh-demo.sh
+
+.PHONY: cp-demo
+cp-demo: check-docker ## Control Plane + 3 node: qo'lda konfiguratsiyasiz mesh
+	sh daemon/testdata/cp-demo.sh
+
+.PHONY: nat-demo
+nat-demo: check-docker ## NAT ortidagi node: STUN bilan ikki tomonlama ulanish
+	sh daemon/testdata/nat-demo.sh
+
+.PHONY: relay-demo
+relay-demo: check-docker ## Ikkita node har biri o'z NAT'i ortida: relay orqali
+	sh daemon/testdata/relay-demo.sh
 
 # ── .NET (access-server) ──────────────────────────────────────────────────
 
@@ -180,7 +205,7 @@ dev-reset: check-docker ## Dev muhitni volume'lari bilan o'chiradi
 # ── Yig'ma ────────────────────────────────────────────────────────────────
 
 .PHONY: check
-check: lint test proto-lint dotnet-build dotnet-test dotnet-vuln ## CI bajaradigan hamma tekshiruv
+check: lint test check-modules proto-lint dotnet-build dotnet-test dotnet-vuln ## CI bajaradigan hamma tekshiruv
 
 .PHONY: clean
 clean: ## Build artefaktlarini tozalaydi
