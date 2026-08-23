@@ -118,7 +118,9 @@ Bu hujjat **maqsadli** arxitekturani tasvirlaydi. Repozitoriyda hozir mavjud kod
 | Mesh VPN — STUN (`cc01-signal`) | `daemon/stun/` + `control/stunserver/` — public manzilni aniqlash | ✅ NAT ortidan ikki tomonlama ulanish |
 | Mesh VPN — relay (§3.3.2) | `daemon/relay/` — ko'r uzatuvchi, ikki qatlamli shifrlash; CP `relays[]` ni tarqatadi | ✅ symmetric NAT ortidagi nodelar ulanadi |
 | Mesh VPN — yo'l tanlash (§6.2) | `daemon/path/` — holat mashinasi, disco ping/pong, gisterezis | ✅ relay-first, P2P-upgrade |
-| Mesh VPN — ICE, hole punching | — | Hali yo'q (Faza 1 davomi) |
+| Mesh VPN — hole punching (cone NAT) | `daemon/engine` — disco pong AYNAN ping kelgan yo'l bilan qaytadi | ✅ `make punch-demo` |
+| Mesh VPN — hole punching (symmetric NAT) | — | Hali yo'q: port bashorati / birthday punching |
+| Mesh VPN — to'liq ICE nomzod to'plami | — | Hali yo'q (`host`/`srflx` bor, `prflx` yo'q) |
 | eBPF/XDP pipeline | — | Butunlay yo'q |
 | Public IPv6 / BGP / TasIX PoP | — | Butunlay yo'q |
 
@@ -316,7 +318,18 @@ Prefiks **anchor** PoP bilan bog'lanadi: `tas1` PoP shu `/48`ni BGP orqali e'lon
 - **ICE candidate exchange** — CP'dagi gRPC stream orqali (SDP emas, o'zimizning kompakt protobuf).
 - **Endpoint discovery:** klient o'z nomzodlarini yig'adi: `host` (LAN IP), `srflx` (STUN orqali topilgan public), `relay` (TURN/DERP), `overlay` (mavjud IPv6 GUA).
 - **NAT type detection:** Full Cone / Restricted / Port-Restricted / Symmetric — birlashtirilgan STUN testlari orqali; natija cache'lanadi (10 min).
-- **Birthday-paradox punching:** symmetric NAT'da 256 ta portga parallel probe (~50% muvaffaqiyat), muvaffaqiyatsiz bo'lsa relay.
+- **Birthday-paradox punching:** symmetric NAT'da 256 ta portga parallel probe (~50% muvaffaqiyat), muvaffaqiyatsiz bo'lsa relay. ⏳ hali qurilmagan.
+
+**Teshik ochishning amaliy sharti** (`make punch-demo` da o'lchangan): disco
+**pong AYNAN ping kelgan manzilga** qaytishi kerak, "eng yaxshi" yo'lga emas.
+Aks holda relay orqali ketgan javob to'g'ridan-to'g'ri probe'ni tasdiqlamaydi
+va yo'l abadiy `probing` holatida qoladi — hech qanday xato chiqmasdan.
+
+**Cone va symmetric farqi o'lchangan.** Linux `MASQUERADE` har bir MANZIL
+uchun boshqa tashqi port beradi, ya'ni symmetric NAT kabi ishlaydi: bitta
+node uchun relayga `51820`, peerga `12860`. STUN aytgan manzil faqat STUN
+oqimi uchun to'g'ri bo'lib qoladi. Port saqlanadigan NAT'da (`punch-demo`)
+esa ikkala tomon ham bir necha yuz millisekundda `direct-active` ga o'tadi.
 
 #### 3.1.5 `cc01-policy` — Zero-Trust Policy Engine
 

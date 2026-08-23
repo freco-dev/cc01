@@ -1495,6 +1495,7 @@ Faza 0 dan farqli — bu yerda haqiqiy overlay boshlanadi. Foundation ishlari (T
 | Control Plane: Raft KV | 3 replika, leader failover < 5 s | ⏳ `Store` interfeysi tayyor |
 | IPAM: `/128` allocate/renew/release | 1000 node, double-allocation 0 | ✅ `control/ipam` |
 | STUN: public manzilni aniqlash | NAT ortidagi node ikki tomonlama ulanadi | ✅ `daemon/stun` + `control/stunserver` |
+| UDP hole punching (cone NAT) | Ikkala tomon ham relaydan `direct-active` ga o'tadi | ✅ `make punch-demo` |
 | UDP hole punching (symmetric NAT) | Birthday-paradox punching | ⏳ |
 | Relay servisi + fallback | Symmetric NAT'da ulanish; relay yukni ocha olmaydi | ✅ `make relay-demo` |
 | Yo'l tanlash + avtomatik fallback | Relay-first, P2P-upgrade; degradatsiyada relayga qaytish | ✅ `daemon/path` |

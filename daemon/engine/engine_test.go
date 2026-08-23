@@ -590,3 +590,77 @@ func TestEngine_ReportsPathState(t *testing.T) {
 		t.Error("peer uchun holat kutilgan edi")
 	}
 }
+
+// Disco pong AYNAN ping kelgan manzilga qaytishi kerak — "eng yaxshi"
+// yo'lga emas.
+//
+// Bu hole punching'ning sharti. NAT ortidagi peer bizga o'zining
+// public manzilidan yozadi; javobni relay orqali yuborsak, u
+// to'g'ridan-to'g'ri probe'ni TASDIQLAMAYDI va yo'l abadiy `probing`
+// holatida qoladi. Xatoning o'zi ham jim edi: hech qanday xato
+// chiqmasdi, shunchaki yo'l hech qachon ko'tarilmasdi.
+func TestEngine_PongReturnsToProbeSource(t *testing.T) {
+	alice := newNode(t, "2a0e:1234:1::/64")
+	bob := newNode(t, "2a0e:1234:2::/64")
+	link(t, alice, bob)
+
+	// Sessiya kerak: disco shu sessiya kaliti bilan shifrlanadi.
+	alice.device.inject(ipv6Packet("2a0e:1234:1::1", "2a0e:1234:2::1", 'x'))
+	expectPacket(t, bob, 5*time.Second)
+
+	peer, ok := bob.engine.Router().Peer(alice.identity.PublicKey())
+	if !ok {
+		t.Fatal("bob alice'ni ko'rmayapti")
+	}
+	session := peer.Session()
+	if session == nil {
+		t.Fatal("sessiya o'rnatilmagan")
+	}
+
+	// Kuzatuvchi soket — ping "shu yerdan kelgan" bo'ladi. U alice'ning
+	// ro'yxatdagi manzili EMAS, xuddi NAT ortidagi peer kabi.
+	observer, err := conn.Open(0)
+	if err != nil {
+		t.Fatalf("kuzatuvchi soket: %v", err)
+	}
+	defer observer.Close()
+
+	observerAddr := netip.AddrPortFrom(netip.IPv6Loopback(), observer.Port())
+
+	// Bob'ning yo'l kuzatuvchisiga relay qo'yamiz: shundan keyin
+	// `Best()` relayni qaytaradi va eski xatti-harakat pongni o'sha
+	// yoqqa yuborardi.
+	relayAddr := netip.AddrPortFrom(netip.IPv6Loopback(), 9)
+	state := bob.engine.pathFor(peer)
+	state.tracker.SetRelay(relayAddr, time.Now())
+
+	nonce, err := path.NewNonce()
+	if err != nil {
+		t.Fatalf("nonce: %v", err)
+	}
+
+	bob.engine.handleDisco(peer, session, path.EncodeDisco(path.Ping, nonce), observerAddr)
+
+	buf := make([]byte, 2048)
+	n, from, err := observer.ReceiveOne(buf, time.Now().Add(3*time.Second))
+	if err != nil {
+		t.Fatalf("pong kuzatuvchi soketga kelmadi: %v", err)
+	}
+	if n == 0 {
+		t.Fatal("bo'sh pong")
+	}
+
+	// Javob bob'dan kelgan bo'lishi kerak.
+	if from.Port() != bob.bind.Port() {
+		t.Errorf("pong %v dan keldi, bob'ning porti %d", from, bob.bind.Port())
+	}
+
+	// Va u haqiqatan ham o'sha nonce bilan pong bo'lishi kerak.
+	header, err := noise.ParseHeader(buf[:n])
+	if err != nil {
+		t.Fatalf("sarlavha: %v", err)
+	}
+	if header.Type != noise.TypeDisco {
+		t.Fatalf("paket turi %v, disco kutilgan edi", header.Type)
+	}
+}

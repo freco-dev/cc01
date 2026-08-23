@@ -115,6 +115,10 @@ nat-demo: check-docker ## NAT ortidagi node: STUN bilan ikki tomonlama ulanish
 relay-demo: check-docker ## Ikkita node har biri o'z NAT'i ortida: relay orqali
 	sh daemon/testdata/relay-demo.sh
 
+.PHONY: punch-demo
+punch-demo: check-docker ## NAT teshish: relaydan boshlab to'g'ridan-to'g'ri yo'lga o'tish
+	sh daemon/testdata/punch-demo.sh
+
 # ── Paketlar (deb/rpm) ────────────────────────────────────────────────────
 # Binarlar konteynerda quriladi: host macOS bo'lishi mumkin, paketga
 # esa Linux binari kerak. nfpm bitta tavsifdan ikkala formatni beradi.

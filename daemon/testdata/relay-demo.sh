@@ -5,9 +5,22 @@
 #   net-a        172.34.1.0/24   gw-a:eth1, node-1
 #   net-b        172.34.2.0/24   gw-b:eth1, node-2
 #
-# Ikkala node ham CP va relayga yeta oladi, lekin BIR-BIRIGA yo'q:
-# node-1 node-2 ning NAT manziliga yuborsa, gw-b da mos conntrack
-# yozuvi yo'q va paket tashlanadi. Yagona yo'l — relay.
+# Ikkala node ham CP va relayga yeta oladi, lekin BIR-BIRIGA yo'q.
+#
+# Sababi MASQUERADE: Linux har bir MANZIL uchun boshqa tashqi port
+# beradi. O'lchangan holat — node-1 uchun gw-a da:
+#
+#   → relay (172.34.0.5:51821)   tashqi port 51820
+#   → node-2 (172.34.0.3:51820)  tashqi port 12860
+#
+# Bu symmetric NAT (endpoint-dependent mapping). STUN aytgan manzil
+# faqat STUN oqimi uchun to'g'ri; peer boshqa portni ko'radi va teshik
+# ochilmaydi. Ikkala tomon ham disco ping yuboradi, lekin ular
+# bir-birining NAT'idagi mos yozuvga tushmaydi.
+#
+# Cone NAT'da (port saqlanadi) esa teshik ochiladi — `make punch-demo`.
+# Symmetric NAT uchun port bashorati / birthday punching kerak; u hali
+# qurilmagan, shuning uchun bu yerda yagona yo'l — relay.
 set -e
 
 DOCKER="docker --context desktop-linux"
@@ -21,7 +34,11 @@ cleanup() {
   $DOCKER rm -f cc01-cp cc01-gwa cc01-gwb cc01-n1 cc01-n2 >/dev/null 2>&1 || true
   $DOCKER network rm $PUB $NETA $NETB >/dev/null 2>&1 || true
 }
-trap cleanup EXIT
+
+# KEEP=1 — konteynerlarni qoldiradi (tarmoqni tekshirish uchun).
+if [ -z "${KEEP:-}" ]; then
+  trap cleanup EXIT
+fi
 cleanup
 
 echo "── image ──"
@@ -99,6 +116,10 @@ $DOCKER exec cc01-n1 ping -6 -c 4 -W 3 "$A2" || true
 echo
 echo "═══ node-2 → node-1 ═══"
 $DOCKER exec cc01-n2 ping -6 -c 3 -W 3 "$A1" || true
+
+echo
+echo "═══ cc01 peer list (node-1) ═══"
+$DOCKER exec cc01-n1 cc01 peer list
 
 echo
 echo "═══ qaysi yo'l ishlatilyapti ═══"

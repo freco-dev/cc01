@@ -52,13 +52,20 @@ func (e *Engine) sendProbe(
 ) {
 	nonce, err := path.NewNonce()
 	if err != nil {
+		e.log.Debug("probe uchun nonce olinmadi", "peer", peer.PublicKey, "err", err)
 		return
 	}
 
+	// Bu xato yo'li ilgari jim edi. Yo'l ochilmay qolganda sabab
+	// ko'rinmasdi — probe yuborilmagani ham, nima uchun yuborilmagani
+	// ham logda qolmasdi.
 	packet, err := session.Seal(noise.TypeDisco, path.EncodeDisco(path.Ping, nonce))
 	if err != nil {
+		e.log.Debug("probe shifrlanmadi", "peer", peer.PublicKey, "kind", kind, "err", err)
 		return
 	}
+
+	e.log.Debug("probe yuborilmoqda", "peer", peer.PublicKey, "kind", kind, "to", endpoint)
 
 	state.addPending(nonce, kind, e.now())
 
@@ -68,7 +75,15 @@ func (e *Engine) sendProbe(
 }
 
 // handleDisco kelgan ping yoki pongni qayta ishlaydi.
-func (e *Engine) handleDisco(peer *router.Peer, session *noise.Session, payload []byte) {
+//
+// `from` — paket qaysi manzildan kelgani. Relay orqali kelgan bo'lsa u
+// yaroqsiz (`relaySentinel`), chunki u holda manba manzili relayniki.
+func (e *Engine) handleDisco(
+	peer *router.Peer,
+	session *noise.Session,
+	payload []byte,
+	from netipAddrPort,
+) {
 	kind, nonce, err := path.DecodeDisco(payload)
 	if err != nil {
 		return
@@ -83,9 +98,23 @@ func (e *Engine) handleDisco(peer *router.Peer, session *noise.Session, payload 
 			return
 		}
 
-		state := e.pathFor(peer)
-		if _, endpoint, ok := state.tracker.Best(); ok {
-			_ = e.bind.Send(pong, endpoint)
+		// Javob AYNAN ping kelgan yo'l bilan qaytadi.
+		//
+		// Bu — hole punching'ning yuragi. Ikkala tomon bir vaqtda
+		// bir-birining public endpointiga yozganda NAT'larda conntrack
+		// yozuvlari paydo bo'ladi va to'g'ridan-to'g'ri yo'l ochiladi.
+		// Javobni "eng yaxshi" yo'l bilan yuborish bu zanjirni uzardi:
+		// relay orqali kelgan pong to'g'ridan-to'g'ri probe'ni
+		// tasdiqlamaydi va yo'l abadiy `probing` holatida qolardi.
+		if from.IsValid() {
+			if err := e.bind.Send(pong, from); err != nil {
+				e.log.Debug("pong yuborilmadi", "peer", peer.PublicKey, "to", from, "err", err)
+			}
+			return
+		}
+
+		if err := e.sendViaRelay(peer, pong); err != nil {
+			e.log.Debug("pong relay orqali yuborilmadi", "peer", peer.PublicKey, "err", err)
 		}
 
 	case path.Pong:

@@ -160,7 +160,7 @@ func (e *Engine) acceptTransport(
 	// IPv6 paketi ham yo'q, shuning uchun cryptokey tekshiruvidan
 	// oldin ajratiladi.
 	if header.Type == noise.TypeDisco {
-		e.handleDisco(peer, session, inner)
+		e.handleDisco(peer, session, inner, from)
 		return
 	}
 
