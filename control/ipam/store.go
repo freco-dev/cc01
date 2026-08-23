@@ -166,3 +166,9 @@ func (m *MemoryStore) View(ctx context.Context, fn func(*State) error) error {
 
 	return fn(m.state)
 }
+
+// Insert ijarani indekslari bilan birga holatga qo'yadi.
+//
+// Faqat snapshot'dan tiklash uchun: u yerda ijaralar allaqachon
+// tasdiqlangan va qayta tekshirish kerak emas. Oddiy yo'l — Apply.
+func (s *State) Insert(lease *Lease) { s.put(lease) }

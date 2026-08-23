@@ -40,7 +40,14 @@ func main() {
 		tlsKey    = flag.String("tls-key", "", "TLS kaliti (PEM)")
 		tlsHosts  = flag.String("tls-hosts", "", "sertifikatga yoziladigan nomlar/IP'lar, vergul bilan")
 		noTLS     = flag.Bool("insecure", false, "kanalni shifrlamaslik (FAQAT lokal sinov)")
-		verbose   = flag.Bool("v", false, "batafsil log")
+
+		raftID        = flag.String("raft-id", os.Getenv("CC01_RAFT_ID"), "klasterdagi noyob identifikator")
+		raftBind      = flag.String("raft-bind", os.Getenv("CC01_RAFT_BIND"), "Raft transporti manzili; bo'sh bo'lsa klaster o'chiriladi")
+		raftAdvertise = flag.String("raft-advertise", os.Getenv("CC01_RAFT_ADVERTISE"), "boshqa nodelarga ko'rinadigan Raft manzili")
+		raftDir       = flag.String("raft-dir", os.Getenv("CC01_RAFT_DIR"), "jurnal va snapshot papkasi")
+		raftPeers     = flag.String("raft-peers", os.Getenv("CC01_RAFT_PEERS"), "boshlang'ich a'zolar: id=host:port,id=host:port")
+		raftBootstrap = flag.Bool("raft-bootstrap", false, "klasterni SHU node bilan boshlash (faqat bittasida!)")
+		verbose       = flag.Bool("v", false, "batafsil log")
 	)
 	flag.Parse()
 
@@ -56,6 +63,8 @@ func main() {
 		relayPort: uint16(*relayPort), relayHost: *relayHost,
 		tlsCert: *tlsCert, tlsKey: *tlsKey,
 		tlsHosts: splitHosts(*tlsHosts), insecure: *noTLS,
+		raftID: *raftID, raftBind: *raftBind, raftAdvertise: *raftAdvertise,
+		raftDir: *raftDir, raftPeers: *raftPeers, raftBootstrap: *raftBootstrap,
 	}, logger); err != nil {
 		fmt.Fprintf(os.Stderr, "cc01-cp: %v\n", err)
 		os.Exit(1)
@@ -75,6 +84,13 @@ type runConfig struct {
 	tlsKey   string
 	tlsHosts []string
 	insecure bool
+
+	raftID        string
+	raftBind      string
+	raftAdvertise string
+	raftDir       string
+	raftPeers     string
+	raftBootstrap bool
 }
 
 // splitHosts vergul bilan ajratilgan ro'yxatni bo'ladi.
@@ -122,7 +138,13 @@ func run(cfg runConfig, logger *slog.Logger) error {
 
 	nodes := registry.New(registry.Options{})
 
-	allocator, err := ipam.New(ipam.Options{Store: ipam.NewMemoryStore()})
+	store, closeStore, err := openStore(cfg, logger)
+	if err != nil {
+		return err
+	}
+	defer closeStore()
+
+	allocator, err := ipam.New(ipam.Options{Store: store})
 	if err != nil {
 		return err
 	}
@@ -184,7 +206,8 @@ func run(cfg runConfig, logger *slog.Logger) error {
 		"listen", listener.Addr().String(),
 		"tenant_net", prefix.String(),
 		"auth", authMode == "" || authMode == "required",
-		"tls", !cfg.insecure)
+		"tls", !cfg.insecure,
+		"klaster", cfg.raftBind != "")
 
 	errc := make(chan error, 1)
 	go func() { errc <- grpcServer.Serve(listener) }()

@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/freco-dev/cc01/control/cluster"
 	"github.com/freco-dev/cc01/control/ipam"
 	"github.com/freco-dev/cc01/control/registry"
 	cc01v1 "github.com/freco-dev/cc01/proto/gen/cc01/v1"
@@ -129,6 +130,16 @@ func (s *Service) Register(
 	})
 	if err != nil {
 		s.log.Error("manzil berilmadi", "node", nodeID, "err", err)
+		// Klasterda yozuvni faqat lider bajara oladi. Xatoni
+		// ResourceExhausted deb yubormaymiz — u "pool to'ldi"
+		// degani bo'lib, operatorni butunlay boshqa tomonga
+		// yo'naltirardi.
+		var notLeader *cluster.ErrNotLeader
+		if errors.As(err, &notLeader) {
+			return nil, status.Errorf(codes.Unavailable,
+				"bu node lider emas; %s ga murojaat qiling", notLeader.Leader)
+		}
+
 		return nil, status.Errorf(codes.ResourceExhausted, "manzil berilmadi: %v", err)
 	}
 

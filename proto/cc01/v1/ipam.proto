@@ -73,3 +73,25 @@ message ReleaseLease {
 // SweepLeases — muddati o'tganlarni karantinga, karantini
 // tugaganlarni butunlay o'chiradi.
 message SweepLeases {}
+
+// LeaseRecord — snapshot'ga yoziladigan bitta ijara.
+//
+// Buyruqlardan alohida tur: buyruq "nima qilinsin" ni, bu esa
+// "hozir nima bor" ni tasvirlaydi. Ularni birlashtirish snapshot
+// formatini buyruq formatining o'zgarishlariga bog'lab qo'yardi.
+message LeaseRecord {
+  string id     = 1;
+  string prefix = 2;
+  uint32 kind   = 3;
+  uint32 state  = 4;
+  string owner  = 5;
+  string tenant = 6;
+  string parent = 7;
+
+  google.protobuf.Timestamp issued_at   = 8;
+  google.protobuf.Timestamp expires_at  = 9;
+
+  // ReleasedAt — karantinga tushgan vaqt; faqat karantin holatida
+  // to'ldiriladi.
+  google.protobuf.Timestamp released_at = 10;
+}

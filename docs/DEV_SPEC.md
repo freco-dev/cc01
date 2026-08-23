@@ -453,6 +453,65 @@ add` sukut bo'yicha `RTPROT_BOOT` qo'yadi, biz `RTPROT_STATIC` yozamiz. Buni
 
 **Konflikt aniqlash:** agar tenant `/64` foydalanuvchining LAN prefiksi bilan kesishsa (kam ehtimol IPv6'da, lekin ULA'da mumkin) — daemon `WARN` chiqaradi va marshrutni qo'shmaydi; `cc01 status` konfliktni ko'rsatadi.
 
+### 3.3.1 Control Plane klasteri (Raft)
+
+**`Store` interfeysi Raft uchun tayyor emas ekan.** U
+`Update(ctx, func(*State) error)` ko'rinishida edi va izohda "Raft
+implementatsiyasida bu `raft.Apply` bo'ladi" deb yozilgandi. Ikkita
+sabab bilan bu amalga oshmaydi:
+
+1. Raft jurnalga **baytlar** yozadi va ularni har bir replikada qayta
+   o'qiydi. Funksiyani serializatsiya qilib bo'lmaydi.
+2. Jiddiyroq: qaror o'sha funksiya **ichida** qabul qilinardi va u
+   `crypto/rand` hamda `time.Now` ishlatardi. Har bir replika boshqa
+   prefiks va boshqa muddat tanlab, holat jimgina ajralib ketardi.
+
+**Yechim: qarorni lider qabul qiladi.** Buyruq jurnalga tushganda
+allaqachon to'liq aniqlangan bo'ladi — prefiks, ijara ID'si, vaqt va
+TTL ham. `State.Apply` sof: ichida na soat o'qiladi, na tasodifiy son
+olinadi.
+
+TTL ham buyruqda keladi. Bu ortiqcha ko'rinadi, lekin konstantadan
+o'qilsa, konstanta o'zgargandan keyin **eski jurnal boshqacha
+qo'llanib** replikalarni ajratib yuborardi.
+
+**Taklif poyga tug'diradi.** Lider qarorni holatning nusxasi bo'yicha
+qabul qiladi, jurnal esa buyruqlarni ketma-ket qo'llaydi — oradagi
+boshqa buyruq prefiksni band qilishi mumkin. Shuning uchun `Apply`
+bandlikni **qayta** tekshiradi va `ErrPrefixTaken` qaytaradi; taklif
+qiluvchi 5 martagacha qayta urinadi.
+
+⚠️ Idempotentlik tekshiruvi bandlik tekshiruvidan **oldin** turishi
+shart. Aks holda Raft takroriy yetkazgan buyruq o'zining ijarasini
+"band" deb ko'rib, taklif qiluvchi allaqachon bajarilgan ishni qayta
+urinardi.
+
+**O'qish mahalliy.** `View` quorum aylanishisiz javob beradi, ya'ni
+ortda qolgan replika eski holatni ko'rsatishi mumkin. Bu
+taqsimlashning to'g'riligiga ta'sir qilmaydi: buyruq jurnalga
+tushgach, u eski yozuvlardan keyin qo'llanadi va bandlik yangilangan
+holat bo'yicha tekshiriladi. "O'z yozganingni o'qish" kerak bo'lgan
+joylar uchun `Barrier` bor.
+
+**Taymerlar.** Standart Raft qiymatlari 5 soniyalik DoD ga yetmaydi,
+shuning uchun `HeartbeatTimeout` va `ElectionTimeout` 500 ms ga,
+`LeaderLeaseTimeout` 250 ms ga tushirilgan.
+
+`make raft-demo` uchta replikani ko'taradi va o'lchaydi:
+
+| Tekshiruv | Natija |
+| --- | --- |
+| Lider tanlash | bitta lider, split-brain yo'q |
+| Lider failover | **0.9–1.0 s** (DoD: < 5 s) |
+| Ijara saqlanishi | o'sha kalit yangi liderdan **aynan o'sha manzilni** oladi |
+| Kvorum yo'qolishi | qolgan node liderlikdan voz kechadi, yozuv rad etiladi |
+
+**Hali qurilmagani — liderga yo'naltirish.** Follower yozuvni
+bajara olmaydi va `UNAVAILABLE` xatosini lider manzili bilan
+qaytaradi. Klient hozircha o'zi liderga ulanishi kerak; avtomatik
+yo'naltirish uchun Raft manzili va gRPC manzili orasidagi moslik
+kerak.
+
 ### 3.4 Public IPv6 taqsimlash protokoli
 
 **gRPC servis (`proto/cc01/v1/ipam.proto`):**
@@ -1546,7 +1605,7 @@ Faza 0 dan farqli — bu yerda haqiqiy overlay boshlanadi. Foundation ishlari (T
 | Datapath engine (goroutine'lar, handshake, keepalive, rekey) | Ikki node o'rtasida shifrlangan `ping6` | ✅ `daemon/engine` |
 | Control Plane: register, NetworkMap | Tenant izolyatsiyasi, delta sync | ✅ `control/registry` + `control/server` |
 | `cc01d` CP rejimi | Peerlar qo'lda emas, CP dan avtomatik | ✅ `daemon/control` |
-| Control Plane: Raft KV | 3 replika, leader failover < 5 s | ⏳ `Store` interfeysi tayyor |
+| Control Plane: Raft KV | 3 replika, leader failover < 5 s | ✅ `control/cluster` — o'lchangan 0.9–1.0 s |
 | IPAM: `/128` allocate/renew/release | 1000 node, double-allocation 0 | ✅ `control/ipam` |
 | STUN: public manzilni aniqlash | NAT ortidagi node ikki tomonlama ulanadi | ✅ `daemon/stun` + `control/stunserver` |
 | UDP hole punching (cone NAT) | Ikkala tomon ham relaydan `direct-active` ga o'tadi | ✅ `make punch-demo` |

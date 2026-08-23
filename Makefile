@@ -119,6 +119,10 @@ relay-demo: check-docker ## Ikkita node har biri o'z NAT'i ortida: relay orqali
 punch-demo: check-docker ## NAT teshish (cone): relaydan to'g'ridan-to'g'ri yo'lga o'tish
 	sh daemon/testdata/punch-demo.sh
 
+.PHONY: raft-demo
+raft-demo: check-docker ## Control Plane klasteri: 3 replika, lider failover
+	sh daemon/testdata/raft-demo.sh
+
 .PHONY: punch-sym-demo
 punch-sym-demo: check-docker ## Birthday punching: symmetric NAT ortidagi node bilan to'g'ridan-to'g'ri
 	sh daemon/testdata/punch-sym-demo.sh

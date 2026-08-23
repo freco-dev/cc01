@@ -396,6 +396,129 @@ func (*SweepLeases) Descriptor() ([]byte, []int) {
 	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{4}
 }
 
+// LeaseRecord — snapshot'ga yoziladigan bitta ijara.
+//
+// Buyruqlardan alohida tur: buyruq "nima qilinsin" ni, bu esa
+// "hozir nima bor" ni tasvirlaydi. Ularni birlashtirish snapshot
+// formatini buyruq formatining o'zgarishlariga bog'lab qo'yardi.
+type LeaseRecord struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Id        string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Prefix    string                 `protobuf:"bytes,2,opt,name=prefix,proto3" json:"prefix,omitempty"`
+	Kind      uint32                 `protobuf:"varint,3,opt,name=kind,proto3" json:"kind,omitempty"`
+	State     uint32                 `protobuf:"varint,4,opt,name=state,proto3" json:"state,omitempty"`
+	Owner     string                 `protobuf:"bytes,5,opt,name=owner,proto3" json:"owner,omitempty"`
+	Tenant    string                 `protobuf:"bytes,6,opt,name=tenant,proto3" json:"tenant,omitempty"`
+	Parent    string                 `protobuf:"bytes,7,opt,name=parent,proto3" json:"parent,omitempty"`
+	IssuedAt  *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"`
+	ExpiresAt *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	// ReleasedAt — karantinga tushgan vaqt; faqat karantin holatida
+	// to'ldiriladi.
+	ReleasedAt    *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=released_at,json=releasedAt,proto3" json:"released_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LeaseRecord) Reset() {
+	*x = LeaseRecord{}
+	mi := &file_cc01_v1_ipam_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LeaseRecord) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LeaseRecord) ProtoMessage() {}
+
+func (x *LeaseRecord) ProtoReflect() protoreflect.Message {
+	mi := &file_cc01_v1_ipam_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LeaseRecord.ProtoReflect.Descriptor instead.
+func (*LeaseRecord) Descriptor() ([]byte, []int) {
+	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *LeaseRecord) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *LeaseRecord) GetPrefix() string {
+	if x != nil {
+		return x.Prefix
+	}
+	return ""
+}
+
+func (x *LeaseRecord) GetKind() uint32 {
+	if x != nil {
+		return x.Kind
+	}
+	return 0
+}
+
+func (x *LeaseRecord) GetState() uint32 {
+	if x != nil {
+		return x.State
+	}
+	return 0
+}
+
+func (x *LeaseRecord) GetOwner() string {
+	if x != nil {
+		return x.Owner
+	}
+	return ""
+}
+
+func (x *LeaseRecord) GetTenant() string {
+	if x != nil {
+		return x.Tenant
+	}
+	return ""
+}
+
+func (x *LeaseRecord) GetParent() string {
+	if x != nil {
+		return x.Parent
+	}
+	return ""
+}
+
+func (x *LeaseRecord) GetIssuedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.IssuedAt
+	}
+	return nil
+}
+
+func (x *LeaseRecord) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
+func (x *LeaseRecord) GetReleasedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ReleasedAt
+	}
+	return nil
+}
+
 var File_cc01_v1_ipam_proto protoreflect.FileDescriptor
 
 const file_cc01_v1_ipam_proto_rawDesc = "" +
@@ -425,7 +548,21 @@ const file_cc01_v1_ipam_proto_rawDesc = "" +
 	"ttlSeconds\")\n" +
 	"\fReleaseLease\x12\x19\n" +
 	"\blease_id\x18\x01 \x01(\tR\aleaseId\"\r\n" +
-	"\vSweepLeasesB\x89\x01\n" +
+	"\vSweepLeases\"\xd6\x02\n" +
+	"\vLeaseRecord\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
+	"\x06prefix\x18\x02 \x01(\tR\x06prefix\x12\x12\n" +
+	"\x04kind\x18\x03 \x01(\rR\x04kind\x12\x14\n" +
+	"\x05state\x18\x04 \x01(\rR\x05state\x12\x14\n" +
+	"\x05owner\x18\x05 \x01(\tR\x05owner\x12\x16\n" +
+	"\x06tenant\x18\x06 \x01(\tR\x06tenant\x12\x16\n" +
+	"\x06parent\x18\a \x01(\tR\x06parent\x127\n" +
+	"\tissued_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\bissuedAt\x129\n" +
+	"\n" +
+	"expires_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12;\n" +
+	"\vreleased_at\x18\n" +
+	" \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"releasedAtB\x89\x01\n" +
 	"\vcom.cc01.v1B\tIpamProtoP\x01Z2github.com/freco-dev/cc01/proto/gen/cc01/v1;cc01v1\xa2\x02\x03CXX\xaa\x02\aCc01.V1\xca\x02\aCc01\\V1\xe2\x02\x13Cc01\\V1\\GPBMetadata\xea\x02\bCc01::V1b\x06proto3"
 
 var (
@@ -440,26 +577,30 @@ func file_cc01_v1_ipam_proto_rawDescGZIP() []byte {
 	return file_cc01_v1_ipam_proto_rawDescData
 }
 
-var file_cc01_v1_ipam_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_cc01_v1_ipam_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_cc01_v1_ipam_proto_goTypes = []any{
 	(*LeaseCommand)(nil),          // 0: cc01.v1.LeaseCommand
 	(*AllocateLease)(nil),         // 1: cc01.v1.AllocateLease
 	(*RenewLease)(nil),            // 2: cc01.v1.RenewLease
 	(*ReleaseLease)(nil),          // 3: cc01.v1.ReleaseLease
 	(*SweepLeases)(nil),           // 4: cc01.v1.SweepLeases
-	(*timestamppb.Timestamp)(nil), // 5: google.protobuf.Timestamp
+	(*LeaseRecord)(nil),           // 5: cc01.v1.LeaseRecord
+	(*timestamppb.Timestamp)(nil), // 6: google.protobuf.Timestamp
 }
 var file_cc01_v1_ipam_proto_depIdxs = []int32{
-	5, // 0: cc01.v1.LeaseCommand.now:type_name -> google.protobuf.Timestamp
+	6, // 0: cc01.v1.LeaseCommand.now:type_name -> google.protobuf.Timestamp
 	1, // 1: cc01.v1.LeaseCommand.allocate:type_name -> cc01.v1.AllocateLease
 	2, // 2: cc01.v1.LeaseCommand.renew:type_name -> cc01.v1.RenewLease
 	3, // 3: cc01.v1.LeaseCommand.release:type_name -> cc01.v1.ReleaseLease
 	4, // 4: cc01.v1.LeaseCommand.sweep:type_name -> cc01.v1.SweepLeases
-	5, // [5:5] is the sub-list for method output_type
-	5, // [5:5] is the sub-list for method input_type
-	5, // [5:5] is the sub-list for extension type_name
-	5, // [5:5] is the sub-list for extension extendee
-	0, // [0:5] is the sub-list for field type_name
+	6, // 5: cc01.v1.LeaseRecord.issued_at:type_name -> google.protobuf.Timestamp
+	6, // 6: cc01.v1.LeaseRecord.expires_at:type_name -> google.protobuf.Timestamp
+	6, // 7: cc01.v1.LeaseRecord.released_at:type_name -> google.protobuf.Timestamp
+	8, // [8:8] is the sub-list for method output_type
+	8, // [8:8] is the sub-list for method input_type
+	8, // [8:8] is the sub-list for extension type_name
+	8, // [8:8] is the sub-list for extension extendee
+	0, // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_cc01_v1_ipam_proto_init() }
@@ -479,7 +620,7 @@ func file_cc01_v1_ipam_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cc01_v1_ipam_proto_rawDesc), len(file_cc01_v1_ipam_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   5,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
