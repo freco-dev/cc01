@@ -42,8 +42,16 @@ func (e *Engine) runTimers() {
 			// yo'l fon rejimida sinaladi.
 			e.probePeers(now)
 
+			// Ketgan peerlarning holati va soketlari tozalanadi.
+			e.reapOrphans()
+
 			for _, peer := range e.router.Peers() {
 				e.tickPeer(peer, now, lastKeepalive)
+
+				// Oddiy probe'lar uzoq vaqt natija bermasa,
+				// sabab katta ehtimol symmetric NAT — teshik
+				// ochishga o'tamiz.
+				e.maybePunch(peer, now)
 			}
 		}
 	}

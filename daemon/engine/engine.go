@@ -88,6 +88,18 @@ type Engine struct {
 	relayMu     sync.Mutex
 	relayClient *relay.Client
 
+	// sockets — symmetric NAT ortidagi peerlar uchun AJRATILGAN
+	// soketlar. Teshik aynan bitta NAT yozuvi orqali ochiladi va
+	// o'sha yozuv ichki (manzil, port) juftligiga bog'langan,
+	// shuning uchun boshqa soketdan yuborib bo'lmaydi.
+	socketsMu     sync.Mutex
+	sockets       map[noise.PublicKey]*peerSocket
+	socketsClosed bool
+
+	// punches — teshik ochish holati (qachon urinilgan, nechta marta).
+	punchMu sync.Mutex
+	punches map[noise.PublicKey]*punchState
+
 	startOnce sync.Once
 	closeOnce sync.Once
 	closeErr  error
@@ -127,6 +139,8 @@ func New(cfg Config) (*Engine, error) {
 		handshakes: make(map[noise.PublicKey]*noise.Handshake),
 		queues:     make(map[noise.PublicKey][][]byte),
 		paths:      make(map[noise.PublicKey]*pathState),
+		sockets:    make(map[noise.PublicKey]*peerSocket),
+		punches:    make(map[noise.PublicKey]*punchState),
 		closed:     make(chan struct{}),
 	}
 
@@ -195,6 +209,7 @@ func (e *Engine) Close() error {
 		close(e.closed)
 
 		e.closeErr = errors.Join(
+			e.closeSockets(),
 			e.bind.Close(),
 			e.device.Close(),
 		)
@@ -222,5 +237,5 @@ func (e *Engine) send(peer *router.Peer, payload []byte) error {
 	if !ok {
 		return fmt.Errorf("engine: %s uchun endpoint yo'q", peer.PublicKey)
 	}
-	return e.bind.Send(payload, endpoint)
+	return e.bindFor(peer.PublicKey).Send(payload, endpoint)
 }

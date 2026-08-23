@@ -103,7 +103,9 @@ func (e *Engine) sendVia(peer *router.Peer, payload []byte) error {
 		return e.sendViaRelay(peer, payload)
 	}
 
-	return e.bind.Send(payload, endpoint)
+	// Peer uchun ajratilgan soket bo'lsa — AYNAN u. Yo'l o'sha
+	// soketning NAT yozuvi orqali ochilgan.
+	return e.bindFor(peer.PublicKey).Send(payload, endpoint)
 }
 
 // sendViaRelay paketni relay orqali uzatadi.

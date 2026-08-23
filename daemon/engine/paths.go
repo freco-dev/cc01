@@ -63,10 +63,57 @@ func (e *Engine) pathFor(peer *router.Peer) *pathState {
 }
 
 // forgetPath peer o'chirilganda holatni tozalaydi.
+//
+// Yo'l holati bilan birga peerga ajratilgan soket ham yopiladi va
+// teshik ochish tarixi unutiladi: peer qaytib kelsa, u boshqa NAT
+// yozuvi bilan keladi va eskisi yaroqsiz.
 func (e *Engine) forgetPath(key noise.PublicKey) {
 	e.pathsMu.Lock()
-	defer e.pathsMu.Unlock()
 	delete(e.paths, key)
+	e.pathsMu.Unlock()
+
+	e.releaseSocket(key)
+	e.forgetPunch(key)
+}
+
+// reapOrphans routerdan ketgan peerlarning holatini tozalaydi.
+//
+// Peerlarni Control Plane olib tashlaydi va u buni to'g'ridan-to'g'ri
+// router orqali qiladi — engine bu haqda xabar olmaydi. Kuzatuvchi
+// sifatida ro'yxatdan o'tish o'rniga davriy solishtirish tanlandi: u
+// peer qaysi yo'l bilan ketganidan qat'i nazar ishlaydi.
+//
+// Bu shunchaki tartib masalasi emas: har bir ajratilgan soket ochiq
+// fayl deskriptori va o'z goroutine'i, ya'ni tozalanmasa ular
+// to'planib boraveradi.
+func (e *Engine) reapOrphans() {
+	alive := make(map[noise.PublicKey]struct{})
+	for _, peer := range e.router.Peers() {
+		alive[peer.PublicKey] = struct{}{}
+	}
+
+	e.pathsMu.Lock()
+	var gone []noise.PublicKey
+	for key := range e.paths {
+		if _, ok := alive[key]; !ok {
+			gone = append(gone, key)
+		}
+	}
+	e.pathsMu.Unlock()
+
+	// Ajratilgan soket bo'lsa-yu, yo'l holati bo'lmasa ham tozalaymiz.
+	e.socketsMu.Lock()
+	for key := range e.sockets {
+		if _, ok := alive[key]; !ok {
+			gone = append(gone, key)
+		}
+	}
+	e.socketsMu.Unlock()
+
+	for _, key := range gone {
+		e.log.Debug("peer ketdi, holati tozalanmoqda", "peer", key)
+		e.forgetPath(key)
+	}
 }
 
 func (e *Engine) relayEndpoint() (netipAddrPort, bool) {

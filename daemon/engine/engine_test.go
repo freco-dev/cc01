@@ -664,3 +664,148 @@ func TestEngine_PongReturnsToProbeSource(t *testing.T) {
 		t.Fatalf("paket turi %v, disco kutilgan edi", header.Type)
 	}
 }
+
+// Peer ketganda uning yo'l holati va ajratilgan soketi tozalanishi
+// kerak.
+//
+// Peerlarni Control Plane router orqali olib tashlaydi va engine bu
+// haqda xabar olmaydi — shuning uchun u davriy solishtiradi. Har bir
+// ajratilgan soket ochiq deskriptor va goroutine, ya'ni tozalanmasa
+// ular to'planib boraveradi.
+func TestEngine_ReapsStateOfDepartedPeers(t *testing.T) {
+	alice := newNode(t, "2a0e:1234:1::/64")
+	bob := newNode(t, "2a0e:1234:2::/64")
+	link(t, alice, bob)
+
+	alice.device.inject(ipv6Packet("2a0e:1234:1::1", "2a0e:1234:2::1", 'x'))
+	expectPacket(t, bob, 5*time.Second)
+
+	key := bob.identity.PublicKey()
+
+	// Yo'l holati paydo bo'lsin.
+	if _, _, ok := alice.engine.PathState(key); !ok {
+		t.Fatal("yo'l holati yaratilmagan")
+	}
+
+	// Peerga ajratilgan soket ham qo'shamiz — u ham yopilishi kerak.
+	extra, err := conn.Open(0)
+	if err != nil {
+		t.Fatalf("soket: %v", err)
+	}
+	alice.engine.adoptSocket(key, extra)
+
+	if alice.engine.bindFor(key) != extra {
+		t.Fatal("ajratilgan soket ishlatilmayapti")
+	}
+
+	alice.engine.Router().RemovePeer(key)
+
+	deadline := time.After(5 * time.Second)
+	for {
+		_, _, ok := alice.engine.PathState(key)
+		if !ok && alice.engine.bindFor(key) == alice.bind {
+			return // holat tozalandi
+		}
+
+		select {
+		case <-deadline:
+			t.Fatal("ketgan peerning holati tozalanmadi")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+// Ajratilgan soket bo'lmasa asosiy soket ishlatiladi.
+func TestEngine_FallsBackToMainSocket(t *testing.T) {
+	alice := newNode(t, "2a0e:1234:1::/64")
+	bob := newNode(t, "2a0e:1234:2::/64")
+	link(t, alice, bob)
+
+	if got := alice.engine.bindFor(bob.identity.PublicKey()); got != alice.bind {
+		t.Errorf("asosiy soket kutilgan edi, olindi: %v", got)
+	}
+}
+
+// Engine yopilganda ajratilgan soketlar ham yopilishi kerak.
+func TestEngine_CloseReleasesPeerSockets(t *testing.T) {
+	alice := newNode(t, "2a0e:1234:1::/64")
+	bob := newNode(t, "2a0e:1234:2::/64")
+	link(t, alice, bob)
+
+	extra, err := conn.Open(0)
+	if err != nil {
+		t.Fatalf("soket: %v", err)
+	}
+	alice.engine.adoptSocket(bob.identity.PublicKey(), extra)
+
+	if err := alice.engine.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Yopilgan soketga yozish xato berishi kerak.
+	err = extra.Send([]byte("x"), netip.AddrPortFrom(netip.IPv6Loopback(), 9))
+	if err == nil {
+		t.Error("ajratilgan soket ochiq qoldi")
+	}
+}
+
+// Teshik ochish urinishlari orasidagi tanaffus eksponensial o'sishi
+// kerak: birinchi takrorlashlar tez (bir bosqichning ehtimoli ~87%,
+// ya'ni ikki-uch urinishda natija bo'ladi), keyin esa tarmoqni
+// behuda yuklamaslik uchun siyraklashadi.
+func TestCooldownFor_GrowsThenCaps(t *testing.T) {
+	cases := []struct {
+		attempts int
+		want     time.Duration
+	}{
+		{1, 5 * time.Second},
+		{2, 10 * time.Second},
+		{3, 20 * time.Second},
+		{4, 40 * time.Second},
+		{5, 80 * time.Second},
+		{20, punchCooldownMax},
+		{1000, punchCooldownMax},
+	}
+
+	for _, tc := range cases {
+		if got := cooldownFor(tc.attempts); got != tc.want {
+			t.Errorf("cooldownFor(%d) = %v, kutilgan %v", tc.attempts, got, tc.want)
+		}
+	}
+}
+
+// Birinchi urinish darhol bo'lishi kerak — tanaffus faqat
+// muvaffaqiyatsizlikdan KEYIN qo'llaniladi.
+func TestCooldownFor_NeverZero(t *testing.T) {
+	for attempts := range 10 {
+		if got := cooldownFor(attempts); got < punchCooldownMin {
+			t.Errorf("cooldownFor(%d) = %v, minimumdan kichik", attempts, got)
+		}
+	}
+}
+
+// Yopilgandan keyin kelgan g'olib soket qabul qilinmasligi va
+// yopilishi kerak — aks holda uni hech kim yopmasdi.
+//
+// Teshik ochish bosqichi engine yopilishi bilan bir vaqtda tugashi
+// mumkin, ya'ni bu holat tasodifiy emas.
+func TestEngine_RejectsSocketAfterClose(t *testing.T) {
+	alice := newNode(t, "2a0e:1234:1::/64")
+	bob := newNode(t, "2a0e:1234:2::/64")
+	link(t, alice, bob)
+
+	if err := alice.engine.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	late, err := conn.Open(0)
+	if err != nil {
+		t.Fatalf("soket: %v", err)
+	}
+
+	alice.engine.adoptSocket(bob.identity.PublicKey(), late)
+
+	if err := late.Send([]byte("x"), netip.AddrPortFrom(netip.IPv6Loopback(), 9)); err == nil {
+		t.Error("kech kelgan soket ochiq qoldi")
+	}
+}

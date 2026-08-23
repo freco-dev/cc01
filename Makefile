@@ -116,8 +116,12 @@ relay-demo: check-docker ## Ikkita node har biri o'z NAT'i ortida: relay orqali
 	sh daemon/testdata/relay-demo.sh
 
 .PHONY: punch-demo
-punch-demo: check-docker ## NAT teshish: relaydan boshlab to'g'ridan-to'g'ri yo'lga o'tish
+punch-demo: check-docker ## NAT teshish (cone): relaydan to'g'ridan-to'g'ri yo'lga o'tish
 	sh daemon/testdata/punch-demo.sh
+
+.PHONY: punch-sym-demo
+punch-sym-demo: check-docker ## Birthday punching: symmetric NAT ortidagi node bilan to'g'ridan-to'g'ri
+	sh daemon/testdata/punch-sym-demo.sh
 
 # ── Paketlar (deb/rpm) ────────────────────────────────────────────────────
 # Binarlar konteynerda quriladi: host macOS bo'lishi mumkin, paketga

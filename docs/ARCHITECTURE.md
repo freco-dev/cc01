@@ -120,7 +120,7 @@ Bu hujjat **maqsadli** arxitekturani tasvirlaydi. Repozitoriyda hozir mavjud kod
 | Mesh VPN — yo'l tanlash (§6.2) | `daemon/path/` — holat mashinasi, disco ping/pong, gisterezis | ✅ relay-first, P2P-upgrade |
 | Mesh VPN — CP kanali (§5.1.1) | TLS 1.3 + SPKI pinning; mTLS hali yo'q | ✅ noto'g'ri pin ulanishni to'xtatadi |
 | Mesh VPN — hole punching (cone NAT) | `daemon/engine` — disco pong AYNAN ping kelgan yo'l bilan qaytadi | ✅ `make punch-demo` |
-| Mesh VPN — hole punching (symmetric NAT) | — | Hali yo'q: port bashorati / birthday punching |
+| Mesh VPN — hole punching (symmetric NAT) | `daemon/punch` — birthday paradoks, peerga xos soket | ✅ symmetric↔cone; symmetric↔symmetric imkonsiz |
 | Mesh VPN — to'liq ICE nomzod to'plami | — | Hali yo'q (`host`/`srflx` bor, `prflx` yo'q) |
 | eBPF/XDP pipeline | — | Butunlay yo'q |
 | Public IPv6 / BGP / TasIX PoP | — | Butunlay yo'q |
@@ -319,7 +319,37 @@ Prefiks **anchor** PoP bilan bog'lanadi: `tas1` PoP shu `/48`ni BGP orqali e'lon
 - **ICE candidate exchange** — CP'dagi gRPC stream orqali (SDP emas, o'zimizning kompakt protobuf).
 - **Endpoint discovery:** klient o'z nomzodlarini yig'adi: `host` (LAN IP), `srflx` (STUN orqali topilgan public), `relay` (TURN/DERP), `overlay` (mavjud IPv6 GUA).
 - **NAT type detection:** Full Cone / Restricted / Port-Restricted / Symmetric — birlashtirilgan STUN testlari orqali; natija cache'lanadi (10 min).
-- **Birthday-paradox punching:** symmetric NAT'da 256 ta portga parallel probe (~50% muvaffaqiyat), muvaffaqiyatsiz bo'lsa relay. ⏳ hali qurilmagan.
+- **Birthday-paradox punching:** ✅ `daemon/punch` — `make punch-sym-demo`.
+
+  Ikkita yarim, ikkalasi ham kerak. **Sepish:** N ta *vaqtinchalik*
+  soketdan peerning ma'lum manziliga yoziladi — har biri NAT'da alohida
+  yozuv ochadi. **Taxmin:** peerning IP'sida K ta tasodifiy portga
+  *asosiy* soketdan yoziladi.
+
+  ⚠️ Taxminlar aynan **asosiy** soketdan chiqishi shart. Peerning yozuvi
+  u bizga qaysi manzilga yozgan bo'lsa faqat o'shandan paket qabul
+  qiladi — bu esa STUN e'lon qilgan manzilimiz. Vaqtinchalik soketdan
+  yuborilgan taxmin boshqa tashqi portdan chiqadi va baribir rad
+  etiladi.
+
+  Bir bosqichning ehtimoli `1-exp(-N·K/64511)`; N=256, K=512 da ~87%.
+  Muvaffaqiyatsizlikdan keyingi tanaffus eksponensial o'sadi
+  (5 s → 5 min), chunki relay allaqachon ishlab turibdi.
+
+  G'olib soket peer bilan aloqani davom ettiradi: yo'l aynan o'sha NAT
+  yozuvi orqali ochilgan va boshqa soketdan yuborilgan paket boshqa
+  tashqi portdan chiqib rad etilardi. Shuning uchun engine peerga xos
+  soketni saqlaydi.
+
+| NAT juftligi | Natija |
+| --- | --- |
+| cone ↔ cone | oddiy teshik ochish — `make punch-demo` |
+| symmetric ↔ cone | birthday punching — `make punch-sym-demo` |
+| symmetric ↔ symmetric | **imkonsiz**, relay — `make relay-demo` |
+
+Oxirgi qator nega imkonsiz: taxmin qiluvchining o'z tashqi porti ham
+har oqimda o'zgaradi, ya'ni peerning yozuvi (u faqat bizning ma'lum
+manzilimizdan qabul qiladi) uni baribir rad etadi.
 
 **Teshik ochishning amaliy sharti** (`make punch-demo` da o'lchangan): disco
 **pong AYNAN ping kelgan manzilga** qaytishi kerak, "eng yaxshi" yo'lga emas.

@@ -69,7 +69,7 @@ func (e *Engine) sendProbe(
 
 	state.addPending(nonce, kind, e.now())
 
-	if err := e.bind.Send(packet, endpoint); err != nil {
+	if err := e.bindFor(peer.PublicKey).Send(packet, endpoint); err != nil {
 		e.log.Debug("probe yuborilmadi", "peer", peer.PublicKey, "err", err)
 	}
 }
@@ -107,7 +107,7 @@ func (e *Engine) handleDisco(
 		// relay orqali kelgan pong to'g'ridan-to'g'ri probe'ni
 		// tasdiqlamaydi va yo'l abadiy `probing` holatida qolardi.
 		if from.IsValid() {
-			if err := e.bind.Send(pong, from); err != nil {
+			if err := e.bindFor(peer.PublicKey).Send(pong, from); err != nil {
 				e.log.Debug("pong yuborilmadi", "peer", peer.PublicKey, "to", from, "err", err)
 			}
 			return
