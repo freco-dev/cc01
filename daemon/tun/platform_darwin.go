@@ -61,3 +61,26 @@ func run(name string, args ...string) error {
 	}
 	return errors.New(message)
 }
+
+// macOS'da ajratilgan routing jadvali yo'q — `netstat` chiqishini
+// parse qilib "bizniki" marshrutlarni ajratib bo'lmaydi. Shuning uchun
+// rekonsiliatsiya o'zi qo'ygan ro'yxatga tayanadi.
+func listRoutes(string) ([]netipPrefix, error) {
+	return nil, ErrRoutesNotEnumerable
+}
+
+func addRouteFor(name string, prefix netipPrefix) error {
+	if err := run("route", "-q", "-n", "add", "-inet6",
+		prefix.String(), "-interface", name); err != nil {
+		return fmt.Errorf("tun: marshrut qo'shish (%v): %w", prefix, err)
+	}
+	return nil
+}
+
+func delRouteFor(name string, prefix netipPrefix) error {
+	if err := run("route", "-q", "-n", "delete", "-inet6",
+		prefix.String(), "-interface", name); err != nil {
+		return fmt.Errorf("tun: marshrut o'chirish (%v): %w", prefix, err)
+	}
+	return nil
+}

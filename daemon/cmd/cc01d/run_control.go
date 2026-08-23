@@ -7,11 +7,13 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/freco-dev/cc01/daemon/conn"
 	"github.com/freco-dev/cc01/daemon/control"
 	"github.com/freco-dev/cc01/daemon/engine"
+	"github.com/freco-dev/cc01/daemon/route"
 	"github.com/freco-dev/cc01/daemon/tun"
 )
 
@@ -78,15 +80,26 @@ func runWithControlPlane(cfg controlConfig, logger *slog.Logger) error {
 	// yaratilmagan — shuning uchun uni keyinroq ulaymiz.
 	relayLink := newRelayLink(identity, bind, logger)
 
+	// Marshrut rekonsilyatori TUN yaratilgandan keyin tug'iladi, lekin
+	// unga turtki beruvchi NetworkMap oqimi undan oldin ulanadi.
+	// Halqani atomik ko'rsatkich bilan uzamiz.
+	var routes atomic.Pointer[route.Reconciler]
+	pokeRoutes := func() {
+		if r := routes.Load(); r != nil {
+			r.Poke()
+		}
+	}
+
 	client, err := control.Dial(control.Config{
-		Address:   cfg.controlAddr,
-		Identity:  identity,
-		Tenant:    cfg.tenant,
-		Hostname:  cfg.hostname,
-		Endpoints: endpoints,
-		AuthToken: cfg.authToken,
-		OnRelays:  relayLink.update,
-		Logger:    logger,
+		Address:      cfg.controlAddr,
+		Identity:     identity,
+		Tenant:       cfg.tenant,
+		Hostname:     cfg.hostname,
+		Endpoints:    endpoints,
+		AuthToken:    cfg.authToken,
+		OnRelays:     relayLink.update,
+		OnNetworkMap: pokeRoutes,
+		Logger:       logger,
 	})
 	if err != nil {
 		_ = bind.Close()
@@ -131,10 +144,27 @@ func runWithControlPlane(cfg controlConfig, logger *slog.Logger) error {
 	relayLink.attach(datapath)
 	datapath.Start()
 
+	// Marshrutlar endi peerlar ro'yxatidan kelib chiqadi. Tenant /64
+	// har doim turadi — busiz hali kelmagan peerga yuborilgan paket
+	// overlay'ga umuman tushmaydi.
+	reconciler := route.New(route.Config{
+		Base:   []netip.Prefix{registration.TenantCIDR},
+		Peers:  datapath.Router(),
+		Sink:   device,
+		Logger: logger,
+	})
+	routes.Store(reconciler)
+
+	routesDone := make(chan struct{})
+	go func() {
+		defer close(routesDone)
+		reconciler.Run(ctx)
+	}()
+
 	// IPC — `cc01 status` va `cc01 peer list` uchun. Xato bo'lsa
 	// demon ishlashda davom etadi: kuzatuv interfeysi yo'qligi
 	// mesh'ni to'xtatish uchun sabab emas.
-	ipcServer, err := startIPC(cfg, datapath, registration, endpoints, relayLink, logger)
+	ipcServer, err := startIPC(cfg, datapath, registration, endpoints, relayLink, reconciler, logger)
 	if err != nil {
 		logger.Warn("IPC ochilmadi, `cc01 status` ishlamaydi", "err", err)
 	} else {
@@ -163,6 +193,7 @@ func runWithControlPlane(cfg controlConfig, logger *slog.Logger) error {
 	logger.Info("to'xtatilmoqda")
 	cancel()
 	<-streamDone
+	<-routesDone
 	relayLink.close()
 
 	return datapath.Close()

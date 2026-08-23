@@ -31,6 +31,10 @@ func (c *Client) apply(netmap *cc01v1.WatchNetworkMapResponse) {
 	c.log.Debug("NetworkMap qo'llandi",
 		"version", netmap.GetVersion(), "full", netmap.GetFull(),
 		"peers", len(netmap.GetPeers()), "removed", len(netmap.GetRemoved()))
+
+	if c.cfg.OnNetworkMap != nil {
+		c.cfg.OnNetworkMap()
+	}
 }
 
 // reconcile to'liq mapni qo'llaydi: mapda yo'q peerlar olib tashlanadi.

@@ -345,7 +345,7 @@ func TestDoctor_ReportsChecksWithRemediation(t *testing.T) {
 }
 
 func TestRunChecks_AlwaysReturnsChecks(t *testing.T) {
-	checks := RunChecks()
+	checks := RunChecks(nil)
 
 	if len(checks) < 3 {
 		t.Errorf("kamida 3 ta tekshiruv kutilgan, %d olindi", len(checks))

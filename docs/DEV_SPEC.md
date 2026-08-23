@@ -415,22 +415,40 @@ ip -6 route add ::/0 dev cc0 table 51820
 #    fwmark 0xca01 → cc01d o'zi yuborayotgan paketlar (recursion oldini olish)
 ```
 
-**Reconciliation loop (deklarativ, imperativ emas):**
+**Reconciliation loop (deklarativ, imperativ emas)** — ✅ `daemon/route`:
 
 ```
-every 3s OR on NetworkMap change:
-    desired = build_routes(networkmap)      // set[Route]
-    actual  = netlink.RouteList(table=51820)
+on NetworkMap change (turtki)  OR  every 30s (zaxira):
+    desired = tenant_cidr + { peer.allowed_ips | base qamramagan }
+    actual  = netlink.RouteList(table=51820, oif=cc0, proto=static)
 
-    for r in desired - actual:  netlink.RouteAdd(r)     // yetishmayotganini qo'shish
-    for r in actual  - desired: netlink.RouteDel(r)     // ortiqchasini o'chirish
-    // ⚠️ Faqat proto=static va table=51820 bo'lgan marshrutlarga tegiladi.
-    //    Foydalanuvchi marshrutlariga HECH QACHON tegilmaydi.
+    for r in desired - actual:  netlink.RouteAdd(r)     // AVVAL qo'shish
+    for r in actual  - desired: netlink.RouteDel(r)     // KEYIN o'chirish
 
-on shutdown / panic:
-    cleanup_all(table=51820); ip rule del priority 5210,5211
-    // + systemd ExecStopPost hook, orphan holatlar uchun
+on Close():
+    cleanup_all(table=51820, proto=static); ip rule del priority 5210,5211
 ```
+
+Uchta qaror hujjatning dastlabki eskizidan farq qiladi:
+
+**Davriylik 3 s emas, 30 s.** Haqiqiy signal — NetworkMap o'zgarishi, va u
+turtki (`Poke`) bilan darhol keladi. Taymer faqat zaxira: yadro holati
+bizdan so'ramasdan o'zgargan holatlar uchun. 3 soniyalik netlink so'rovi
+hech narsa qo'shmaydi.
+
+**Tenant `/64` ichidagi peer `/128` lariga alohida marshrut yozilmaydi.**
+Ular bazaviy prefiks bilan allaqachon qamralgan; har bir peer uchun yozuv
+qo'shish jadvalni node soniga chiziqli o'stiradi va birorta marshrutlash
+qarorini o'zgartirmaydi. `cp-demo` da uch node bo'lsa ham jadvalda bitta
+yozuv turadi.
+
+**Qo'shish o'chirishdan oldin.** Teskari tartibda marshrut almashtirilayotgan
+paytda trafik uchun marshrutsiz oyna ochiladi.
+
+⚠️ **Uchta filtr ham majburiy.** `proto=static` bo'lmasa, ajratilgan jadvalga
+qo'lda qo'shilgan marshrut "ortiqcha" ko'rinadi va o'chib ketadi — `ip route
+add` sukut bo'yicha `RTPROT_BOOT` qo'yadi, biz `RTPROT_STATIC` yozamiz. Buni
+`TestSetRoutes_LeavesForeignRoutesAlone` qo'riqlaydi.
 
 **Konflikt aniqlash:** agar tenant `/64` foydalanuvchining LAN prefiksi bilan kesishsa (kam ehtimol IPv6'da, lekin ULA'da mumkin) — daemon `WARN` chiqaradi va marshrutni qo'shmaydi; `cc01 status` konfliktni ko'rsatadi.
 
@@ -1430,7 +1448,7 @@ Faza 0 dan farqli — bu yerda haqiqiy overlay boshlanadi. Foundation ishlari (T
 | UDP hole punching (symmetric NAT) | Birthday-paradox punching | ⏳ |
 | Relay servisi + fallback | Symmetric NAT'da ulanish; relay yukni ocha olmaydi | ✅ `make relay-demo` |
 | Yo'l tanlash + avtomatik fallback | Relay-first, P2P-upgrade; degradatsiyada relayga qaytish | ✅ `daemon/path` |
-| Marshrut sinxronizatsiyasi (reconciliation) | `cc01 down` keyin 0 orphan marshrut | ⏳ |
+| Marshrut sinxronizatsiyasi (reconciliation) | Peer ketganda marshruti ham ketadi; `Close()` dan keyin 0 orphan | ✅ `daemon/route` |
 | CLI ↔ demon IPC (UNIX soket, gRPC) | `SO_PEERCRED`, `0660`, exit kodlari §5.2 | ✅ `daemon/ipc` |
 | CLI: `status`, `peer list`, `doctor` | Ishlab turgan mesh'da yo'l holati ko'rinadi | ✅ `make cp-demo` |
 | CLI: `up`, `down` (demon hayot sikli) | UX review o'tgan | ⏳ |

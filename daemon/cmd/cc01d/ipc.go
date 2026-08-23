@@ -16,6 +16,7 @@ func startIPC(
 	registration *control.Registration,
 	endpoints []netip.AddrPort,
 	relays *relayLink,
+	routes ipc.RouteStatus,
 	logger *slog.Logger,
 ) (*ipc.Server, error) {
 	advertised := make([]string, 0, len(endpoints))
@@ -32,6 +33,7 @@ func startIPC(
 		Endpoints:    advertised,
 		Version:      version,
 		RelayID:      relays.activeID,
+		Routes:       routes,
 	})
 
 	server, err := ipc.Listen(cfg.socketPath, service, logger)

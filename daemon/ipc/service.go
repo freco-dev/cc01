@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"net/netip"
 	"time"
 
 	"github.com/freco-dev/cc01/daemon/engine"
@@ -23,6 +24,16 @@ type Info struct {
 
 	// RelayID — ulangan relay; bo'sh bo'lsa relay yo'q.
 	RelayID func() string
+
+	// Routes — marshrut rekonsiliatsiyasining holati. nil bo'lsa
+	// (statik rejim) `cc01 doctor` bu tekshiruvni o'tkazib yuboradi.
+	Routes RouteStatus
+}
+
+// RouteStatus — `route.Reconciler` shu interfeysni qanoatlantiradi.
+type RouteStatus interface {
+	Synced() bool
+	Last() []netip.Prefix
 }
 
 // Service — DaemonService implementatsiyasi.
@@ -91,7 +102,7 @@ func (s *Service) Peers(_ context.Context, req *cc01v1.PeersRequest) (*cc01v1.Pe
 }
 
 func (s *Service) Doctor(context.Context, *cc01v1.DoctorRequest) (*cc01v1.DoctorResponse, error) {
-	checks := RunChecks()
+	checks := RunChecks(s.info.Routes)
 
 	out := &cc01v1.DoctorResponse{
 		Checks:  make([]*cc01v1.Check, 0, len(checks)),

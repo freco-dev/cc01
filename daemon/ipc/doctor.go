@@ -14,13 +14,35 @@ import (
 // Har bir muvaffaqiyatsiz tekshiruv `remediation` bilan keladi:
 // foydalanuvchi "nima qilishim kerak" degan savolga javobni shu
 // yerdan olishi kerak, hujjatlarni qidirmasdan.
-func RunChecks() []*cc01v1.Check {
-	return []*cc01v1.Check{
+func RunChecks(routes RouteStatus) []*cc01v1.Check {
+	checks := []*cc01v1.Check{
 		checkPlatform(),
 		checkTunDevice(),
 		checkPrivileges(),
 		checkMTU(),
 	}
+
+	// Statik rejimda rekonsilyator yo'q — bo'lmagan narsa haqida
+	// "hammasi joyida" deb yozgandan ko'ra, umuman yozmagan yaxshi.
+	if routes != nil {
+		checks = append(checks, checkRoutes(routes))
+	}
+	return checks
+}
+
+func checkRoutes(routes RouteStatus) *cc01v1.Check {
+	count := len(routes.Last())
+
+	if !routes.Synced() {
+		return fail("marshrutlar",
+			fmt.Sprintf("oxirgi moslashtirish muvaffaqiyatsiz (%d ta kutilgan)", count),
+			"demon loglarini ko'ring: journalctl -u cc01d\n"+
+				"yadro jadvalini tekshiring: ip -6 route show table "+
+				fmt.Sprint(tun.RouteTable))
+	}
+
+	return ok("marshrutlar",
+		fmt.Sprintf("%d ta, %d-jadval bilan mos", count, tun.RouteTable))
 }
 
 func checkPlatform() *cc01v1.Check {

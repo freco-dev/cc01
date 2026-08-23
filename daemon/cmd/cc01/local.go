@@ -10,5 +10,5 @@ import (
 // `doctor` ning butun ma'nosi shu: demon ishlamayotganda ham u NIMA
 // UCHUN ishlamayotganini aytishi kerak.
 func localChecks() []*cc01v1.Check {
-	return ipc.RunChecks()
+	return ipc.RunChecks(nil)
 }

@@ -47,6 +47,13 @@ type Config struct {
 	// ro'yxat yuqoriga uzatiladi.
 	OnRelays func([]RelayInfo)
 
+	// OnNetworkMap har bir qo'llangan NetworkMap dan KEYIN chaqiriladi.
+	//
+	// Peerlar o'zgardi degani marshrutlar ham o'zgargan bo'lishi
+	// mumkin. Chaqiruv NetworkMap oqimi ichida bajariladi, shuning
+	// uchun u bloklanmasligi shart.
+	OnNetworkMap func()
+
 	Logger *slog.Logger
 }
 

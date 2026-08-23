@@ -82,3 +82,7 @@ $DOCKER exec cc01-n1 cc01 peer list
 echo
 echo "═══ cc01 doctor (node-1) ═══"
 $DOCKER exec cc01-n1 cc01 doctor
+
+echo
+echo "═══ marshrut jadvali 51820 (node-1) ═══"
+$DOCKER exec cc01-n1 ip -6 route show table 51820
