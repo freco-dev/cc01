@@ -6,7 +6,7 @@
 #
 # Demo nimani ko'rsatadi:
 #   1. Uchta cc01-cp ko'tariladi va bitta lider tanlaydi
-#   2. Node lidergа ulanib manzil oladi — ijara jurnalga yoziladi
+#   2. Node liderga ulanib manzil oladi — ijara jurnalga yoziladi
 #   3. Lider o'ldiriladi
 #   4. Yangi lider tanlanadi va o'sha ijara unda TURIBDI
 #   5. Kvorum yo'qolganda (yana bittasi o'lsa) yozuv rad etiladi
