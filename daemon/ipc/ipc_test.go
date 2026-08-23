@@ -9,14 +9,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/freco-dev/cc01/daemon/conn"
 	"github.com/freco-dev/cc01/daemon/engine"
 	"github.com/freco-dev/cc01/daemon/noise"
+	"github.com/freco-dev/cc01/daemon/route"
+	"github.com/freco-dev/cc01/daemon/session"
 	"github.com/freco-dev/cc01/daemon/tun"
 	cc01v1 "github.com/freco-dev/cc01/proto/gen/cc01/v1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // fakeDevice — TUN o'rniga; IPC testlariga haqiqiy qurilma kerak emas.
@@ -51,6 +56,85 @@ func (d *fakeDevice) Close() error {
 	return nil
 }
 
+// fakeBackend — haqiqiy sessiya o'rniga: uni ko'tarish uchun CP,
+// TUN va root kerak bo'lardi.
+type fakeBackend struct {
+	engine *engine.Engine
+
+	mu      sync.Mutex
+	up      bool
+	upErr   error
+	downErr error
+	ups     int
+	downs   int
+}
+
+func (b *fakeBackend) Status() (session.Status, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if !b.up {
+		return session.Status{}, false
+	}
+
+	status := session.Status{
+		NodeID:       "node-abc123",
+		Hostname:     "laptop",
+		Tenant:       "t1",
+		Address:      "fd00:cc01::1/128",
+		ControlPlane: "cp.example:8443",
+		RelayID:      "relay-1",
+		Endpoints:    []string{"203.0.113.7:51820"},
+		Routes:       route.Status{Synced: true, Count: 1},
+		Since:        time.Now().Add(-time.Minute),
+	}
+
+	// Hayot sikli testlariga datapath kerak emas — ular faqat
+	// ko'tarilgan/tushirilgan holatni tekshiradi.
+	if b.engine != nil {
+		status.PublicKey = b.engine.PublicKey()
+		status.Interface = b.engine.InterfaceName()
+		status.ListenPort = b.engine.ListenPort()
+	}
+
+	return status, true
+}
+
+func (b *fakeBackend) Peers() []engine.PeerSnapshot {
+	b.mu.Lock()
+	up := b.up
+	b.mu.Unlock()
+
+	if !up || b.engine == nil {
+		return nil
+	}
+	return b.engine.Snapshot()
+}
+
+func (b *fakeBackend) Up(context.Context) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.ups++
+	if b.upErr != nil {
+		return b.upErr
+	}
+	b.up = true
+	return nil
+}
+
+func (b *fakeBackend) Down() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.downs++
+	if b.downErr != nil {
+		return b.downErr
+	}
+	b.up = false
+	return nil
+}
+
 func startDaemon(t *testing.T) (cc01v1.DaemonServiceClient, *engine.Engine) {
 	t.Helper()
 
@@ -75,16 +159,7 @@ func startDaemon(t *testing.T) (cc01v1.DaemonServiceClient, *engine.Engine) {
 	}
 	datapath.Start()
 
-	service := NewService(datapath, Info{
-		NodeID:       "node-abc123",
-		Hostname:     "laptop",
-		Tenant:       "t1",
-		Address:      "fd00:cc01::1/128",
-		ControlPlane: "cp.example:8443",
-		Endpoints:    []string{"203.0.113.7:51820"},
-		Version:      "test",
-		RelayID:      func() string { return "relay-1" },
-	})
+	service := NewService(&fakeBackend{engine: datapath, up: true}, "test")
 
 	socket := shortSocket(t)
 
@@ -392,5 +467,138 @@ func TestListen_RejectsOverlongPath(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "juda uzun") {
 		t.Errorf("sabab ko'rsatilishi kerak, olindi: %v", err)
+	}
+}
+
+// startWithBackend testga backend ustidan nazorat beradi.
+func startWithBackend(t *testing.T, backend *fakeBackend) cc01v1.DaemonServiceClient {
+	t.Helper()
+
+	socket := shortSocket(t)
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	server, err := Listen(socket, NewService(backend, "test"), quiet)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	go server.Serve()
+
+	conn, err := Dial(socket)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+
+	t.Cleanup(func() {
+		_ = conn.Close()
+		_ = server.Close()
+	})
+
+	return cc01v1.NewDaemonServiceClient(conn)
+}
+
+// Tushirilgan mesh ham javob berishi kerak: demon ishlayotgani va
+// ulanmagani — bu ikki xil holat.
+func TestStatus_ReportsDisconnectedWithoutError(t *testing.T) {
+	client := startWithBackend(t, &fakeBackend{up: false})
+
+	response, err := client.Status(context.Background(), &cc01v1.StatusRequest{})
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if response.GetConnected() {
+		t.Error("connected=true, mesh tushirilgan bo'lsa ham")
+	}
+	if response.GetVersion() != "test" {
+		t.Errorf("versiya yo'qolgan: %q", response.GetVersion())
+	}
+}
+
+// Down ikkinchi marta chaqirilsa xato emas — talab bajarilgan.
+func TestDown_IsIdempotent(t *testing.T) {
+	backend := &fakeBackend{up: true}
+	client := startWithBackend(t, backend)
+
+	first, err := client.Down(context.Background(), &cc01v1.DownRequest{})
+	if err != nil {
+		t.Fatalf("birinchi Down: %v", err)
+	}
+	if first.GetAlreadyDown() {
+		t.Error("birinchi Down already_down qaytardi")
+	}
+
+	second, err := client.Down(context.Background(), &cc01v1.DownRequest{})
+	if err != nil {
+		t.Fatalf("ikkinchi Down: %v", err)
+	}
+	if !second.GetAlreadyDown() {
+		t.Error("ikkinchi Down already_down qaytarmadi")
+	}
+
+	// Ikkinchi chaqiruv backend'ga umuman bormasligi kerak.
+	backend.mu.Lock()
+	downs := backend.downs
+	backend.mu.Unlock()
+
+	if downs != 1 {
+		t.Errorf("Down %d marta chaqirildi, 1 kutilgan edi", downs)
+	}
+}
+
+// Up allaqachon ko'tarilgan bo'lsa ALREADY_EXISTS berishi kerak:
+// jimgina e'tiborsiz qoldirish konfiguratsiya farqini yashirardi.
+func TestUp_ReportsAlreadyUp(t *testing.T) {
+	backend := &fakeBackend{up: true, upErr: session.ErrAlreadyUp}
+	client := startWithBackend(t, backend)
+
+	_, err := client.Up(context.Background(), &cc01v1.UpRequest{})
+	if status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("ALREADY_EXISTS kutilgan edi, olindi: %v (%s)", err, status.Code(err))
+	}
+}
+
+// Down dan keyin Up qayta ko'tarishi kerak.
+func TestUpDown_Cycle(t *testing.T) {
+	backend := &fakeBackend{up: true}
+	client := startWithBackend(t, backend)
+
+	if _, err := client.Down(context.Background(), &cc01v1.DownRequest{}); err != nil {
+		t.Fatalf("Down: %v", err)
+	}
+
+	response, err := client.Status(context.Background(), &cc01v1.StatusRequest{})
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if response.GetConnected() {
+		t.Fatal("Down dan keyin ham ulangan")
+	}
+
+	if _, err := client.Up(context.Background(), &cc01v1.UpRequest{}); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+
+	response, err = client.Status(context.Background(), &cc01v1.StatusRequest{})
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if !response.GetConnected() {
+		t.Error("Up dan keyin ulanmagan")
+	}
+}
+
+// Mesh tushirilganda marshrut tekshiruvi bo'lmasligi kerak — u
+// mavjud bo'lmagan holat haqida gapirardi.
+func TestDoctor_OmitsRouteCheckWhenDown(t *testing.T) {
+	client := startWithBackend(t, &fakeBackend{up: false})
+
+	response, err := client.Doctor(context.Background(), &cc01v1.DoctorRequest{})
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+
+	for _, check := range response.GetChecks() {
+		if check.GetName() == "marshrutlar" {
+			t.Error("tushirilgan mesh uchun marshrut tekshiruvi berildi")
+		}
 	}
 }

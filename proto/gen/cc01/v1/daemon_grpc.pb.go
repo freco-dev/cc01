@@ -19,6 +19,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	DaemonService_Up_FullMethodName          = "/cc01.v1.DaemonService/Up"
+	DaemonService_Down_FullMethodName        = "/cc01.v1.DaemonService/Down"
 	DaemonService_Status_FullMethodName      = "/cc01.v1.DaemonService/Status"
 	DaemonService_WatchStatus_FullMethodName = "/cc01.v1.DaemonService/WatchStatus"
 	DaemonService_Peers_FullMethodName       = "/cc01.v1.DaemonService/Peers"
@@ -29,6 +31,10 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type DaemonServiceClient interface {
+	// Up — mesh'ni ko'taradi: CP da ro'yxatdan o'tish, TUN, marshrutlar.
+	Up(ctx context.Context, in *UpRequest, opts ...grpc.CallOption) (*UpResponse, error)
+	// Down — mesh'ni tushiradi. Demon ishlashda davom etadi.
+	Down(ctx context.Context, in *DownRequest, opts ...grpc.CallOption) (*DownResponse, error)
 	// Status — demonning joriy holati.
 	Status(ctx context.Context, in *StatusRequest, opts ...grpc.CallOption) (*StatusResponse, error)
 	// WatchStatus — real vaqtdagi holat (TUI uchun).
@@ -45,6 +51,26 @@ type daemonServiceClient struct {
 
 func NewDaemonServiceClient(cc grpc.ClientConnInterface) DaemonServiceClient {
 	return &daemonServiceClient{cc}
+}
+
+func (c *daemonServiceClient) Up(ctx context.Context, in *UpRequest, opts ...grpc.CallOption) (*UpResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpResponse)
+	err := c.cc.Invoke(ctx, DaemonService_Up_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *daemonServiceClient) Down(ctx context.Context, in *DownRequest, opts ...grpc.CallOption) (*DownResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DownResponse)
+	err := c.cc.Invoke(ctx, DaemonService_Down_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *daemonServiceClient) Status(ctx context.Context, in *StatusRequest, opts ...grpc.CallOption) (*StatusResponse, error) {
@@ -100,6 +126,10 @@ func (c *daemonServiceClient) Doctor(ctx context.Context, in *DoctorRequest, opt
 // All implementations should embed UnimplementedDaemonServiceServer
 // for forward compatibility.
 type DaemonServiceServer interface {
+	// Up — mesh'ni ko'taradi: CP da ro'yxatdan o'tish, TUN, marshrutlar.
+	Up(context.Context, *UpRequest) (*UpResponse, error)
+	// Down — mesh'ni tushiradi. Demon ishlashda davom etadi.
+	Down(context.Context, *DownRequest) (*DownResponse, error)
 	// Status — demonning joriy holati.
 	Status(context.Context, *StatusRequest) (*StatusResponse, error)
 	// WatchStatus — real vaqtdagi holat (TUI uchun).
@@ -117,6 +147,12 @@ type DaemonServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedDaemonServiceServer struct{}
 
+func (UnimplementedDaemonServiceServer) Up(context.Context, *UpRequest) (*UpResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Up not implemented")
+}
+func (UnimplementedDaemonServiceServer) Down(context.Context, *DownRequest) (*DownResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Down not implemented")
+}
 func (UnimplementedDaemonServiceServer) Status(context.Context, *StatusRequest) (*StatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Status not implemented")
 }
@@ -147,6 +183,42 @@ func RegisterDaemonServiceServer(s grpc.ServiceRegistrar, srv DaemonServiceServe
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&DaemonService_ServiceDesc, srv)
+}
+
+func _DaemonService_Up_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DaemonServiceServer).Up(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: DaemonService_Up_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DaemonServiceServer).Up(ctx, req.(*UpRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _DaemonService_Down_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DownRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DaemonServiceServer).Down(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: DaemonService_Down_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DaemonServiceServer).Down(ctx, req.(*DownRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _DaemonService_Status_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -221,6 +293,14 @@ var DaemonService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "cc01.v1.DaemonService",
 	HandlerType: (*DaemonServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "Up",
+			Handler:    _DaemonService_Up_Handler,
+		},
+		{
+			MethodName: "Down",
+			Handler:    _DaemonService_Down_Handler,
+		},
 		{
 			MethodName: "Status",
 			Handler:    _DaemonService_Status_Handler,

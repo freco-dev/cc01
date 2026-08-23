@@ -13,6 +13,12 @@ option csharp_namespace = "Cc01.V1";
 // ruxsatlariga tayanadi.
 
 service DaemonService {
+  // Up — mesh'ni ko'taradi: CP da ro'yxatdan o'tish, TUN, marshrutlar.
+  rpc Up (UpRequest) returns (UpResponse);
+
+  // Down — mesh'ni tushiradi. Demon ishlashda davom etadi.
+  rpc Down (DownRequest) returns (DownResponse);
+
   // Status — demonning joriy holati.
   rpc Status (StatusRequest) returns (StatusResponse);
 
@@ -24,6 +30,21 @@ service DaemonService {
 
   // Doctor — muhit tekshiruvi: yadro, imtiyozlar, qurilmalar.
   rpc Doctor (DoctorRequest) returns (DoctorResponse);
+}
+
+message UpRequest {}
+
+message UpResponse {
+  // Status — ko'tarilgandan keyingi holat.
+  StatusResponse status = 1;
+}
+
+message DownRequest {}
+
+message DownResponse {
+  // AlreadyDown — mesh allaqachon tushirilgan edi, hech narsa
+  // o'zgarmadi.
+  bool already_down = 1;
 }
 
 message StatusRequest {}

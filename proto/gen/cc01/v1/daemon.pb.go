@@ -70,7 +70,170 @@ func (x Check_Status) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Check_Status.Descriptor instead.
 func (Check_Status) EnumDescriptor() ([]byte, []int) {
-	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{9, 0}
+	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{13, 0}
+}
+
+type UpRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpRequest) Reset() {
+	*x = UpRequest{}
+	mi := &file_cc01_v1_daemon_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpRequest) ProtoMessage() {}
+
+func (x *UpRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cc01_v1_daemon_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpRequest.ProtoReflect.Descriptor instead.
+func (*UpRequest) Descriptor() ([]byte, []int) {
+	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{0}
+}
+
+type UpResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Status — ko'tarilgandan keyingi holat.
+	Status        *StatusResponse `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpResponse) Reset() {
+	*x = UpResponse{}
+	mi := &file_cc01_v1_daemon_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpResponse) ProtoMessage() {}
+
+func (x *UpResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cc01_v1_daemon_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpResponse.ProtoReflect.Descriptor instead.
+func (*UpResponse) Descriptor() ([]byte, []int) {
+	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *UpResponse) GetStatus() *StatusResponse {
+	if x != nil {
+		return x.Status
+	}
+	return nil
+}
+
+type DownRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DownRequest) Reset() {
+	*x = DownRequest{}
+	mi := &file_cc01_v1_daemon_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DownRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DownRequest) ProtoMessage() {}
+
+func (x *DownRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cc01_v1_daemon_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DownRequest.ProtoReflect.Descriptor instead.
+func (*DownRequest) Descriptor() ([]byte, []int) {
+	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{2}
+}
+
+type DownResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// AlreadyDown — mesh allaqachon tushirilgan edi, hech narsa
+	// o'zgarmadi.
+	AlreadyDown   bool `protobuf:"varint,1,opt,name=already_down,json=alreadyDown,proto3" json:"already_down,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DownResponse) Reset() {
+	*x = DownResponse{}
+	mi := &file_cc01_v1_daemon_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DownResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DownResponse) ProtoMessage() {}
+
+func (x *DownResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cc01_v1_daemon_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DownResponse.ProtoReflect.Descriptor instead.
+func (*DownResponse) Descriptor() ([]byte, []int) {
+	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *DownResponse) GetAlreadyDown() bool {
+	if x != nil {
+		return x.AlreadyDown
+	}
+	return false
 }
 
 type StatusRequest struct {
@@ -81,7 +244,7 @@ type StatusRequest struct {
 
 func (x *StatusRequest) Reset() {
 	*x = StatusRequest{}
-	mi := &file_cc01_v1_daemon_proto_msgTypes[0]
+	mi := &file_cc01_v1_daemon_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -93,7 +256,7 @@ func (x *StatusRequest) String() string {
 func (*StatusRequest) ProtoMessage() {}
 
 func (x *StatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cc01_v1_daemon_proto_msgTypes[0]
+	mi := &file_cc01_v1_daemon_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -106,7 +269,7 @@ func (x *StatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusRequest.ProtoReflect.Descriptor instead.
 func (*StatusRequest) Descriptor() ([]byte, []int) {
-	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{0}
+	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{4}
 }
 
 type WatchStatusRequest struct {
@@ -119,7 +282,7 @@ type WatchStatusRequest struct {
 
 func (x *WatchStatusRequest) Reset() {
 	*x = WatchStatusRequest{}
-	mi := &file_cc01_v1_daemon_proto_msgTypes[1]
+	mi := &file_cc01_v1_daemon_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -131,7 +294,7 @@ func (x *WatchStatusRequest) String() string {
 func (*WatchStatusRequest) ProtoMessage() {}
 
 func (x *WatchStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cc01_v1_daemon_proto_msgTypes[1]
+	mi := &file_cc01_v1_daemon_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -144,7 +307,7 @@ func (x *WatchStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchStatusRequest.ProtoReflect.Descriptor instead.
 func (*WatchStatusRequest) Descriptor() ([]byte, []int) {
-	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{1}
+	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *WatchStatusRequest) GetIntervalSeconds() uint32 {
@@ -164,7 +327,7 @@ type WatchStatusResponse struct {
 
 func (x *WatchStatusResponse) Reset() {
 	*x = WatchStatusResponse{}
-	mi := &file_cc01_v1_daemon_proto_msgTypes[2]
+	mi := &file_cc01_v1_daemon_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -176,7 +339,7 @@ func (x *WatchStatusResponse) String() string {
 func (*WatchStatusResponse) ProtoMessage() {}
 
 func (x *WatchStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cc01_v1_daemon_proto_msgTypes[2]
+	mi := &file_cc01_v1_daemon_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -189,7 +352,7 @@ func (x *WatchStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchStatusResponse.ProtoReflect.Descriptor instead.
 func (*WatchStatusResponse) Descriptor() ([]byte, []int) {
-	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{2}
+	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *WatchStatusResponse) GetStatus() *StatusResponse {
@@ -231,7 +394,7 @@ type StatusResponse struct {
 
 func (x *StatusResponse) Reset() {
 	*x = StatusResponse{}
-	mi := &file_cc01_v1_daemon_proto_msgTypes[3]
+	mi := &file_cc01_v1_daemon_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -243,7 +406,7 @@ func (x *StatusResponse) String() string {
 func (*StatusResponse) ProtoMessage() {}
 
 func (x *StatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cc01_v1_daemon_proto_msgTypes[3]
+	mi := &file_cc01_v1_daemon_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -256,7 +419,7 @@ func (x *StatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusResponse.ProtoReflect.Descriptor instead.
 func (*StatusResponse) Descriptor() ([]byte, []int) {
-	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{3}
+	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *StatusResponse) GetConnected() bool {
@@ -367,7 +530,7 @@ type PeersRequest struct {
 
 func (x *PeersRequest) Reset() {
 	*x = PeersRequest{}
-	mi := &file_cc01_v1_daemon_proto_msgTypes[4]
+	mi := &file_cc01_v1_daemon_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -379,7 +542,7 @@ func (x *PeersRequest) String() string {
 func (*PeersRequest) ProtoMessage() {}
 
 func (x *PeersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cc01_v1_daemon_proto_msgTypes[4]
+	mi := &file_cc01_v1_daemon_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -392,7 +555,7 @@ func (x *PeersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PeersRequest.ProtoReflect.Descriptor instead.
 func (*PeersRequest) Descriptor() ([]byte, []int) {
-	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{4}
+	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *PeersRequest) GetOnlineOnly() bool {
@@ -411,7 +574,7 @@ type PeersResponse struct {
 
 func (x *PeersResponse) Reset() {
 	*x = PeersResponse{}
-	mi := &file_cc01_v1_daemon_proto_msgTypes[5]
+	mi := &file_cc01_v1_daemon_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -423,7 +586,7 @@ func (x *PeersResponse) String() string {
 func (*PeersResponse) ProtoMessage() {}
 
 func (x *PeersResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cc01_v1_daemon_proto_msgTypes[5]
+	mi := &file_cc01_v1_daemon_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -436,7 +599,7 @@ func (x *PeersResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PeersResponse.ProtoReflect.Descriptor instead.
 func (*PeersResponse) Descriptor() ([]byte, []int) {
-	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{5}
+	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *PeersResponse) GetPeers() []*PeerStatus {
@@ -473,7 +636,7 @@ type PeerStatus struct {
 
 func (x *PeerStatus) Reset() {
 	*x = PeerStatus{}
-	mi := &file_cc01_v1_daemon_proto_msgTypes[6]
+	mi := &file_cc01_v1_daemon_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -485,7 +648,7 @@ func (x *PeerStatus) String() string {
 func (*PeerStatus) ProtoMessage() {}
 
 func (x *PeerStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_cc01_v1_daemon_proto_msgTypes[6]
+	mi := &file_cc01_v1_daemon_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -498,7 +661,7 @@ func (x *PeerStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PeerStatus.ProtoReflect.Descriptor instead.
 func (*PeerStatus) Descriptor() ([]byte, []int) {
-	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{6}
+	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *PeerStatus) GetNodeId() string {
@@ -579,7 +742,7 @@ type DoctorRequest struct {
 
 func (x *DoctorRequest) Reset() {
 	*x = DoctorRequest{}
-	mi := &file_cc01_v1_daemon_proto_msgTypes[7]
+	mi := &file_cc01_v1_daemon_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -591,7 +754,7 @@ func (x *DoctorRequest) String() string {
 func (*DoctorRequest) ProtoMessage() {}
 
 func (x *DoctorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cc01_v1_daemon_proto_msgTypes[7]
+	mi := &file_cc01_v1_daemon_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -604,7 +767,7 @@ func (x *DoctorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DoctorRequest.ProtoReflect.Descriptor instead.
 func (*DoctorRequest) Descriptor() ([]byte, []int) {
-	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{7}
+	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{11}
 }
 
 type DoctorResponse struct {
@@ -618,7 +781,7 @@ type DoctorResponse struct {
 
 func (x *DoctorResponse) Reset() {
 	*x = DoctorResponse{}
-	mi := &file_cc01_v1_daemon_proto_msgTypes[8]
+	mi := &file_cc01_v1_daemon_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -630,7 +793,7 @@ func (x *DoctorResponse) String() string {
 func (*DoctorResponse) ProtoMessage() {}
 
 func (x *DoctorResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cc01_v1_daemon_proto_msgTypes[8]
+	mi := &file_cc01_v1_daemon_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -643,7 +806,7 @@ func (x *DoctorResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DoctorResponse.ProtoReflect.Descriptor instead.
 func (*DoctorResponse) Descriptor() ([]byte, []int) {
-	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{8}
+	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *DoctorResponse) GetChecks() []*Check {
@@ -676,7 +839,7 @@ type Check struct {
 
 func (x *Check) Reset() {
 	*x = Check{}
-	mi := &file_cc01_v1_daemon_proto_msgTypes[9]
+	mi := &file_cc01_v1_daemon_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -688,7 +851,7 @@ func (x *Check) String() string {
 func (*Check) ProtoMessage() {}
 
 func (x *Check) ProtoReflect() protoreflect.Message {
-	mi := &file_cc01_v1_daemon_proto_msgTypes[9]
+	mi := &file_cc01_v1_daemon_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -701,7 +864,7 @@ func (x *Check) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Check.ProtoReflect.Descriptor instead.
 func (*Check) Descriptor() ([]byte, []int) {
-	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{9}
+	return file_cc01_v1_daemon_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *Check) GetName() string {
@@ -736,7 +899,14 @@ var File_cc01_v1_daemon_proto protoreflect.FileDescriptor
 
 const file_cc01_v1_daemon_proto_rawDesc = "" +
 	"\n" +
-	"\x14cc01/v1/daemon.proto\x12\acc01.v1\"\x0f\n" +
+	"\x14cc01/v1/daemon.proto\x12\acc01.v1\"\v\n" +
+	"\tUpRequest\"=\n" +
+	"\n" +
+	"UpResponse\x12/\n" +
+	"\x06status\x18\x01 \x01(\v2\x17.cc01.v1.StatusResponseR\x06status\"\r\n" +
+	"\vDownRequest\"1\n" +
+	"\fDownResponse\x12!\n" +
+	"\falready_down\x18\x01 \x01(\bR\valreadyDown\"\x0f\n" +
 	"\rStatusRequest\"?\n" +
 	"\x12WatchStatusRequest\x12)\n" +
 	"\x10interval_seconds\x18\x01 \x01(\rR\x0fintervalSeconds\"F\n" +
@@ -795,8 +965,10 @@ const file_cc01_v1_daemon_proto_rawDesc = "" +
 	"\x12STATUS_UNSPECIFIED\x10\x00\x12\r\n" +
 	"\tSTATUS_OK\x10\x01\x12\x0f\n" +
 	"\vSTATUS_WARN\x10\x02\x12\x0f\n" +
-	"\vSTATUS_FAIL\x10\x032\x89\x02\n" +
-	"\rDaemonService\x129\n" +
+	"\vSTATUS_FAIL\x10\x032\xed\x02\n" +
+	"\rDaemonService\x12-\n" +
+	"\x02Up\x12\x12.cc01.v1.UpRequest\x1a\x13.cc01.v1.UpResponse\x123\n" +
+	"\x04Down\x12\x14.cc01.v1.DownRequest\x1a\x15.cc01.v1.DownResponse\x129\n" +
 	"\x06Status\x12\x16.cc01.v1.StatusRequest\x1a\x17.cc01.v1.StatusResponse\x12J\n" +
 	"\vWatchStatus\x12\x1b.cc01.v1.WatchStatusRequest\x1a\x1c.cc01.v1.WatchStatusResponse0\x01\x126\n" +
 	"\x05Peers\x12\x15.cc01.v1.PeersRequest\x1a\x16.cc01.v1.PeersResponse\x129\n" +
@@ -816,38 +988,47 @@ func file_cc01_v1_daemon_proto_rawDescGZIP() []byte {
 }
 
 var file_cc01_v1_daemon_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_cc01_v1_daemon_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_cc01_v1_daemon_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_cc01_v1_daemon_proto_goTypes = []any{
 	(Check_Status)(0),           // 0: cc01.v1.Check.Status
-	(*StatusRequest)(nil),       // 1: cc01.v1.StatusRequest
-	(*WatchStatusRequest)(nil),  // 2: cc01.v1.WatchStatusRequest
-	(*WatchStatusResponse)(nil), // 3: cc01.v1.WatchStatusResponse
-	(*StatusResponse)(nil),      // 4: cc01.v1.StatusResponse
-	(*PeersRequest)(nil),        // 5: cc01.v1.PeersRequest
-	(*PeersResponse)(nil),       // 6: cc01.v1.PeersResponse
-	(*PeerStatus)(nil),          // 7: cc01.v1.PeerStatus
-	(*DoctorRequest)(nil),       // 8: cc01.v1.DoctorRequest
-	(*DoctorResponse)(nil),      // 9: cc01.v1.DoctorResponse
-	(*Check)(nil),               // 10: cc01.v1.Check
+	(*UpRequest)(nil),           // 1: cc01.v1.UpRequest
+	(*UpResponse)(nil),          // 2: cc01.v1.UpResponse
+	(*DownRequest)(nil),         // 3: cc01.v1.DownRequest
+	(*DownResponse)(nil),        // 4: cc01.v1.DownResponse
+	(*StatusRequest)(nil),       // 5: cc01.v1.StatusRequest
+	(*WatchStatusRequest)(nil),  // 6: cc01.v1.WatchStatusRequest
+	(*WatchStatusResponse)(nil), // 7: cc01.v1.WatchStatusResponse
+	(*StatusResponse)(nil),      // 8: cc01.v1.StatusResponse
+	(*PeersRequest)(nil),        // 9: cc01.v1.PeersRequest
+	(*PeersResponse)(nil),       // 10: cc01.v1.PeersResponse
+	(*PeerStatus)(nil),          // 11: cc01.v1.PeerStatus
+	(*DoctorRequest)(nil),       // 12: cc01.v1.DoctorRequest
+	(*DoctorResponse)(nil),      // 13: cc01.v1.DoctorResponse
+	(*Check)(nil),               // 14: cc01.v1.Check
 }
 var file_cc01_v1_daemon_proto_depIdxs = []int32{
-	4,  // 0: cc01.v1.WatchStatusResponse.status:type_name -> cc01.v1.StatusResponse
-	7,  // 1: cc01.v1.PeersResponse.peers:type_name -> cc01.v1.PeerStatus
-	10, // 2: cc01.v1.DoctorResponse.checks:type_name -> cc01.v1.Check
-	0,  // 3: cc01.v1.Check.status:type_name -> cc01.v1.Check.Status
-	1,  // 4: cc01.v1.DaemonService.Status:input_type -> cc01.v1.StatusRequest
-	2,  // 5: cc01.v1.DaemonService.WatchStatus:input_type -> cc01.v1.WatchStatusRequest
-	5,  // 6: cc01.v1.DaemonService.Peers:input_type -> cc01.v1.PeersRequest
-	8,  // 7: cc01.v1.DaemonService.Doctor:input_type -> cc01.v1.DoctorRequest
-	4,  // 8: cc01.v1.DaemonService.Status:output_type -> cc01.v1.StatusResponse
-	3,  // 9: cc01.v1.DaemonService.WatchStatus:output_type -> cc01.v1.WatchStatusResponse
-	6,  // 10: cc01.v1.DaemonService.Peers:output_type -> cc01.v1.PeersResponse
-	9,  // 11: cc01.v1.DaemonService.Doctor:output_type -> cc01.v1.DoctorResponse
-	8,  // [8:12] is the sub-list for method output_type
-	4,  // [4:8] is the sub-list for method input_type
-	4,  // [4:4] is the sub-list for extension type_name
-	4,  // [4:4] is the sub-list for extension extendee
-	0,  // [0:4] is the sub-list for field type_name
+	8,  // 0: cc01.v1.UpResponse.status:type_name -> cc01.v1.StatusResponse
+	8,  // 1: cc01.v1.WatchStatusResponse.status:type_name -> cc01.v1.StatusResponse
+	11, // 2: cc01.v1.PeersResponse.peers:type_name -> cc01.v1.PeerStatus
+	14, // 3: cc01.v1.DoctorResponse.checks:type_name -> cc01.v1.Check
+	0,  // 4: cc01.v1.Check.status:type_name -> cc01.v1.Check.Status
+	1,  // 5: cc01.v1.DaemonService.Up:input_type -> cc01.v1.UpRequest
+	3,  // 6: cc01.v1.DaemonService.Down:input_type -> cc01.v1.DownRequest
+	5,  // 7: cc01.v1.DaemonService.Status:input_type -> cc01.v1.StatusRequest
+	6,  // 8: cc01.v1.DaemonService.WatchStatus:input_type -> cc01.v1.WatchStatusRequest
+	9,  // 9: cc01.v1.DaemonService.Peers:input_type -> cc01.v1.PeersRequest
+	12, // 10: cc01.v1.DaemonService.Doctor:input_type -> cc01.v1.DoctorRequest
+	2,  // 11: cc01.v1.DaemonService.Up:output_type -> cc01.v1.UpResponse
+	4,  // 12: cc01.v1.DaemonService.Down:output_type -> cc01.v1.DownResponse
+	8,  // 13: cc01.v1.DaemonService.Status:output_type -> cc01.v1.StatusResponse
+	7,  // 14: cc01.v1.DaemonService.WatchStatus:output_type -> cc01.v1.WatchStatusResponse
+	10, // 15: cc01.v1.DaemonService.Peers:output_type -> cc01.v1.PeersResponse
+	13, // 16: cc01.v1.DaemonService.Doctor:output_type -> cc01.v1.DoctorResponse
+	11, // [11:17] is the sub-list for method output_type
+	5,  // [5:11] is the sub-list for method input_type
+	5,  // [5:5] is the sub-list for extension type_name
+	5,  // [5:5] is the sub-list for extension extendee
+	0,  // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_cc01_v1_daemon_proto_init() }
@@ -861,7 +1042,7 @@ func file_cc01_v1_daemon_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cc01_v1_daemon_proto_rawDesc), len(file_cc01_v1_daemon_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   10,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

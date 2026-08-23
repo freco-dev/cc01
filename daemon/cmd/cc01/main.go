@@ -1,9 +1,8 @@
 // cc01 — mesh'ni boshqarish va kuzatish uchun buyruq qatori
 // (DEV_SPEC §5.1).
 //
-// Hozircha faqat o'qish buyruqlari: `status`, `peer list`, `doctor`.
-// `up`/`down` demon hayot siklini boshqarishni talab qiladi va
-// keyingi qadamda qo'shiladi.
+// Buyruqlar demon bilan UNIX soketi ustidagi gRPC orqali gaplashadi;
+// `doctor` demon ishlamayotganda ham javob beradi.
 package main
 
 import (
@@ -24,6 +23,10 @@ func main() {
 
 	var err error
 	switch command {
+	case "up":
+		err = runUp(args)
+	case "down":
+		err = runDown(args)
 	case "status":
 		err = runStatus(args)
 	case "peer":
@@ -50,6 +53,8 @@ func usage() {
 	fmt.Fprint(os.Stderr, `cc01 — mesh boshqaruvi
 
 Buyruqlar:
+  up                            mesh'ni ko'tarish
+  down                          mesh'ni tushirish (demon ishlashda davom etadi)
   status [--json] [--watch]     demon holati
   peer list [--json] [--online] peerlar va ular bilan qaysi yo'l ishlatilyapti
   doctor                        muhit tekshiruvi

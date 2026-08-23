@@ -158,7 +158,28 @@ func (r *Reconciler) desired() []netip.Prefix {
 	return desired
 }
 
-// Synced — oxirgi urinish muvaffaqiyatli tugadimi (`cc01 doctor` uchun).
+// Status — rekonsiliatsiyaning qisqacha holati.
+//
+// Nima uchun alohida tur: `ipc` ham, `session` ham shu ma'lumotni
+// uzatadi. Interfeys o'rniga oddiy qiymat — u paketlar orasida import
+// halqasi hosil qilmaydi.
+type Status struct {
+	// Synced — oxirgi moslashtirish muvaffaqiyatli tugadimi.
+	Synced bool
+
+	// Count — qo'llangan marshrutlar soni.
+	Count int
+}
+
+// Status — `cc01 doctor` uchun holat.
+func (r *Reconciler) Status() Status {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return Status{Synced: r.synced, Count: len(r.last)}
+}
+
+// Synced — oxirgi urinish muvaffaqiyatli tugadimi.
 func (r *Reconciler) Synced() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()

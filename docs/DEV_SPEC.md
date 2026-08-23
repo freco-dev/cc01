@@ -806,11 +806,12 @@ NetworkMap / Policy o'zgardi
 
 ```
 cc01
-├── up [--auth-key KEY] [--accept-routes] [--exit-node NODE] [--hostname NAME]   ⏳
-├── down                                     # mesh'dan uzilish (daemon ishlaydi)  ⏳
+├── up [--auth-key KEY] [--accept-routes] [--exit-node NODE] [--hostname NAME]   ✅¹
+├── down                                     # mesh'dan uzilish (daemon ishlaydi)  ✅
 ├── status [--json] [--watch]                                                    ✅
 ├── doctor                                   # preflight/diagnostika hisoboti     ✅
 ├── version                                                                      ✅
+│    ¹ bayroqlar hali yo'q: konfiguratsiya `cc01d` ga beriladi
 │
 ├── tunnel                                   # ── ngrok funksiyasi ──
 │   ├── http <port|url> [--subdomain S] [--domain D] [--auth user:pass]
@@ -902,12 +903,27 @@ uchun ular birinchi bo'lib qurildi.
 
 ```protobuf
 service DaemonService {
+  rpc Up          (UpRequest)          returns (UpResponse);              // ✅
+  rpc Down        (DownRequest)        returns (DownResponse);            // ✅
   rpc Status      (StatusRequest)      returns (StatusResponse);          // ✅
   rpc WatchStatus (WatchStatusRequest) returns (stream WatchStatusResponse); // ✅
   rpc Peers       (PeersRequest)       returns (PeersResponse);           // ✅
   rpc Doctor      (DoctorRequest)      returns (DoctorResponse);          // ✅
 }
 ```
+
+**`Up` va `Down` ning shartnomasi assimetrik**, va bu ataylab:
+
+`Down` ikkinchi marta chaqirilsa **xato emas** — "tushirilgan bo'lsin" degan
+talab allaqachon bajarilgan. Javobdagi `already_down` bayrog'i hech narsa
+o'zgarmaganini aytadi. `Up` esa allaqachon ko'tarilgan mesh'da
+`ALREADY_EXISTS` qaytaradi: konfiguratsiya farq qilishi mumkin va uni
+jimgina e'tiborsiz qoldirish yanglish bo'lardi.
+
+Demon endi mesh'dan uzoqroq yashaydi: IPC soketi mesh ko'tarilishidan
+**oldin** ochiladi, shunda nosozlikni aynan kerak bo'lgan paytda —
+ulanish qurilmayotganda — `cc01 status` va `cc01 doctor` bilan ko'rish
+mumkin. `cc01d -down` bayrog'i mesh'ni ko'tarmasdan ishga tushiradi.
 
 `StatusResponse` mesh holatini beradi (`connected`, `node_id`, `address`,
 `interface`, `listen_port`, `endpoints`, `control_plane`, `relay_id`,
@@ -919,15 +935,9 @@ relay→direct ko'tarilishini tashqaridan kuzatib bo'lmaydi.
 `Check.remediation` — xato bo'lganda "nima qilishim kerak" degan savolga
 javob; §3.1 talabi.
 
-**Hali qurilmagan** (`Up`/`Down` demon hayot siklini, qolgan ikkitasi
-o'z quyi tizimini kutadi):
+**Hali qurilmagan** — ikkalasi ham o'z quyi tizimini kutadi:
 
 ```protobuf
-service DaemonService {                     // qo'shiladi
-  rpc Up   (UpRequest)   returns (UpResponse);      // ⏳
-  rpc Down (DownRequest) returns (DownResponse);    // ⏳
-}
-
 service Tunnels {                                   // ⏳ §5.3 bilan birga
   rpc Open   (OpenTunnelRequest)  returns (TunnelInfo);
   rpc Close  (CloseTunnelRequest) returns (CloseTunnelResponse);
@@ -1451,7 +1461,7 @@ Faza 0 dan farqli — bu yerda haqiqiy overlay boshlanadi. Foundation ishlari (T
 | Marshrut sinxronizatsiyasi (reconciliation) | Peer ketganda marshruti ham ketadi; `Close()` dan keyin 0 orphan | ✅ `daemon/route` |
 | CLI ↔ demon IPC (UNIX soket, gRPC) | `SO_PEERCRED`, `0660`, exit kodlari §5.2 | ✅ `daemon/ipc` |
 | CLI: `status`, `peer list`, `doctor` | Ishlab turgan mesh'da yo'l holati ko'rinadi | ✅ `make cp-demo` |
-| CLI: `up`, `down` (demon hayot sikli) | UX review o'tgan | ⏳ |
+| CLI: `up`, `down` (demon hayot sikli) | `down` → 0 marshrut, `up` → o'sha manzil qaytadi | ✅ `daemon/session` |
 | Linux paketlar (deb/rpm) + systemd unit | Toza VM'da 1 buyruq bilan o'rnatish | ⏳ |
 | AP: `Plan`, `Subscription`, kvota modeli | Tarif o'zgarishi 60 s ichida edge'da kuchga kiradi | ⏳ |
 | **MVP demo** | 3 shahar, 3 node, o'zaro ping < 50 ms, public IPv6 internetdan erishiladi | ⏳ |

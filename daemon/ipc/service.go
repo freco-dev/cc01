@@ -4,49 +4,46 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"net/netip"
+	"errors"
 	"time"
 
 	"github.com/freco-dev/cc01/daemon/engine"
 	"github.com/freco-dev/cc01/daemon/noise"
+	"github.com/freco-dev/cc01/daemon/route"
+	"github.com/freco-dev/cc01/daemon/session"
 	cc01v1 "github.com/freco-dev/cc01/proto/gen/cc01/v1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
-// Info — demon haqidagi o'zgarmas ma'lumot.
-type Info struct {
-	NodeID       string
-	Hostname     string
-	Tenant       string
-	Address      string
-	ControlPlane string
-	Endpoints    []string
-	Version      string
+// Backend — IPC xizmati ma'lumotni shundan oladi va buyruqlarni
+// shunga uzatadi.
+//
+// Interfeys sifatida ajratilgan, chunki `cc01 up`/`down` dan keyin
+// datapath demon jarayonidan qisqaroq umr ko'radi: xizmat aniq bir
+// engine'ga emas, uni yaratib-yo'q qiladigan qatlamga bog'lanishi
+// kerak.
+type Backend interface {
+	// Status — joriy holat. false — mesh tushirilgan.
+	Status() (session.Status, bool)
 
-	// RelayID — ulangan relay; bo'sh bo'lsa relay yo'q.
-	RelayID func() string
+	// Peers — datapath ko'rayotgan peerlar.
+	Peers() []engine.PeerSnapshot
 
-	// Routes — marshrut rekonsiliatsiyasining holati. nil bo'lsa
-	// (statik rejim) `cc01 doctor` bu tekshiruvni o'tkazib yuboradi.
-	Routes RouteStatus
-}
-
-// RouteStatus — `route.Reconciler` shu interfeysni qanoatlantiradi.
-type RouteStatus interface {
-	Synced() bool
-	Last() []netip.Prefix
+	Up(ctx context.Context) error
+	Down() error
 }
 
 // Service — DaemonService implementatsiyasi.
 type Service struct {
 	cc01v1.UnimplementedDaemonServiceServer
 
-	engine  *engine.Engine
-	info    Info
-	started time.Time
+	backend Backend
+	version string
 }
 
-func NewService(datapath *engine.Engine, info Info) *Service {
-	return &Service{engine: datapath, info: info, started: time.Now()}
+func NewService(backend Backend, version string) *Service {
+	return &Service{backend: backend, version: version}
 }
 
 func (s *Service) Status(context.Context, *cc01v1.StatusRequest) (*cc01v1.StatusResponse, error) {
@@ -88,7 +85,7 @@ func (s *Service) WatchStatus(
 }
 
 func (s *Service) Peers(_ context.Context, req *cc01v1.PeersRequest) (*cc01v1.PeersResponse, error) {
-	snapshots := s.engine.Snapshot()
+	snapshots := s.backend.Peers()
 
 	out := &cc01v1.PeersResponse{Peers: make([]*cc01v1.PeerStatus, 0, len(snapshots))}
 	for _, peer := range snapshots {
@@ -102,7 +99,15 @@ func (s *Service) Peers(_ context.Context, req *cc01v1.PeersRequest) (*cc01v1.Pe
 }
 
 func (s *Service) Doctor(context.Context, *cc01v1.DoctorRequest) (*cc01v1.DoctorResponse, error) {
-	checks := RunChecks(s.info.Routes)
+	// Mesh tushirilgan bo'lsa marshrut holati haqida gapiradigan
+	// narsa yo'q — bo'lmagan narsa haqida "hammasi joyida" deb
+	// yozgandan ko'ra, umuman yozmagan yaxshi.
+	var routes *route.Status
+	if snapshot, up := s.backend.Status(); up {
+		routes = &snapshot.Routes
+	}
+
+	checks := RunChecks(routes)
 
 	out := &cc01v1.DoctorResponse{
 		Checks:  make([]*cc01v1.Check, 0, len(checks)),
@@ -120,30 +125,28 @@ func (s *Service) Doctor(context.Context, *cc01v1.DoctorRequest) (*cc01v1.Doctor
 }
 
 func (s *Service) snapshot() *cc01v1.StatusResponse {
-	peers := s.engine.Snapshot()
-
-	relayID := ""
-	if s.info.RelayID != nil {
-		relayID = s.info.RelayID()
+	current, up := s.backend.Status()
+	if !up {
+		// Tushirilgan mesh ham javob beradi: `cc01 status` demon
+		// ishlayotganini, lekin ulanmaganini ko'rsatishi kerak.
+		return &cc01v1.StatusResponse{Connected: false, Version: s.version}
 	}
-
-	key := s.engine.PublicKey()
 
 	return &cc01v1.StatusResponse{
 		Connected:     true,
-		NodeId:        s.info.NodeID,
-		PublicKey:     key.String(),
-		Hostname:      s.info.Hostname,
-		Tenant:        s.info.Tenant,
-		Address:       s.info.Address,
-		Interface:     s.engine.InterfaceName(),
-		ListenPort:    uint32(s.engine.ListenPort()),
-		Endpoints:     s.info.Endpoints,
-		ControlPlane:  s.info.ControlPlane,
-		RelayId:       relayID,
-		PeerCount:     uint32(len(peers)),
-		UptimeSeconds: uint64(time.Since(s.started).Seconds()),
-		Version:       s.info.Version,
+		NodeId:        current.NodeID,
+		PublicKey:     current.PublicKey.String(),
+		Hostname:      current.Hostname,
+		Tenant:        current.Tenant,
+		Address:       current.Address,
+		Interface:     current.Interface,
+		ListenPort:    uint32(current.ListenPort),
+		Endpoints:     current.Endpoints,
+		ControlPlane:  current.ControlPlane,
+		RelayId:       current.RelayID,
+		PeerCount:     uint32(len(s.backend.Peers())),
+		UptimeSeconds: uint64(time.Since(current.Since).Seconds()),
+		Version:       s.version,
 	}
 }
 
@@ -175,4 +178,35 @@ func toProtoPeer(peer engine.PeerSnapshot) *cc01v1.PeerStatus {
 func nodeIDFor(key noise.PublicKey) string {
 	sum := sha256.Sum256(key[:])
 	return hex.EncodeToString(sum[:])
+}
+
+// Up mesh'ni ko'taradi.
+//
+// Allaqachon ko'tarilgan bo'lsa ALREADY_EXISTS qaytariladi (§5.2 dagi
+// exit kod 12): buyruq bajarilmadi va foydalanuvchi buni bilishi kerak.
+func (s *Service) Up(ctx context.Context, _ *cc01v1.UpRequest) (*cc01v1.UpResponse, error) {
+	if err := s.backend.Up(ctx); err != nil {
+		if errors.Is(err, session.ErrAlreadyUp) {
+			return nil, status.Error(codes.AlreadyExists, err.Error())
+		}
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	return &cc01v1.UpResponse{Status: s.snapshot()}, nil
+}
+
+// Down mesh'ni tushiradi.
+//
+// Allaqachon tushirilgan bo'lsa xato EMAS: "tushirilgan bo'lsin"
+// degan talab allaqachon bajarilgan. Foydalanuvchi buni javobdagi
+// bayroqdan biladi.
+func (s *Service) Down(context.Context, *cc01v1.DownRequest) (*cc01v1.DownResponse, error) {
+	if _, up := s.backend.Status(); !up {
+		return &cc01v1.DownResponse{AlreadyDown: true}, nil
+	}
+
+	if err := s.backend.Down(); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &cc01v1.DownResponse{}, nil
 }

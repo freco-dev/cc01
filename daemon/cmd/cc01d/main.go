@@ -44,6 +44,7 @@ func main() {
 		advertise    = flag.String("advertise", "", "e'lon qilinadigan underlay manzil host:port")
 		stunServer   = flag.String("stun", os.Getenv("CC01_STUN"), "STUN serveri host:port (NAT ortida public manzilni aniqlash uchun)")
 		socketPath   = flag.String("socket", ipc.DefaultSocket, "IPC soketi (`cc01` CLI uchun)")
+		startDown    = flag.Bool("down", false, "mesh'ni ko'tarmasdan ishga tushish (`cc01 up` kutiladi)")
 		privateKey   = flag.String("key", os.Getenv("CC01_PRIVATE_KEY"), "base64 private kalit")
 		listenPort   = flag.Uint("listen", conn.DefaultPort, "overlay UDP porti")
 		ifaceName    = flag.String("iface", tun.DefaultName, "TUN interfeys nomi")
@@ -105,6 +106,7 @@ func main() {
 			advertised:  advertised,
 			stunServer:  stunAddr,
 			socketPath:  *socketPath,
+			startDown:   *startDown,
 		}, logger); err != nil {
 			fail(err)
 		}

@@ -86,3 +86,17 @@ $DOCKER exec cc01-n1 cc01 doctor
 echo
 echo "═══ marshrut jadvali 51820 (node-1) ═══"
 $DOCKER exec cc01-n1 ip -6 route show table 51820
+
+echo
+echo "═══ cc01 down → up sikli (node-1) ═══"
+$DOCKER exec cc01-n1 cc01 down
+echo "  interfeys:  $($DOCKER exec cc01-n1 ip -6 addr show cc0 2>&1 | head -1 || true)"
+echo "  marshrutlar: $($DOCKER exec cc01-n1 ip -6 route show table 51820 | wc -l) ta"
+$DOCKER exec cc01-n1 cc01 status
+
+echo
+echo "  --- qayta ko'tarish ---"
+$DOCKER exec cc01-n1 cc01 up
+sleep 3
+echo "  --- ping6 qayta ishlayaptimi ---"
+$DOCKER exec cc01-n1 ping -6 -c 2 -W 3 "$A2"

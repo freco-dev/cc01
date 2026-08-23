@@ -5,6 +5,7 @@ import (
 	"os"
 	"runtime"
 
+	"github.com/freco-dev/cc01/daemon/route"
 	"github.com/freco-dev/cc01/daemon/tun"
 	cc01v1 "github.com/freco-dev/cc01/proto/gen/cc01/v1"
 )
@@ -14,7 +15,7 @@ import (
 // Har bir muvaffaqiyatsiz tekshiruv `remediation` bilan keladi:
 // foydalanuvchi "nima qilishim kerak" degan savolga javobni shu
 // yerdan olishi kerak, hujjatlarni qidirmasdan.
-func RunChecks(routes RouteStatus) []*cc01v1.Check {
+func RunChecks(routes *route.Status) []*cc01v1.Check {
 	checks := []*cc01v1.Check{
 		checkPlatform(),
 		checkTunDevice(),
@@ -30,10 +31,10 @@ func RunChecks(routes RouteStatus) []*cc01v1.Check {
 	return checks
 }
 
-func checkRoutes(routes RouteStatus) *cc01v1.Check {
-	count := len(routes.Last())
+func checkRoutes(routes *route.Status) *cc01v1.Check {
+	count := routes.Count
 
-	if !routes.Synced() {
+	if !routes.Synced {
 		return fail("marshrutlar",
 			fmt.Sprintf("oxirgi moslashtirish muvaffaqiyatsiz (%d ta kutilgan)", count),
 			"demon loglarini ko'ring: journalctl -u cc01d\n"+
