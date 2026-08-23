@@ -12,7 +12,7 @@ IMAGE=cc01-cp-demo
 TOKEN=demo-shared-secret-0123456789
 
 cleanup() {
-  $DOCKER rm -f cc01-cp cc01-n1 cc01-n2 cc01-n3 cc01-bad >/dev/null 2>&1 || true
+  $DOCKER rm -f cc01-cp cc01-n1 cc01-n2 cc01-n3 cc01-bad cc01-impostor >/dev/null 2>&1 || true
   $DOCKER network rm $NET >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -42,11 +42,14 @@ echo "  CP pin: $PIN"
 
 for i in 1 2 3; do
   echo "── node $i ──"
+  KEY=$($DOCKER run --rm --entrypoint cc01d $IMAGE -genkey 2>/dev/null)
+  echo "$KEY" > "/tmp/cc01-node-$i.key"
   $DOCKER run -d --name "cc01-n$i" --network $NET --ip "172.32.88.1$i" \
     --cap-add NET_ADMIN --device /dev/net/tun \
     --entrypoint cc01d $IMAGE \
-    -key "$($DOCKER run --rm --entrypoint cc01d $IMAGE -genkey 2>/dev/null)" \
+    -key "$KEY" \
     -cp 172.32.88.5:8443 -cp-token "$TOKEN" -cp-pin "$PIN" \
+    -state-dir /var/lib/cc01 \
     -hostname "node-$i" -listen 51820 >/dev/null
 done
 
@@ -68,6 +71,27 @@ else
   $DOCKER logs cc01-bad 2>&1 | tail -3
 fi
 $DOCKER rm -f cc01-bad >/dev/null 2>&1 || true
+
+# Sertifikat haqiqatan himoya qiladimi: node-1 ning KALITI bilan,
+# lekin BOSHQA sertifikat bilan ulanishga urinamiz. Token bizda bor
+# (u umumiy sir), ya'ni eski modelda bu ishlagan bo'lardi.
+echo "── o'g'irlangan token bilan node o'rniga o'tib bo'ladimi ──"
+NODE1_KEY=$(cat /tmp/cc01-node-1.key 2>/dev/null || echo "")
+if [ -n "$NODE1_KEY" ]; then
+  $DOCKER run -d --name cc01-impostor --network $NET --ip 172.32.88.98 \
+    --cap-add NET_ADMIN --device /dev/net/tun \
+    --entrypoint cc01d $IMAGE \
+    -key "$NODE1_KEY" -cp 172.32.88.5:8443 -cp-token "$TOKEN" -cp-pin "$PIN" \
+    -state-dir /var/lib/cc01 -hostname impostor -listen 51820 >/dev/null
+  sleep 4
+  if $DOCKER logs cc01-impostor 2>&1 | grep -q "sertifikati bog'langanidan farq"; then
+    echo "  ✔ rad etildi — sertifikat mos kelmadi"
+  else
+    echo "  ✘ O'TIB KETDI:"
+    $DOCKER logs cc01-impostor 2>&1 | tail -3
+  fi
+  $DOCKER rm -f cc01-impostor >/dev/null 2>&1 || true
+fi
 
 echo "── peerlar topilishini kutamiz ──"
 sleep 6

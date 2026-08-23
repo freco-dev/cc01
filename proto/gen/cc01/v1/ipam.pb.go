@@ -39,6 +39,7 @@ type LeaseCommand struct {
 	//	*LeaseCommand_Renew
 	//	*LeaseCommand_Release
 	//	*LeaseCommand_Sweep
+	//	*LeaseCommand_Bind
 	Command       isLeaseCommand_Command `protobuf_oneof:"command"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -124,6 +125,15 @@ func (x *LeaseCommand) GetSweep() *SweepLeases {
 	return nil
 }
 
+func (x *LeaseCommand) GetBind() *BindNodeIdentity {
+	if x != nil {
+		if x, ok := x.Command.(*LeaseCommand_Bind); ok {
+			return x.Bind
+		}
+	}
+	return nil
+}
+
 type isLeaseCommand_Command interface {
 	isLeaseCommand_Command()
 }
@@ -144,6 +154,10 @@ type LeaseCommand_Sweep struct {
 	Sweep *SweepLeases `protobuf:"bytes,5,opt,name=sweep,proto3,oneof"`
 }
 
+type LeaseCommand_Bind struct {
+	Bind *BindNodeIdentity `protobuf:"bytes,6,opt,name=bind,proto3,oneof"`
+}
+
 func (*LeaseCommand_Allocate) isLeaseCommand_Command() {}
 
 func (*LeaseCommand_Renew) isLeaseCommand_Command() {}
@@ -151,6 +165,8 @@ func (*LeaseCommand_Renew) isLeaseCommand_Command() {}
 func (*LeaseCommand_Release) isLeaseCommand_Command() {}
 
 func (*LeaseCommand_Sweep) isLeaseCommand_Command() {}
+
+func (*LeaseCommand_Bind) isLeaseCommand_Command() {}
 
 // AllocateLease — yangi ijara. Prefiks va ID lider tomonidan
 // tanlangan.
@@ -396,6 +412,65 @@ func (*SweepLeases) Descriptor() ([]byte, []int) {
 	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{4}
 }
 
+// BindNodeIdentity nodeni uning TLS sertifikatiga bog'laydi.
+//
+// Bog'lanish REPLIKATSIYA qilinishi shart: u faqat liderning
+// xotirasida qolsa, failover'dan keyin yo'qolib, hamma node qaytadan
+// token bilan ro'yxatdan o'tishi kerak bo'lardi — ya'ni himoya
+// birinchi nosozlikdayoq yo'qolardi.
+type BindNodeIdentity struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	NodeId string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	// CertPin — sertifikatning SPKI barmoq izi ("sha256/...").
+	CertPin       string `protobuf:"bytes,2,opt,name=cert_pin,json=certPin,proto3" json:"cert_pin,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BindNodeIdentity) Reset() {
+	*x = BindNodeIdentity{}
+	mi := &file_cc01_v1_ipam_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BindNodeIdentity) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BindNodeIdentity) ProtoMessage() {}
+
+func (x *BindNodeIdentity) ProtoReflect() protoreflect.Message {
+	mi := &file_cc01_v1_ipam_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BindNodeIdentity.ProtoReflect.Descriptor instead.
+func (*BindNodeIdentity) Descriptor() ([]byte, []int) {
+	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *BindNodeIdentity) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *BindNodeIdentity) GetCertPin() string {
+	if x != nil {
+		return x.CertPin
+	}
+	return ""
+}
+
 // LeaseRecord — snapshot'ga yoziladigan bitta ijara.
 //
 // Buyruqlardan alohida tur: buyruq "nima qilinsin" ni, bu esa
@@ -421,7 +496,7 @@ type LeaseRecord struct {
 
 func (x *LeaseRecord) Reset() {
 	*x = LeaseRecord{}
-	mi := &file_cc01_v1_ipam_proto_msgTypes[5]
+	mi := &file_cc01_v1_ipam_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -433,7 +508,7 @@ func (x *LeaseRecord) String() string {
 func (*LeaseRecord) ProtoMessage() {}
 
 func (x *LeaseRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_cc01_v1_ipam_proto_msgTypes[5]
+	mi := &file_cc01_v1_ipam_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -446,7 +521,7 @@ func (x *LeaseRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LeaseRecord.ProtoReflect.Descriptor instead.
 func (*LeaseRecord) Descriptor() ([]byte, []int) {
-	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{5}
+	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *LeaseRecord) GetId() string {
@@ -519,17 +594,71 @@ func (x *LeaseRecord) GetReleasedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+// IdentityRecord — snapshot'ga yoziladigan bitta bog'lanish.
+type IdentityRecord struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	CertPin       string                 `protobuf:"bytes,2,opt,name=cert_pin,json=certPin,proto3" json:"cert_pin,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IdentityRecord) Reset() {
+	*x = IdentityRecord{}
+	mi := &file_cc01_v1_ipam_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IdentityRecord) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IdentityRecord) ProtoMessage() {}
+
+func (x *IdentityRecord) ProtoReflect() protoreflect.Message {
+	mi := &file_cc01_v1_ipam_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IdentityRecord.ProtoReflect.Descriptor instead.
+func (*IdentityRecord) Descriptor() ([]byte, []int) {
+	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *IdentityRecord) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *IdentityRecord) GetCertPin() string {
+	if x != nil {
+		return x.CertPin
+	}
+	return ""
+}
+
 var File_cc01_v1_ipam_proto protoreflect.FileDescriptor
 
 const file_cc01_v1_ipam_proto_rawDesc = "" +
 	"\n" +
-	"\x12cc01/v1/ipam.proto\x12\acc01.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x8b\x02\n" +
+	"\x12cc01/v1/ipam.proto\x12\acc01.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xbc\x02\n" +
 	"\fLeaseCommand\x12,\n" +
 	"\x03now\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x03now\x124\n" +
 	"\ballocate\x18\x02 \x01(\v2\x16.cc01.v1.AllocateLeaseH\x00R\ballocate\x12+\n" +
 	"\x05renew\x18\x03 \x01(\v2\x13.cc01.v1.RenewLeaseH\x00R\x05renew\x121\n" +
 	"\arelease\x18\x04 \x01(\v2\x15.cc01.v1.ReleaseLeaseH\x00R\arelease\x12,\n" +
-	"\x05sweep\x18\x05 \x01(\v2\x14.cc01.v1.SweepLeasesH\x00R\x05sweepB\t\n" +
+	"\x05sweep\x18\x05 \x01(\v2\x14.cc01.v1.SweepLeasesH\x00R\x05sweep\x12/\n" +
+	"\x04bind\x18\x06 \x01(\v2\x19.cc01.v1.BindNodeIdentityH\x00R\x04bindB\t\n" +
 	"\acommand\"\xe7\x01\n" +
 	"\rAllocateLease\x12\x19\n" +
 	"\blease_id\x18\x01 \x01(\tR\aleaseId\x12\x16\n" +
@@ -548,7 +677,10 @@ const file_cc01_v1_ipam_proto_rawDesc = "" +
 	"ttlSeconds\")\n" +
 	"\fReleaseLease\x12\x19\n" +
 	"\blease_id\x18\x01 \x01(\tR\aleaseId\"\r\n" +
-	"\vSweepLeases\"\xd6\x02\n" +
+	"\vSweepLeases\"F\n" +
+	"\x10BindNodeIdentity\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x19\n" +
+	"\bcert_pin\x18\x02 \x01(\tR\acertPin\"\xd6\x02\n" +
 	"\vLeaseRecord\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
 	"\x06prefix\x18\x02 \x01(\tR\x06prefix\x12\x12\n" +
@@ -562,7 +694,10 @@ const file_cc01_v1_ipam_proto_rawDesc = "" +
 	"expires_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12;\n" +
 	"\vreleased_at\x18\n" +
 	" \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"releasedAtB\x89\x01\n" +
+	"releasedAt\"D\n" +
+	"\x0eIdentityRecord\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x19\n" +
+	"\bcert_pin\x18\x02 \x01(\tR\acertPinB\x89\x01\n" +
 	"\vcom.cc01.v1B\tIpamProtoP\x01Z2github.com/freco-dev/cc01/proto/gen/cc01/v1;cc01v1\xa2\x02\x03CXX\xaa\x02\aCc01.V1\xca\x02\aCc01\\V1\xe2\x02\x13Cc01\\V1\\GPBMetadata\xea\x02\bCc01::V1b\x06proto3"
 
 var (
@@ -577,30 +712,33 @@ func file_cc01_v1_ipam_proto_rawDescGZIP() []byte {
 	return file_cc01_v1_ipam_proto_rawDescData
 }
 
-var file_cc01_v1_ipam_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_cc01_v1_ipam_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_cc01_v1_ipam_proto_goTypes = []any{
 	(*LeaseCommand)(nil),          // 0: cc01.v1.LeaseCommand
 	(*AllocateLease)(nil),         // 1: cc01.v1.AllocateLease
 	(*RenewLease)(nil),            // 2: cc01.v1.RenewLease
 	(*ReleaseLease)(nil),          // 3: cc01.v1.ReleaseLease
 	(*SweepLeases)(nil),           // 4: cc01.v1.SweepLeases
-	(*LeaseRecord)(nil),           // 5: cc01.v1.LeaseRecord
-	(*timestamppb.Timestamp)(nil), // 6: google.protobuf.Timestamp
+	(*BindNodeIdentity)(nil),      // 5: cc01.v1.BindNodeIdentity
+	(*LeaseRecord)(nil),           // 6: cc01.v1.LeaseRecord
+	(*IdentityRecord)(nil),        // 7: cc01.v1.IdentityRecord
+	(*timestamppb.Timestamp)(nil), // 8: google.protobuf.Timestamp
 }
 var file_cc01_v1_ipam_proto_depIdxs = []int32{
-	6, // 0: cc01.v1.LeaseCommand.now:type_name -> google.protobuf.Timestamp
+	8, // 0: cc01.v1.LeaseCommand.now:type_name -> google.protobuf.Timestamp
 	1, // 1: cc01.v1.LeaseCommand.allocate:type_name -> cc01.v1.AllocateLease
 	2, // 2: cc01.v1.LeaseCommand.renew:type_name -> cc01.v1.RenewLease
 	3, // 3: cc01.v1.LeaseCommand.release:type_name -> cc01.v1.ReleaseLease
 	4, // 4: cc01.v1.LeaseCommand.sweep:type_name -> cc01.v1.SweepLeases
-	6, // 5: cc01.v1.LeaseRecord.issued_at:type_name -> google.protobuf.Timestamp
-	6, // 6: cc01.v1.LeaseRecord.expires_at:type_name -> google.protobuf.Timestamp
-	6, // 7: cc01.v1.LeaseRecord.released_at:type_name -> google.protobuf.Timestamp
-	8, // [8:8] is the sub-list for method output_type
-	8, // [8:8] is the sub-list for method input_type
-	8, // [8:8] is the sub-list for extension type_name
-	8, // [8:8] is the sub-list for extension extendee
-	0, // [0:8] is the sub-list for field type_name
+	5, // 5: cc01.v1.LeaseCommand.bind:type_name -> cc01.v1.BindNodeIdentity
+	8, // 6: cc01.v1.LeaseRecord.issued_at:type_name -> google.protobuf.Timestamp
+	8, // 7: cc01.v1.LeaseRecord.expires_at:type_name -> google.protobuf.Timestamp
+	8, // 8: cc01.v1.LeaseRecord.released_at:type_name -> google.protobuf.Timestamp
+	9, // [9:9] is the sub-list for method output_type
+	9, // [9:9] is the sub-list for method input_type
+	9, // [9:9] is the sub-list for extension type_name
+	9, // [9:9] is the sub-list for extension extendee
+	0, // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_cc01_v1_ipam_proto_init() }
@@ -613,6 +751,7 @@ func file_cc01_v1_ipam_proto_init() {
 		(*LeaseCommand_Renew)(nil),
 		(*LeaseCommand_Release)(nil),
 		(*LeaseCommand_Sweep)(nil),
+		(*LeaseCommand_Bind)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -620,7 +759,7 @@ func file_cc01_v1_ipam_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cc01_v1_ipam_proto_rawDesc), len(file_cc01_v1_ipam_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

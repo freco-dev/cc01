@@ -6,6 +6,7 @@ package control
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -64,6 +65,13 @@ type Config struct {
 	// sinovlar uchun: bu rejimda NetworkMap, node kalitlari va
 	// autentifikatsiya tokeni ochiq matnda uzatiladi.
 	Insecure bool
+
+	// ClientCert — nodening TLS klient sertifikati.
+	//
+	// Bo'sh bo'lsa node faqat token bilan tanitiladi va CP
+	// ogohlantirish yozadi: token umumiy sir, ya'ni himoya
+	// sezilarli darajada zaifroq.
+	ClientCert *tls.Certificate
 
 	Logger *slog.Logger
 }
@@ -315,7 +323,12 @@ func transportCredentials(cfg Config, logger *slog.Logger) (credentials.Transpor
 			"maslahat", "self-signed CP uchun -cp-pin bering")
 	}
 
-	return credentials.NewTLS(tlsConfig(serverNameFor(cfg.Address), cfg.Pins)), nil
+	config := tlsConfig(serverNameFor(cfg.Address), cfg.Pins)
+	if cfg.ClientCert != nil {
+		config.Certificates = []tls.Certificate{*cfg.ClientCert}
+	}
+
+	return credentials.NewTLS(config), nil
 }
 
 // serverNameFor manzildan TLS uchun host qismini ajratadi.

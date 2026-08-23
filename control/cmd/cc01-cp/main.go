@@ -138,7 +138,7 @@ func run(cfg runConfig, logger *slog.Logger) error {
 
 	nodes := registry.New(registry.Options{})
 
-	store, closeStore, err := openStore(cfg, logger)
+	store, identities, closeStore, err := openStore(cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -154,6 +154,7 @@ func run(cfg runConfig, logger *slog.Logger) error {
 		Allocator:    allocator,
 		TenantPrefix: prefix,
 		AuthToken:    authToken,
+		Identities:   identities,
 		Logger:       logger,
 	})
 	if err != nil {

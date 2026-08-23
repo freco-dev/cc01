@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"log/slog"
 	"net/netip"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/freco-dev/cc01/daemon/ipc"
+	"github.com/freco-dev/cc01/daemon/nodecert"
 	"github.com/freco-dev/cc01/daemon/session"
 )
 
@@ -37,6 +39,9 @@ type controlConfig struct {
 
 	// cpInsecure — CP kanalini shifrlamaslik.
 	cpInsecure bool
+
+	// stateDir — node sertifikati saqlanadigan papka.
+	stateDir string
 }
 
 // upTimeout — `cc01 up` ro'yxatdan o'tishni qancha kutadi.
@@ -56,6 +61,21 @@ func runWithControlPlane(cfg controlConfig, logger *slog.Logger) error {
 		return err
 	}
 
+	// Node sertifikati: birinchi ishga tushishda yaratiladi va
+	// keyin o'zgarmaydi. Xato bo'lsa demon to'xtamaydi — token
+	// bilan ham ro'yxatdan o'tish mumkin, lekin bu zaifroq.
+	var clientCert *tls.Certificate
+	if cfg.stateDir != "" && !cfg.cpInsecure {
+		cert, err := nodecert.Load(cfg.stateDir)
+		if err != nil {
+			logger.Warn("node sertifikati yuklanmadi, faqat token ishlatiladi",
+				"dir", cfg.stateDir, "err", err)
+		} else {
+			clientCert = &cert
+			logger.Info("node sertifikati tayyor", "pin", nodecert.Pin(cert.Leaf))
+		}
+	}
+
 	mesh := session.New(session.Config{
 		Identity:    identity,
 		ControlAddr: cfg.controlAddr,
@@ -68,6 +88,7 @@ func runWithControlPlane(cfg controlConfig, logger *slog.Logger) error {
 		StunServer:  cfg.stunServer,
 		Pins:        cfg.cpPins,
 		Insecure:    cfg.cpInsecure,
+		ClientCert:  clientCert,
 		Logger:      logger,
 	})
 

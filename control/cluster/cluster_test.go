@@ -208,6 +208,15 @@ func TestCluster_FollowerRejectsWriteWithLeaderHint(t *testing.T) {
 		}
 	}
 
+	// Follower liderning manzilini bilishini kutamiz. Saylovdan
+	// keyin bu xabar biroz kechikadi va o'sha oraliqda ErrNotLeader
+	// manzilsiz keladi — bu to'g'ri xatti-harakat, lekin biz
+	// aynan manzilli holatni tekshirmoqchimiz.
+	deadline := time.Now().Add(5 * time.Second)
+	for follower.Leader() == "" && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+
 	_, _, err := follower.Propose(context.Background(), allocCmd("l1", "2a0e:1::1/128", "node-a"))
 
 	var notLeader *ErrNotLeader
@@ -304,4 +313,87 @@ func TestCluster_RejectsWritesWithoutQuorum(t *testing.T) {
 	}
 
 	t.Fatal("kvorumsiz yozuv qabul qilindi")
+}
+
+// Bog'lanish REPLIKATSIYA qilinishi shart. Faqat liderning
+// xotirasida qolsa, failover'dan keyin yo'qolib, himoya birinchi
+// nosozlikdayoq ishlamay qolardi.
+func TestCluster_ReplicatesIdentityBinding(t *testing.T) {
+	nodes := startCluster(t, 3)
+	leader := waitForLeader(t, nodes, 5*time.Second)
+
+	const (
+		nodeID = "abc123"
+		pin    = "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	)
+
+	if err := leader.Bind(context.Background(), nodeID, pin); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		replicated := 0
+		for _, node := range nodes {
+			if got, ok, _ := node.Identity(context.Background(), nodeID); ok && got == pin {
+				replicated++
+			}
+		}
+		if replicated == len(nodes) {
+			return
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatalf("bog'lanish %d/%d nodega yetib bordi", replicated, len(nodes))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// Mavjud bog'lanish jimgina almashtirilmasligi kerak: bu node
+// kalitini o'g'irlagan tomonga eskisini siqib chiqarish imkonini
+// berardi.
+func TestCluster_RejectsIdentityOverwrite(t *testing.T) {
+	nodes := startCluster(t, 3)
+	leader := waitForLeader(t, nodes, 5*time.Second)
+
+	const nodeID = "abc123"
+
+	if err := leader.Bind(context.Background(), nodeID, "sha256/AAA="); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	err := leader.Bind(context.Background(), nodeID, "sha256/BBB=")
+	if !errors.Is(err, ErrIdentityMismatch) {
+		t.Fatalf("ErrIdentityMismatch kutilgan edi, olindi: %v", err)
+	}
+
+	// Eski bog'lanish saqlanib qolishi kerak.
+	got, ok, _ := leader.Identity(context.Background(), nodeID)
+	if !ok || got != "sha256/AAA=" {
+		t.Errorf("bog'lanish o'zgardi: %q", got)
+	}
+}
+
+// O'sha sertifikat bilan qayta bog'lash xato emas va jurnalga
+// yangi yozuv qo'shmasligi kerak.
+func TestCluster_RebindWithSameCertIsNoop(t *testing.T) {
+	nodes := startCluster(t, 3)
+	leader := waitForLeader(t, nodes, 5*time.Second)
+
+	const (
+		nodeID = "abc123"
+		pin    = "sha256/AAA="
+	)
+
+	for range 3 {
+		if err := leader.Bind(context.Background(), nodeID, pin); err != nil {
+			t.Fatalf("Bind: %v", err)
+		}
+	}
+
+	got, ok, _ := leader.Identity(context.Background(), nodeID)
+	if !ok || got != pin {
+		t.Errorf("bog'lanish buzildi: %q", got)
+	}
 }

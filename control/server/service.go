@@ -37,6 +37,10 @@ type Config struct {
 	// deny-by-default).
 	AuthToken string
 
+	// Identities — nodelarni sertifikatlariga bog'laydi. nil bo'lsa
+	// xotiradagi ombor ishlatiladi.
+	Identities cluster.IdentityStore
+
 	Logger *slog.Logger
 }
 
@@ -44,11 +48,12 @@ type Config struct {
 type Service struct {
 	cc01v1.UnimplementedControlServiceServer
 
-	registry  *registry.Registry
-	allocator *ipam.Allocator
-	tenantNet netip.Prefix
-	authToken string
-	log       *slog.Logger
+	registry   *registry.Registry
+	allocator  *ipam.Allocator
+	identities cluster.IdentityStore
+	tenantNet  netip.Prefix
+	authToken  string
+	log        *slog.Logger
 }
 
 // HeartbeatInterval — klient qanchalik tez-tez xabar berishi kerak.
@@ -73,12 +78,19 @@ func New(cfg Config) (*Service, error) {
 		logger = slog.Default()
 	}
 
+	identities := cfg.Identities
+	if identities == nil {
+		// Klastersiz rejim: bog'lanishlar jarayon umriga bog'liq.
+		identities = cluster.NewMemoryIdentities()
+	}
+
 	return &Service{
-		registry:  cfg.Registry,
-		allocator: cfg.Allocator,
-		tenantNet: cfg.TenantPrefix.Masked(),
-		authToken: cfg.AuthToken,
-		log:       logger.With("component", "cp"),
+		registry:   cfg.Registry,
+		allocator:  cfg.Allocator,
+		identities: identities,
+		tenantNet:  cfg.TenantPrefix.Masked(),
+		authToken:  cfg.AuthToken,
+		log:        logger.With("component", "cp"),
 	}, nil
 }
 
@@ -102,21 +114,23 @@ func (s *Service) Register(
 	ctx context.Context,
 	req *cc01v1.RegisterRequest,
 ) (*cc01v1.RegisterResponse, error) {
-	if err := s.authorize(req.GetAuthToken()); err != nil {
-		return nil, err
-	}
-
+	// Kalit uzunligi AVVAL tekshiriladi: node_id undan hosil
+	// qilinadi va autentifikatsiya o'shanga tayanadi.
 	if len(req.GetPublicKey()) != 32 {
 		return nil, status.Errorf(codes.InvalidArgument,
 			"public kalit 32 bayt bo'lishi kerak, %d olindi", len(req.GetPublicKey()))
-	}
-	if req.GetTenant() == "" {
-		return nil, status.Error(codes.InvalidArgument, "tenant ko'rsatilmagan")
 	}
 
 	var key registry.PublicKey
 	copy(key[:], req.GetPublicKey())
 	nodeID := registry.NodeID(key)
+
+	if err := s.authenticate(ctx, nodeID, req.GetAuthToken()); err != nil {
+		return nil, err
+	}
+	if req.GetTenant() == "" {
+		return nil, status.Error(codes.InvalidArgument, "tenant ko'rsatilmagan")
+	}
 
 	// Manzil AVVAL beriladi: registry yozuvida `addresses` bo'lishi
 	// kerak, aks holda peerlar uni allowed_ips siz ko'rardi.
@@ -179,7 +193,7 @@ func (s *Service) Heartbeat(
 	ctx context.Context,
 	req *cc01v1.HeartbeatRequest,
 ) (*cc01v1.HeartbeatResponse, error) {
-	if err := s.authorize(req.GetAuthToken()); err != nil {
+	if err := s.authenticate(ctx, req.GetNodeId(), req.GetAuthToken()); err != nil {
 		return nil, err
 	}
 
@@ -215,7 +229,7 @@ func (s *Service) WatchNetworkMap(
 	req *cc01v1.WatchNetworkMapRequest,
 	stream cc01v1.ControlService_WatchNetworkMapServer,
 ) error {
-	if err := s.authorize(req.GetAuthToken()); err != nil {
+	if err := s.authenticate(stream.Context(), req.GetNodeId(), req.GetAuthToken()); err != nil {
 		return err
 	}
 

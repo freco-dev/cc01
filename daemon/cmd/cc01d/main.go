@@ -47,6 +47,7 @@ func main() {
 		cpToken      = flag.String("cp-token", os.Getenv("CC01_CP_TOKEN"), "CP bilan kelishilgan sir")
 		cpPin        = flag.String("cp-pin", os.Getenv("CC01_CP_PIN"), "CP sertifikatining SPKI pini (sha256/…); bir nechtasi vergul bilan")
 		cpInsecure   = flag.Bool("cp-insecure", false, "CP kanalini shifrlamaslik (FAQAT lokal sinov)")
+		stateDir     = flag.String("state-dir", stateDirDefault(), "node sertifikati saqlanadigan papka")
 		advertise    = flag.String("advertise", "", "e'lon qilinadigan underlay manzil host:port")
 		stunServer   = flag.String("stun", os.Getenv("CC01_STUN"), "STUN serveri host:port (NAT ortida public manzilni aniqlash uchun)")
 		socketPath   = flag.String("socket", ipc.DefaultSocket, "IPC soketi (`cc01` CLI uchun)")
@@ -115,6 +116,7 @@ func main() {
 			startDown:   *startDown,
 			cpPins:      splitList(*cpPin),
 			cpInsecure:  *cpInsecure,
+			stateDir:    *stateDir,
 		}, logger); err != nil {
 			fail(err)
 		}
@@ -287,4 +289,15 @@ func splitList(value string) []string {
 		}
 	}
 	return items
+}
+
+// stateDirDefault — sertifikat saqlanadigan standart papka.
+//
+// systemd unit'i StateDirectory=cc01 beradi va u shu yo'lga
+// aylanadi; muhit o'zgaruvchisi bo'lsa undan olinadi.
+func stateDirDefault() string {
+	if dir := os.Getenv("STATE_DIRECTORY"); dir != "" {
+		return dir
+	}
+	return "/var/lib/cc01"
 }

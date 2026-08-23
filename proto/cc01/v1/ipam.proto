@@ -27,10 +27,11 @@ message LeaseCommand {
   google.protobuf.Timestamp now = 1;
 
   oneof command {
-    AllocateLease allocate = 2;
-    RenewLease    renew    = 3;
-    ReleaseLease  release  = 4;
-    SweepLeases   sweep    = 5;
+    AllocateLease     allocate = 2;
+    RenewLease        renew    = 3;
+    ReleaseLease      release  = 4;
+    SweepLeases       sweep    = 5;
+    BindNodeIdentity  bind     = 6;
   }
 }
 
@@ -74,6 +75,19 @@ message ReleaseLease {
 // tugaganlarni butunlay o'chiradi.
 message SweepLeases {}
 
+// BindNodeIdentity nodeni uning TLS sertifikatiga bog'laydi.
+//
+// Bog'lanish REPLIKATSIYA qilinishi shart: u faqat liderning
+// xotirasida qolsa, failover'dan keyin yo'qolib, hamma node qaytadan
+// token bilan ro'yxatdan o'tishi kerak bo'lardi — ya'ni himoya
+// birinchi nosozlikdayoq yo'qolardi.
+message BindNodeIdentity {
+  string node_id = 1;
+
+  // CertPin — sertifikatning SPKI barmoq izi ("sha256/...").
+  string cert_pin = 2;
+}
+
 // LeaseRecord — snapshot'ga yoziladigan bitta ijara.
 //
 // Buyruqlardan alohida tur: buyruq "nima qilinsin" ni, bu esa
@@ -94,4 +108,10 @@ message LeaseRecord {
   // ReleasedAt — karantinga tushgan vaqt; faqat karantin holatida
   // to'ldiriladi.
   google.protobuf.Timestamp released_at = 10;
+}
+
+// IdentityRecord — snapshot'ga yoziladigan bitta bog'lanish.
+message IdentityRecord {
+  string node_id  = 1;
+  string cert_pin = 2;
 }

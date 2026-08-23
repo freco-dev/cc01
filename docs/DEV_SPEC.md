@@ -1079,11 +1079,50 @@ vektori** ikkala paketda ham qulflangan
 tushirilganda pin O'ZGARADI va hamma nodelarni qayta sozlash kerak
 bo'ladi. Ishlab chiqarishda `-tls-cert`/`-tls-key` majburiy.
 
-**Hali qurilmagani — mTLS.** Node hozir ham oldindan kelishilgan token
-bilan tanitiladi. Token endi TLS ichida ketadi, ya'ni tinglab olib
-bo'lmaydi, lekin u hamon **umumiy sir**: bitta node buzilsa, o'sha
-token bilan boshqa node ham ro'yxatdan o'ta oladi. Node sertifikatlari
-va ularni Noise identifikatoriga bog'lash — `cc01-idp` ishi.
+#### Node autentifikatsiyasi
+
+Token **umumiy sir** edi: hamma nodeda bir xil, ya'ni bitta node
+buzilsa o'sha token bilan boshqa nodening o'rniga o'tib bo'lardi.
+
+Endi ikki bosqichli model (Tailscale'dagi auth key bilan bir xil
+g'oya):
+
+| Bosqich | Nima talab qilinadi |
+| --- | --- |
+| **Ro'yxatga olish** | token + node sertifikati; sertifikat `node_id` ga bog'lanadi |
+| **Keyingi ulanish** | AYNAN o'sha sertifikat; token qabul qilinmaydi |
+
+Ya'ni o'g'irlangan token bilan **yangi** node qo'shish mumkin, lekin
+**mavjud** nodening o'rniga o'tib bo'lmaydi. Buni `cp-demo` alohida
+tekshiradi: node-1 ning kaliti va haqiqiy token bilan, lekin boshqa
+sertifikat bilan ulanishga urinish rad etiladi.
+
+**Bog'lanish replikatsiya qilinadi** (§3.3.1 dagi Raft jurnali orqali).
+Faqat liderning xotirasida qolsa, birinchi failover'dayoq yo'qolib,
+hamma node qaytadan token bilan ro'yxatdan o'tishi kerak bo'lardi —
+ya'ni himoya bir nosozlikda tugardi.
+
+**Mavjud bog'lanish jimgina almashtirilmaydi.** Node boshqa sertifikat
+bilan kelsa `PERMISSION_DENIED` qaytadi va CP ogohlantirish yozadi:
+yo node kalitini yo'qotgan, yo kimdir uning o'rniga o'tmoqchi —
+ikkalasi ham operator aralashuvini talab qiladi.
+
+**Nega Ed25519, Noise kaliti emas.** Nodening asosiy identifikatori —
+Curve25519 (X25519) Noise kaliti. U ECDH uchun, imzo uchun emas; TLS
+klient sertifikati esa imzo talab qiladi. X25519 dan Ed25519 ga
+xavfsiz o'tish standart emas, shuning uchun alohida kalit yaratiladi
+(`daemon/nodecert`) va u `node_id` ga CP tomonida bog'lanadi.
+
+⚠️ **Klient sertifikati TLS qatlamida tekshirilmaydi** —
+`RequestClientCert`, `RequireAndVerifyClientCert` emas. Nodelar
+o'z-o'zini imzolagan sertifikat ishlatadi va ularni tasdiqlaydigan CA
+yo'q. Tekshiruv yuqori qatlamda: sertifikat aynan shu `node_id` ga
+bog'langani solishtiriladi. Bu CA dan kuchliroq — sertifikat kimdir
+tomonidan imzolangani emas, AYNAN o'sha node ekani muhim.
+
+**Hali qurilmagani.** Sertifikatni almashtirish (rotation) va bekor
+qilish (revocation) uchun operator interfeysi yo'q: node kalitini
+yo'qotsa, bog'lanishni qo'lda o'chirish kerak bo'ladi.
 
 ### 5.2.1 O'rnatish va systemd
 
@@ -1469,7 +1508,7 @@ Subdomain qoidalari hozir `core-server/utils.go` da (uzunlik 3–38, `^[a-z\d](?
 | --- | --- |
 | S-1 | Private kalitlar hech qachon diskka aniq matnda yozilmaydi; TPM/Keychain bo'lsa u ishlatiladi |
 | S-2 | Kalitlar `memguard` bilan `mlock` qilinadi, swap'ga tushmaydi |
-| S-3 | Barcha CP aloqasi mTLS 1.3, sertifikat pinning bilan — ✅ TLS 1.3 + SPKI pinning; **mTLS (node sertifikatlari) hali yo'q** |
+| S-3 | Barcha CP aloqasi mTLS 1.3, sertifikat pinning bilan — ✅ ikki tomonlama: server SPKI pin, node klient sertifikati |
 | S-4 | Cryptokey routing (`inner_src ∈ peer.allowed_ips`) — chetlab o'tib bo'lmaydi |
 | S-5 | Daemon `CAP_NET_ADMIN`+`CAP_BPF` bilan ishlaydi, to'liq root emas (`AmbientCapabilities`) — ✅ `CAP_NET_ADMIN` uchun tekshirilgan |
 | S-6 | systemd hardening: `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`, `RestrictSUIDSGID` — ✅ |

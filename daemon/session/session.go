@@ -9,6 +9,7 @@ package session
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -54,6 +55,9 @@ type Config struct {
 
 	// Insecure — CP kanalini shifrlamaslik (FAQAT lokal sinov).
 	Insecure bool
+
+	// ClientCert — nodening TLS klient sertifikati.
+	ClientCert *tls.Certificate
 
 	Logger *slog.Logger
 }
@@ -163,6 +167,7 @@ func (s *Session) build(ctx context.Context) (*active, error) {
 		OnNetworkMap: routes.poke,
 		Pins:         s.cfg.Pins,
 		Insecure:     s.cfg.Insecure,
+		ClientCert:   s.cfg.ClientCert,
 		Logger:       s.log,
 	})
 	if err != nil {

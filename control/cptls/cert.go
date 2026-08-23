@@ -109,6 +109,20 @@ func ServerConfig(cert tls.Certificate) *tls.Config {
 		// klientlarimizga xizmat qiladi, ya'ni moslik uchun
 		// chegirma qilishning hojati yo'q.
 		MinVersion: tls.VersionTLS13,
+
+		// Klient sertifikati SO'RALADI, lekin TLS qatlamida
+		// TEKSHIRILMAYDI.
+		//
+		// Sabab: nodelar o'z-o'zini imzolagan sertifikat ishlatadi
+		// va ularni tasdiqlaydigan CA yo'q. Tekshiruv yuqori
+		// qatlamda bo'ladi — u yerda sertifikat AYNAN shu node_id
+		// ga bog'langani solishtiriladi. Bu CA dan kuchliroq:
+		// sertifikat kimdir tomonidan imzolangani emas, AYNAN
+		// o'sha node ekani muhim.
+		//
+		// RequireAnyClientCert emas, RequestClientCert: birinchi
+		// marta ro'yxatdan o'tayotgan node ham ulanishi kerak.
+		ClientAuth: tls.RequestClientCert,
 	}
 }
 

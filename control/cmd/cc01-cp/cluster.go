@@ -14,16 +14,20 @@ import (
 // Klaster sozlanmagan bo'lsa — xotiradagi ombor. U bitta jarayon
 // uchun to'liq to'g'ri ishlaydi, lekin jarayon o'lganda hamma ijara
 // yo'qoladi va nodelar yangi manzil oladi.
-func openStore(cfg runConfig, logger *slog.Logger) (ipam.Store, func() error, error) {
+func openStore(
+	cfg runConfig,
+	logger *slog.Logger,
+) (ipam.Store, cluster.IdentityStore, func() error, error) {
 	if cfg.raftBind == "" {
 		logger.Warn("klaster sozlanmagan — holat XOTIRADA saqlanadi va " +
 			"qayta ishga tushirilganda YO'QOLADI; ishlab chiqarish uchun -raft-bind bering")
-		return ipam.NewMemoryStore(), func() error { return nil }, nil
+		return ipam.NewMemoryStore(), cluster.NewMemoryIdentities(),
+			func() error { return nil }, nil
 	}
 
 	peers, err := parsePeers(cfg.raftPeers)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	node, err := cluster.Start(cluster.Config{
@@ -36,10 +40,12 @@ func openStore(cfg runConfig, logger *slog.Logger) (ipam.Store, func() error, er
 		Logger:    logger,
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
-	return node, node.Close, nil
+	// Bitta Raft node ikkala rolni ham bajaradi: ijaralar va node
+	// bog'lanishlari bir xil jurnal orqali ketadi.
+	return node, node, node.Close, nil
 }
 
 // parsePeers "id=host:port,id=host:port" ro'yxatini o'qiydi.
