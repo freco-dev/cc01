@@ -325,11 +325,25 @@ Prefiks **anchor** PoP bilan bog'lanadi: `tas1` PoP shu `/48`ni BGP orqali e'lon
 Aks holda relay orqali ketgan javob to'g'ridan-to'g'ri probe'ni tasdiqlamaydi
 va yo'l abadiy `probing` holatida qoladi — hech qanday xato chiqmasdan.
 
-**Cone va symmetric farqi o'lchangan.** Linux `MASQUERADE` har bir MANZIL
-uchun boshqa tashqi port beradi, ya'ni symmetric NAT kabi ishlaydi: bitta
-node uchun relayga `51820`, peerga `12860`. STUN aytgan manzil faqat STUN
-oqimi uchun to'g'ri bo'lib qoladi. Port saqlanadigan NAT'da (`punch-demo`)
-esa ikkala tomon ham bir necha yuz millisekundda `direct-active` ga o'tadi.
+**Cone va symmetric farqi o'lchangan.** Ikkala holat ham alohida demo
+bilan qoplangan:
+
+| NAT turi | Simulyatsiya | Natija |
+| --- | --- | --- |
+| Cone (endpoint-independent) | `MASQUERADE` | `direct-active`, ~400 ms — `make punch-demo` |
+| Symmetric (endpoint-dependent) | `MASQUERADE --random` | relayda qoladi — `make relay-demo` |
+
+`--random` bilan har bir oqim tasodifiy tashqi port oladi. Bitta node
+uchun o'lchangan: STUN → `57174`, relay → `19530`, peer → `5275`. STUN
+aytgan manzil faqat STUN oqimi uchun to'g'ri bo'lib qoladi.
+
+⚠️ **O'lchov paytidagi tuzoq.** Kutilmagan kiruvchi paket shlyuzda
+conntrack yozuvi hosil qilsa, o'sha yozuv keyin ichkaridan chiqadigan
+oqimga port tanlashga aralashadi va oddiy `MASQUERADE` ham symmetric
+kabi ko'rinib qoladi. Haqiqiy NAT bunday paketni mapping jadvaliga
+kiritmaydi, shuning uchun ikkala demo ham uni conntrack tasdiqlashidan
+oldin tashlaydi. Busiz o'lchov NAT'ning xatti-harakatini emas, shu
+nojo'ya ta'sirni ko'rsatadi.
 
 #### 3.1.5 `cc01-policy` — Zero-Trust Policy Engine
 

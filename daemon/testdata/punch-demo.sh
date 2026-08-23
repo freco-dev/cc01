@@ -7,11 +7,14 @@
 #   net-a        172.35.1.0/24   gw-a:eth1, node-1
 #   net-b        172.35.2.0/24   gw-b:eth1, node-2
 #
-# relay-demo dan farqi bitta qatorda: u yerda MASQUERADE ishlatiladi va
-# Linux har bir manzil uchun boshqa tashqi port beradi (symmetric NAT) —
-# u holda teshik ochib bo'lmaydi va relay yagona yo'l. Bu yerda esa
-# SNAT portni majburan saqlaydi, ya'ni STUN aytgan manzil ikkala tomon
-# uchun ham to'g'ri bo'lib qoladi.
+# Linux MASQUERADE sukut bo'yicha manba portini saqlaydi, ya'ni
+# mapping manzilga bog'liq emas (endpoint-independent). Shuning uchun
+# STUN aytgan manzil har qanday peer uchun to'g'ri bo'ladi va teshik
+# ochiladi.
+#
+# relay-demo dan farqi bitta bayroqda: u yerda `MASQUERADE --random`
+# har bir oqimga tasodifiy port beradi (symmetric NAT) va teshik
+# ochib bo'lmaydi.
 #
 # Kutilgan natija: ulanish relaydan boshlanadi, keyin ikkala tomon
 # bir-birining public manziliga disco ping yuboradi, NAT'larda
@@ -51,12 +54,8 @@ gateway() {
     --cap-add NET_ADMIN --sysctl net.ipv4.ip_forward=1 \
     --entrypoint sh $IMAGE -c 'sleep infinity' >/dev/null
   $DOCKER network connect --ip "$privip" "$privnet" "$name"
-  # Chiquvchi: overlay porti uchun tashqi port MAJBURAN saqlanadi.
-  # Shunda mapping manzilga bog'liq bo'lmaydi va STUN bergan javob
-  # har qanday peer uchun to'g'ri bo'ladi.
-  $DOCKER exec "$name" iptables -t nat -A POSTROUTING \
-    -s "$subnet" ! -d "$subnet" -p udp --sport 51820 \
-    -j SNAT --to-source "$pubip:51820"
+  # Chiquvchi: oddiy MASQUERADE. U manba portini saqlaydi, ya'ni
+  # cone NAT kabi ishlaydi.
   $DOCKER exec "$name" iptables -t nat -A POSTROUTING \
     -s "$subnet" ! -d "$subnet" -j MASQUERADE
 
@@ -77,7 +76,7 @@ gateway() {
     -d "$subnet" -m conntrack --ctstate NEW,INVALID -j DROP
 }
 
-echo "── NAT shlyuzlari (port saqlanadi) ──"
+echo "── NAT shlyuzlari (cone: port saqlanadi) ──"
 gateway cc01-pgwa 172.35.0.2 $NETA 172.35.1.2 172.35.1.0/24
 gateway cc01-pgwb 172.35.0.3 $NETB 172.35.2.2 172.35.2.0/24
 echo "  gw-a → 172.35.0.2, gw-b → 172.35.0.3"

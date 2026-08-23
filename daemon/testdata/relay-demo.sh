@@ -7,20 +7,22 @@
 #
 # Ikkala node ham CP va relayga yeta oladi, lekin BIR-BIRIGA yo'q.
 #
-# Sababi MASQUERADE: Linux har bir MANZIL uchun boshqa tashqi port
-# beradi. O'lchangan holat — node-1 uchun gw-a da:
+# Shlyuzlar `MASQUERADE --random` bilan ishlaydi: har bir oqimga
+# TASODIFIY tashqi port beriladi. O'lchangan holat — node-1 uchun:
 #
-#   → relay (172.34.0.5:51821)   tashqi port 51820
-#   → node-2 (172.34.0.3:51820)  tashqi port 12860
+#   → STUN  (172.34.0.5:3478)    tashqi port 57174
+#   → relay (172.34.0.5:51821)   tashqi port 19530
+#   → node-2                     tashqi port  5275
 #
 # Bu symmetric NAT (endpoint-dependent mapping). STUN aytgan manzil
-# faqat STUN oqimi uchun to'g'ri; peer boshqa portni ko'radi va teshik
-# ochilmaydi. Ikkala tomon ham disco ping yuboradi, lekin ular
-# bir-birining NAT'idagi mos yozuvga tushmaydi.
+# faqat STUN oqimi uchun to'g'ri; peer butunlay boshqa portni ko'radi
+# va teshik ochilmaydi. Ikkala tomon ham disco ping yuboradi, lekin
+# ular bir-birining NAT'idagi mos yozuvga tushmaydi.
 #
-# Cone NAT'da (port saqlanadi) esa teshik ochiladi — `make punch-demo`.
-# Symmetric NAT uchun port bashorati / birthday punching kerak; u hali
-# qurilmagan, shuning uchun bu yerda yagona yo'l — relay.
+# `--random` bo'lmasa MASQUERADE portni saqlaydi va teshik OCHILADI —
+# aynan shuni `make punch-demo` ko'rsatadi. Symmetric NAT uchun port
+# bashorati / birthday punching kerak; u hali qurilmagan, shuning
+# uchun bu yerda yagona yo'l — relay.
 set -e
 
 DOCKER="docker --context desktop-linux"
@@ -55,8 +57,16 @@ gateway() {
     --cap-add NET_ADMIN --sysctl net.ipv4.ip_forward=1 \
     --entrypoint sh $IMAGE -c 'sleep infinity' >/dev/null
   $DOCKER network connect --ip "$privip" "$privnet" "$name"
+  # --random: har bir oqimga tasodifiy tashqi port → symmetric NAT.
   $DOCKER exec "$name" iptables -t nat -A POSTROUTING \
-    -s "$subnet" ! -d "$subnet" -j MASQUERADE
+    -s "$subnet" ! -d "$subnet" -j MASQUERADE --random
+
+  # Kutilmagan kiruvchi paket conntrack'ga YOZILMASLIGI kerak: yozuv
+  # tasdiqlansa, u keyin ichkaridan chiqadigan oqimga port tanlashga
+  # aralashadi va o'lchov haqiqiy NAT xatti-harakatini emas, shu
+  # nojo'ya ta'sirni ko'rsatib qo'yadi.
+  $DOCKER exec "$name" iptables -A INPUT \
+    -p udp --dport 51820 -m conntrack --ctstate NEW -j DROP
 }
 
 echo "── NAT shlyuzlari ──"
