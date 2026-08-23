@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/netip"
 	"sync"
+
+	cc01v1 "github.com/freco-dev/cc01/proto/gen/cc01/v1"
 )
 
 // State — IPAM ning to'liq holati.
@@ -94,21 +96,31 @@ func (s *State) takenIn(parent netip.Prefix) map[netip.Prefix]struct{} {
 // Store — IPAM holatini saqlaydi va o'zgarishlarni SERIALIZATSIYALAYDI.
 //
 // Ikki marta taqsimlash mumkin emasligi aynan shu yerda ta'minlanadi:
-// `Update` ichidagi funksiya boshqa yozuvchilardan ajratilgan holda
-// bajariladi, ya'ni tekshirish va yozish orasida bo'shliq qolmaydi.
+// buyruqlar qat'iy ketma-ketlikda qo'llanadi va `State.Apply` prefiks
+// bandligini QAYTA tekshiradi.
 //
-// Raft implementatsiyasida `Update` — bu `raft.Apply`: o'zgarish
-// jurnalga yoziladi, quorum tasdiqlaydi, keyin FSM ga qo'llanadi
-// (ARCHITECTURE.md §3.1.6, ADR-006).
+// ⚠️ Interfeys ataylab BUYRUQ asosida, funksiya asosida emas.
+//
+// Ilgari u `Update(ctx, func(*State) error)` ko'rinishida edi va
+// izohda "Raft implementatsiyasida bu `raft.Apply` bo'ladi" deb
+// yozilgandi. Bu amalga oshmaydi: Raft jurnalga BAYTLAR yozadi va
+// ularni har bir replikada qayta o'qiydi — funksiyani esa
+// serializatsiya qilib bo'lmaydi. Bundan tashqari eski kod qarorni
+// (tasodifiy prefiks, joriy vaqt) o'sha funksiya ichida qabul
+// qilardi, ya'ni har bir replika boshqa natijaga kelardi.
+//
+// Endi qarorni LIDER qabul qiladi va TO'LIQ ANIQLANGAN buyruqni
+// taklif qiladi; replikalar faqat qo'llaydi.
 type Store interface {
-	// Update holatni o'zgartiradi.
+	// Propose buyruqni jurnalga yozadi va qo'llaydi.
 	//
-	// KELISHUV: `fn` avval hamma tekshiruvni bajaradi, keyingina
-	// holatga tegadi. Xato qaytarilganda o'zgarishlar avtomatik bekor
-	// QILINMAYDI — butun holatni nusxalash O(N) bo'lgani uchun ataylab
-	// shunday. Raft'da ham xuddi shunday: `Apply` allaqachon commit
-	// qilingan buyruqni qo'llaydi, uni orqaga qaytarib bo'lmaydi.
-	Update(ctx context.Context, fn func(*State) error) error
+	// Qaytarilgan ijara — nusxa. Sweep uchun ikkinchi qiymat
+	// bo'shatilganlar sonini beradi.
+	//
+	// ErrPrefixTaken qaytishi normal: taklif qiluvchi holatning
+	// nusxasi bo'yicha qaror qabul qilgan, jurnal esa buyruqlarni
+	// ketma-ket qo'llaydi. Chaqiruvchi qayta urinadi.
+	Propose(ctx context.Context, cmd *cc01v1.LeaseCommand) (*Lease, int, error)
 
 	// View holatni faqat o'qish uchun beradi. `fn` holatni
 	// o'zgartirmasligi va undan olingan ko'rsatkichlarni saqlab
@@ -130,15 +142,18 @@ func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{state: NewState()}
 }
 
-func (m *MemoryStore) Update(ctx context.Context, fn func(*State) error) error {
+func (m *MemoryStore) Propose(
+	ctx context.Context,
+	cmd *cc01v1.LeaseCommand,
+) (*Lease, int, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, 0, err
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	return fn(m.state)
+	return m.state.Apply(cmd)
 }
 
 func (m *MemoryStore) View(ctx context.Context, fn func(*State) error) error {

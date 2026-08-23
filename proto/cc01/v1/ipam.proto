@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+package cc01.v1;
+
+option go_package = "github.com/freco-dev/cc01/proto/gen/cc01/v1;cc01v1";
+option csharp_namespace = "Cc01.V1";
+
+import "google/protobuf/timestamp.proto";
+
+// IPAM ning Raft jurnaliga yoziladigan buyruqlari
+// (ARCHITECTURE.md §3.1.6, ADR-006).
+//
+// Nega protobuf: Raft jurnali DOIMIY saqlanadi va klaster yangilanganda
+// eski yozuvlar qayta o'qiladi. Ya'ni bu format orqaga moslikni
+// saqlashi shart — buf lint va `buf breaking` uni boshqa shartnomalar
+// bilan bir xil qattiqlikda qo'riqlaydi.
+
+// LeaseCommand — holatni o'zgartiradigan bitta amal.
+//
+// ⚠️ Buyruq TO'LIQ ANIQLANGAN bo'lishi shart. Tasodifiy tanlov va
+// joriy vaqt LIDER tomonida hal qilinadi va shu yerga yoziladi;
+// replikalar faqat qo'llaydi. Aks holda har bir replika boshqa
+// natijaga kelib, holat ajralib ketardi.
+message LeaseCommand {
+  // Now — liderning buyruqni taklif qilgan payti. Muddatlar shundan
+  // hisoblanadi.
+  google.protobuf.Timestamp now = 1;
+
+  oneof command {
+    AllocateLease allocate = 2;
+    RenewLease    renew    = 3;
+    ReleaseLease  release  = 4;
+    SweepLeases   sweep    = 5;
+  }
+}
+
+// AllocateLease — yangi ijara. Prefiks va ID lider tomonidan
+// tanlangan.
+message AllocateLease {
+  string lease_id = 1;
+
+  // Prefix — lider tanlagan prefiks, masalan "2a0e:1::5/128".
+  string prefix = 2;
+
+  // Kind — ijara turi (node /128, tenant /64, ...).
+  uint32 kind = 3;
+
+  string owner  = 4;
+  string tenant = 5;
+
+  // Parent — qaysi pool ichidan berilgan.
+  string parent = 6;
+
+  // ReclaimLeaseId — sticky taqsimlashda olib tashlanadigan
+  // karantin yozuvi; bo'sh bo'lsa yo'q.
+  string reclaim_lease_id = 7;
+
+  // TtlSeconds — ijara muddati. Buyruqqa yoziladi, konstantadan
+  // o'qilmaydi: konstanta o'zgarsa eski jurnal boshqacha qo'llanib,
+  // replikalar ajralib ketardi.
+  uint64 ttl_seconds = 8;
+}
+
+message RenewLease {
+  string lease_id    = 1;
+  uint64 ttl_seconds = 2;
+}
+
+message ReleaseLease {
+  string lease_id = 1;
+}
+
+// SweepLeases — muddati o'tganlarni karantinga, karantini
+// tugaganlarni butunlay o'chiradi.
+message SweepLeases {}

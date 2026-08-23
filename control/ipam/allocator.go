@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"net/netip"
 	"time"
+
+	cc01v1 "github.com/freco-dev/cc01/proto/gen/cc01/v1"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 var (
@@ -84,88 +87,185 @@ func (a *Allocator) Allocate(ctx context.Context, req Request) (*Lease, error) {
 		return nil, err
 	}
 
-	var result *Lease
+	// Qaror LIDER tomonida qabul qilinadi, keyin to'liq aniqlangan
+	// buyruq sifatida taklif qilinadi. Poyga mumkin: qaror holatning
+	// nusxasi bo'yicha chiqariladi, buyruqlar esa ketma-ket
+	// qo'llanadi va oradagi boshqa buyruq prefiksni band qilishi
+	// mumkin. Bunday holatda qayta urinamiz.
+	for attempt := range maxProposeAttempts {
+		cmd, err := a.planAllocate(ctx, req)
+		if err != nil {
+			return nil, err
+		}
 
-	err := a.store.Update(ctx, func(state *State) error {
-		now := a.now()
+		lease, _, err := a.store.Propose(ctx, cmd)
+		if err == nil {
+			return lease, nil
+		}
+		if !errors.Is(err, ErrPrefixTaken) {
+			return nil, err
+		}
 
+		_ = attempt // keyingi urinishda holat qayta o'qiladi
+	}
+
+	return nil, fmt.Errorf("%w: %d urinishdan keyin ham band",
+		ErrPoolExhausted, maxProposeAttempts)
+}
+
+// maxProposeAttempts — prefiks poygasida nechta marta qayta urinish.
+//
+// Poyga faqat ikkita taqsimlash AYNAN bir xil prefiksni tanlaganda
+// yuz beradi; tasodifiy tanlov buni kam uchraydigan qiladi. Cheksiz
+// urinish esa pool haqiqatan to'lganda abadiy aylanishga aylanardi.
+const maxProposeAttempts = 5
+
+// planAllocate holatni o'qib, qanday buyruq kerakligini hal qiladi.
+//
+// Bu YAGONA joy tasodifiy tanlov va joriy vaqt ishlatiladi. Natija —
+// to'liq aniqlangan buyruq, ya'ni uni har bir replika bir xil
+// qo'llaydi.
+func (a *Allocator) planAllocate(ctx context.Context, req Request) (*cc01v1.LeaseCommand, error) {
+	now := a.now()
+
+	var (
+		prefix    netip.Prefix
+		reclaimID string
+		renewID   string
+	)
+
+	err := a.store.View(ctx, func(state *State) error {
 		key := ownerKey{req.Kind, req.Owner, req.Parent}
 		if id, ok := state.ByOwner[key]; ok {
 			existing, found := state.Leases[id]
 			if found && existing.State == StateActive && !existing.Expired(now) {
-				// Idempotent: mavjud ijarani qaytaramiz va muddatini
-				// uzaytiramiz — klient baribir qayta urinmoqda.
-				existing.ExpiresAt = now.Add(LeaseTTL)
-				result = existing.Clone()
+				// Idempotent: mavjud ijarani uzaytiramiz — klient
+				// baribir qayta urinmoqda.
+				renewID = id
 				return nil
 			}
-
-			// Muddati o'tgan, lekin hali karantinga o'tkazilmagan:
-			// uni shu yerda o'tkazamiz, shunda sticky ishlaydi.
-			if found && existing.State == StateActive {
-				existing.State = StateQuarantine
-				existing.ReleasedAt = now
-			}
 		}
 
-		// Sticky: agar oldingi manzil karantinda va SHU egasiga
-		// tegishli bo'lsa, uni qaytarib beramiz.
+		// Sticky: shu egasining oldingi prefiksini qaytarib beramiz.
 		preferred, reclaimed := a.stickyCandidate(state, req)
-
-		// Karantindagi yozuv olib tashlanadi, shunda prefiks bo'sh
-		// ko'rinadi. Taqsimlash muvaffaqiyatsiz tugasa uni joyiga
-		// qaytaramiz — Store xatoda avtomatik orqaga qaytarmaydi.
 		if reclaimed != nil {
-			state.drop(reclaimed)
+			reclaimID = reclaimed.ID
 		}
 
-		prefix, err := allocatePrefix(req.Parent, req.PrefixLen, state.takenIn(req.Parent), preferred)
+		// Karantindagi yozuv band ko'rinadi — uni hisobdan
+		// chiqaramiz, chunki buyruq uni olib tashlaydi.
+		taken := state.takenIn(req.Parent)
+		if reclaimed != nil {
+			filtered := make(map[netip.Prefix]struct{}, len(taken))
+			for p := range taken {
+				if p != reclaimed.Prefix {
+					filtered[p] = struct{}{}
+				}
+			}
+			taken = filtered
+		}
+
+		chosen, err := allocatePrefix(req.Parent, req.PrefixLen, taken, preferred)
 
 		// Pool to'lgandek ko'rinsa — muddati o'tgan ijaralar sababli
-		// bo'lishi mumkin. Faqat SHU HOLATDA tozalab, bir marta qayta
-		// urinamiz.
-		//
-		// Tozalash O(N): uni har bir taqsimlashda bajarish 100 000
-		// tenantda taqsimlashni sekinlashtirib yuborardi.
+		// bo'lishi mumkin. Faqat SHU HOLATDA tozalashni so'raymiz.
 		if errors.Is(err, ErrPoolExhausted) {
-			a.sweep(state, now)
-			prefix, err = allocatePrefix(req.Parent, req.PrefixLen,
-				state.takenIn(req.Parent), preferred)
-		}
-
-		if err != nil {
-			if reclaimed != nil {
-				state.put(reclaimed)
-			}
 			return err
 		}
-
-		id, err := newLeaseID()
 		if err != nil {
 			return err
 		}
 
-		lease := &Lease{
-			ID:        id,
-			Prefix:    prefix,
-			Kind:      req.Kind,
-			State:     StateActive,
-			Owner:     req.Owner,
-			Tenant:    req.Tenant,
-			Parent:    req.Parent,
-			IssuedAt:  now,
-			ExpiresAt: now.Add(LeaseTTL),
-		}
+		prefix = chosen
+		return nil
+	})
 
-		state.put(lease)
-		result = lease.Clone()
+	// Pool to'lgan bo'lsa avval tozalash buyrug'ini taklif qilamiz,
+	// keyin qayta rejalashtiramiz.
+	if errors.Is(err, ErrPoolExhausted) {
+		if _, err := a.Reclaim(ctx); err != nil {
+			return nil, err
+		}
+		return a.planAllocateAfterSweep(ctx, req, now)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if renewID != "" {
+		return renewCommand(renewID, now), nil
+	}
+
+	id, err := newLeaseID()
+	if err != nil {
+		return nil, err
+	}
+
+	return &cc01v1.LeaseCommand{
+		Now: timestamppb.New(now),
+		Command: &cc01v1.LeaseCommand_Allocate{Allocate: &cc01v1.AllocateLease{
+			LeaseId:        id,
+			Prefix:         prefix.String(),
+			Kind:           uint32(req.Kind),
+			Owner:          req.Owner,
+			Tenant:         req.Tenant,
+			Parent:         req.Parent.String(),
+			ReclaimLeaseId: reclaimID,
+			TtlSeconds:     uint64(LeaseTTL / time.Second),
+		}},
+	}, nil
+}
+
+// planAllocateAfterSweep tozalashdan keyin bir marta qayta
+// rejalashtiradi. Ikkinchi marta pool to'lgan bo'lsa — u haqiqatan
+// to'lgan.
+func (a *Allocator) planAllocateAfterSweep(
+	ctx context.Context,
+	req Request,
+	now time.Time,
+) (*cc01v1.LeaseCommand, error) {
+	var prefix netip.Prefix
+
+	err := a.store.View(ctx, func(state *State) error {
+		chosen, err := allocatePrefix(req.Parent, req.PrefixLen,
+			state.takenIn(req.Parent), netip.Prefix{})
+		if err != nil {
+			return err
+		}
+		prefix = chosen
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	return result, nil
+	id, err := newLeaseID()
+	if err != nil {
+		return nil, err
+	}
+
+	return &cc01v1.LeaseCommand{
+		Now: timestamppb.New(now),
+		Command: &cc01v1.LeaseCommand_Allocate{Allocate: &cc01v1.AllocateLease{
+			LeaseId:    id,
+			Prefix:     prefix.String(),
+			Kind:       uint32(req.Kind),
+			Owner:      req.Owner,
+			Tenant:     req.Tenant,
+			Parent:     req.Parent.String(),
+			TtlSeconds: uint64(LeaseTTL / time.Second),
+		}},
+	}, nil
+}
+
+func renewCommand(leaseID string, now time.Time) *cc01v1.LeaseCommand {
+	return &cc01v1.LeaseCommand{
+		Now: timestamppb.New(now),
+		Command: &cc01v1.LeaseCommand_Renew{Renew: &cc01v1.RenewLease{
+			LeaseId:    leaseID,
+			TtlSeconds: uint64(LeaseTTL / time.Second),
+		}},
+	}
 }
 
 // stickyCandidate karantindagi, lekin shu egaga tegishli prefiksni
@@ -206,31 +306,11 @@ func (a *Allocator) stickyCandidate(state *State, req Request) (netip.Prefix, *L
 
 // Renew ijara muddatini uzaytiradi.
 func (a *Allocator) Renew(ctx context.Context, leaseID string) (*Lease, error) {
-	var result *Lease
-
-	err := a.store.Update(ctx, func(state *State) error {
-		now := a.now()
-
-		lease, ok := state.Leases[leaseID]
-		if !ok {
-			return fmt.Errorf("%w: %s", ErrLeaseNotFound, leaseID)
-		}
-
-		// Karantindagi yoki muddati o'tgan ijarani yangilash mumkin
-		// emas: klient yangi Allocate qilishi kerak.
-		if lease.State != StateActive || lease.Expired(now) {
-			return fmt.Errorf("%w: %s", ErrLeaseExpired, leaseID)
-		}
-
-		lease.ExpiresAt = now.Add(LeaseTTL)
-		result = lease.Clone()
-		return nil
-	})
+	lease, _, err := a.store.Propose(ctx, renewCommand(leaseID, a.now()))
 	if err != nil {
 		return nil, err
 	}
-
-	return result, nil
+	return lease, nil
 }
 
 // Release ijarani karantinga o'tkazadi.
@@ -238,54 +318,23 @@ func (a *Allocator) Renew(ctx context.Context, leaseID string) (*Lease, error) {
 // Prefiks DARHOL bo'shatilmaydi — QuarantinePeriod davomida ushlab
 // turiladi, shunda eski marshrutlar va DNS keshi tozalanadi.
 func (a *Allocator) Release(ctx context.Context, leaseID string) error {
-	return a.store.Update(ctx, func(state *State) error {
-		lease, ok := state.Leases[leaseID]
-		if !ok {
-			return fmt.Errorf("%w: %s", ErrLeaseNotFound, leaseID)
-		}
-
-		// Idempotent: qayta bo'shatish xato emas.
-		if lease.State == StateQuarantine {
-			return nil
-		}
-
-		lease.State = StateQuarantine
-		lease.ReleasedAt = a.now()
-		return nil
+	_, _, err := a.store.Propose(ctx, &cc01v1.LeaseCommand{
+		Now: timestamppb.New(a.now()),
+		Command: &cc01v1.LeaseCommand_Release{Release: &cc01v1.ReleaseLease{
+			LeaseId: leaseID,
+		}},
 	})
+	return err
 }
 
 // Reclaim muddati o'tgan va karantini tugagan ijaralarni tozalaydi
 // va nechtasi bo'shatilganini qaytaradi.
 func (a *Allocator) Reclaim(ctx context.Context) (int, error) {
-	var reclaimed int
-
-	err := a.store.Update(ctx, func(state *State) error {
-		reclaimed = a.sweep(state, a.now())
-		return nil
+	_, reclaimed, err := a.store.Propose(ctx, &cc01v1.LeaseCommand{
+		Now:     timestamppb.New(a.now()),
+		Command: &cc01v1.LeaseCommand_Sweep{Sweep: &cc01v1.SweepLeases{}},
 	})
-
 	return reclaimed, err
-}
-
-// sweep — ichki tozalash: muddati o'tganlarni karantinga, karantini
-// tugaganlarni butunlay o'chiradi.
-func (a *Allocator) sweep(state *State, now time.Time) int {
-	var reclaimed int
-
-	for _, lease := range state.Leases {
-		switch {
-		case lease.State == StateActive && lease.Expired(now):
-			lease.State = StateQuarantine
-			lease.ReleasedAt = now
-
-		case lease.Reclaimable(now):
-			state.drop(lease)
-			reclaimed++
-		}
-	}
-
-	return reclaimed
 }
 
 // Lease ijarani ID bo'yicha qaytaradi.
