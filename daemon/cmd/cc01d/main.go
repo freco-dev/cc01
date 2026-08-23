@@ -23,6 +23,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -44,6 +45,8 @@ func main() {
 		tenant       = flag.String("tenant", "default", "tenant identifikatori (CP rejimi)")
 		hostname     = flag.String("hostname", "", "node nomi (CP rejimi); bo'sh bo'lsa OS nomi")
 		cpToken      = flag.String("cp-token", os.Getenv("CC01_CP_TOKEN"), "CP bilan kelishilgan sir")
+		cpPin        = flag.String("cp-pin", os.Getenv("CC01_CP_PIN"), "CP sertifikatining SPKI pini (sha256/…); bir nechtasi vergul bilan")
+		cpInsecure   = flag.Bool("cp-insecure", false, "CP kanalini shifrlamaslik (FAQAT lokal sinov)")
 		advertise    = flag.String("advertise", "", "e'lon qilinadigan underlay manzil host:port")
 		stunServer   = flag.String("stun", os.Getenv("CC01_STUN"), "STUN serveri host:port (NAT ortida public manzilni aniqlash uchun)")
 		socketPath   = flag.String("socket", ipc.DefaultSocket, "IPC soketi (`cc01` CLI uchun)")
@@ -110,6 +113,8 @@ func main() {
 			stunServer:  stunAddr,
 			socketPath:  *socketPath,
 			startDown:   *startDown,
+			cpPins:      splitList(*cpPin),
+			cpInsecure:  *cpInsecure,
 		}, logger); err != nil {
 			fail(err)
 		}
@@ -266,4 +271,20 @@ func printNewKeyPair() error {
 func fail(err error) {
 	fmt.Fprintf(os.Stderr, "cc01d: %v\n", err)
 	os.Exit(1)
+}
+
+// splitList vergul bilan ajratilgan ro'yxatni bo'ladi.
+func splitList(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+
+	parts := strings.Split(value, ",")
+	items := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if item := strings.TrimSpace(part); item != "" {
+			items = append(items, item)
+		}
+	}
+	return items
 }

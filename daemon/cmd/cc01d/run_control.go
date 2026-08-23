@@ -31,6 +31,12 @@ type controlConfig struct {
 	// startDown — demon mesh'ni ko'tarmasdan ishga tushadi va
 	// `cc01 up` ni kutadi.
 	startDown bool
+
+	// cpPins — CP sertifikatining kutilayotgan SPKI pinlari.
+	cpPins []string
+
+	// cpInsecure — CP kanalini shifrlamaslik.
+	cpInsecure bool
 }
 
 // upTimeout — `cc01 up` ro'yxatdan o'tishni qancha kutadi.
@@ -60,6 +66,8 @@ func runWithControlPlane(cfg controlConfig, logger *slog.Logger) error {
 		IfaceName:   cfg.ifaceName,
 		Advertised:  cfg.advertised,
 		StunServer:  cfg.stunServer,
+		Pins:        cfg.cpPins,
+		Insecure:    cfg.cpInsecure,
 		Logger:      logger,
 	})
 

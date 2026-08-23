@@ -12,7 +12,7 @@ IMAGE=cc01-cp-demo
 TOKEN=demo-shared-secret-0123456789
 
 cleanup() {
-  $DOCKER rm -f cc01-cp cc01-n1 cc01-n2 cc01-n3 >/dev/null 2>&1 || true
+  $DOCKER rm -f cc01-cp cc01-n1 cc01-n2 cc01-n3 cc01-bad >/dev/null 2>&1 || true
   $DOCKER network rm $NET >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -27,8 +27,18 @@ $DOCKER network create --subnet 172.32.88.0/24 $NET >/dev/null
 echo "── Control Plane ──"
 $DOCKER run -d --name cc01-cp --network $NET --ip 172.32.88.5 \
   --entrypoint cc01-cp $IMAGE \
-  -listen :8443 -tenant-net 'fd00:cc01:c0de::/64' -auth-token "$TOKEN" >/dev/null
+  -listen :8443 -tenant-net 'fd00:cc01:c0de::/64' -auth-token "$TOKEN" -tls-hosts 172.32.88.5 >/dev/null
 sleep 2
+
+# CP vaqtinchalik sertifikat yaratdi va pinini chiqardi. Nodelar
+# AYNAN shu pin bilan ulanadi — ommaviy CA self-signed sertifikatni
+# tasdiqlamaydi, pin esa undan kuchliroq: u aniq bitta kalitga
+# bog'lanadi.
+PIN=$($DOCKER logs cc01-cp 2>&1 | grep -o 'sha256/[A-Za-z0-9+/=]*' | head -1)
+if [ -z "$PIN" ]; then
+  echo "✘ CP pini olinmadi"; exit 1
+fi
+echo "  CP pin: $PIN"
 
 for i in 1 2 3; do
   echo "── node $i ──"
@@ -36,9 +46,28 @@ for i in 1 2 3; do
     --cap-add NET_ADMIN --device /dev/net/tun \
     --entrypoint cc01d $IMAGE \
     -key "$($DOCKER run --rm --entrypoint cc01d $IMAGE -genkey 2>/dev/null)" \
-    -cp 172.32.88.5:8443 -cp-token "$TOKEN" \
+    -cp 172.32.88.5:8443 -cp-token "$TOKEN" -cp-pin "$PIN" \
     -hostname "node-$i" -listen 51820 >/dev/null
 done
+
+# Pin haqiqatan qo'riqlaydimi: noto'g'ri pin bilan ulanish
+# TO'XTATILISHI kerak, aks holda pin bezak bo'lib qolardi.
+echo "── noto'g'ri pin rad etiladimi ──"
+BADPIN="sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+$DOCKER run -d --name cc01-bad --network $NET --ip 172.32.88.99 \
+  --cap-add NET_ADMIN --device /dev/net/tun \
+  --entrypoint cc01d $IMAGE \
+  -key "$($DOCKER run --rm --entrypoint cc01d $IMAGE -genkey 2>/dev/null)" \
+  -cp 172.32.88.5:8443 -cp-token "$TOKEN" -cp-pin "$BADPIN" \
+  -hostname node-bad -listen 51820 >/dev/null
+sleep 3
+if $DOCKER logs cc01-bad 2>&1 | grep -q 'pinga mos emas'; then
+  echo "  ✔ ulanish rad etildi"
+else
+  echo "  ✘ NOTO'G'RI PIN O'TIB KETDI:"
+  $DOCKER logs cc01-bad 2>&1 | tail -3
+fi
+$DOCKER rm -f cc01-bad >/dev/null 2>&1 || true
 
 echo "── peerlar topilishini kutamiz ──"
 sleep 6

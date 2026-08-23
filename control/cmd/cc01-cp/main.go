@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -35,6 +36,10 @@ func main() {
 		tenantNet = flag.String("tenant-net", "", "nodelarga manzil beriladigan prefiks, masalan 2a0e:1234:1::/64")
 		authToken = flag.String("auth-token", os.Getenv("CC01_CP_TOKEN"), "nodelar uchun oldindan kelishilgan sir")
 		authMode  = flag.String("auth-mode", os.Getenv("CC01_CP_AUTH_MODE"), "required (standart) yoki disabled")
+		tlsCert   = flag.String("tls-cert", "", "TLS sertifikati (PEM); bo'sh bo'lsa vaqtinchalik yaratiladi")
+		tlsKey    = flag.String("tls-key", "", "TLS kaliti (PEM)")
+		tlsHosts  = flag.String("tls-hosts", "", "sertifikatga yoziladigan nomlar/IP'lar, vergul bilan")
+		noTLS     = flag.Bool("insecure", false, "kanalni shifrlamaslik (FAQAT lokal sinov)")
 		verbose   = flag.Bool("v", false, "batafsil log")
 	)
 	flag.Parse()
@@ -49,6 +54,8 @@ func main() {
 		listen: *listen, stun: *stunAddr, tenantNet: *tenantNet,
 		authToken: *authToken, authMode: *authMode,
 		relayPort: uint16(*relayPort), relayHost: *relayHost,
+		tlsCert: *tlsCert, tlsKey: *tlsKey,
+		tlsHosts: splitHosts(*tlsHosts), insecure: *noTLS,
 	}, logger); err != nil {
 		fmt.Fprintf(os.Stderr, "cc01-cp: %v\n", err)
 		os.Exit(1)
@@ -63,6 +70,27 @@ type runConfig struct {
 	authMode  string
 	relayPort uint16
 	relayHost string
+
+	tlsCert  string
+	tlsKey   string
+	tlsHosts []string
+	insecure bool
+}
+
+// splitHosts vergul bilan ajratilgan ro'yxatni bo'ladi.
+func splitHosts(list string) []string {
+	if strings.TrimSpace(list) == "" {
+		return nil
+	}
+
+	parts := strings.Split(list, ",")
+	hosts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if host := strings.TrimSpace(part); host != "" {
+			hosts = append(hosts, host)
+		}
+	}
+	return hosts
 }
 
 func run(cfg runConfig, logger *slog.Logger) error {
@@ -140,7 +168,12 @@ func run(cfg runConfig, logger *slog.Logger) error {
 		return fmt.Errorf("tinglash (%s): %w", listen, err)
 	}
 
-	grpcServer := grpc.NewServer()
+	opts, err := serverOptions(cfg, logger)
+	if err != nil {
+		return err
+	}
+
+	grpcServer := grpc.NewServer(opts...)
 	cc01v1.RegisterControlServiceServer(grpcServer, service)
 
 	// Muddati o'tgan nodelarni davriy tozalaymiz.
@@ -150,7 +183,8 @@ func run(cfg runConfig, logger *slog.Logger) error {
 	logger.Info("cc01-cp tayyor",
 		"listen", listener.Addr().String(),
 		"tenant_net", prefix.String(),
-		"auth", authMode == "" || authMode == "required")
+		"auth", authMode == "" || authMode == "required",
+		"tls", !cfg.insecure)
 
 	errc := make(chan error, 1)
 	go func() { errc <- grpcServer.Serve(listener) }()

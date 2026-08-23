@@ -972,6 +972,60 @@ Linux'da 108 bayt, macOS/BSD'da 104. Chegaradan oshsa yadro
 | `FAILED_PRECONDITION` | 14 | Mesh'ga ulanmagan (`cc01 up` kerak) |
 | `INVALID_ARGUMENT` | 2 | Noto'g'ri parametr |
 
+### 5.1.1 Control Plane kanalining himoyasi
+
+Kanal orqali butun NetworkMap o'tadi — kim tarmoqda, qaysi manzilda,
+qaysi kalit bilan — va nodelarning autentifikatsiya tokeni. Ochiq
+qoldirilsa tarmoqni kuzatuvchi buni to'liq ko'radi va tokenni qayta
+ishlatadi.
+
+**Hozirgi holat: TLS 1.3 + SPKI pinning.** Ikkala tomon ham TLS 1.3 dan
+past versiyaga tushmaydi: bu kanal faqat bizning klientlarimizga xizmat
+qiladi, ya'ni moslik uchun chegirma qilishning hojati yo'q.
+
+**Nega pin, CA emas.** CP sertifikati self-signed bo'lishi mumkin va uni
+ommaviy CA tasdiqlamaydi. Pin esa kuchliroq kafolat beradi — u aniq
+bitta ochiq kalitga bog'lanadi, ya'ni buzilgan yoki aldangan CA ham
+yordam bermaydi.
+
+Pin formati CP↔node shartnomasi:
+
+```
+sha256/<base64(SHA-256(sertifikat SPKI))>
+```
+
+Xesh **SPKI ustidan** olinadi, sertifikatning o'zi ustidan emas: shunda
+sertifikat yangilanganda kalit o'zgarmasa pin ham o'zgarmaydi va
+nodelarni qayta sozlash kerak bo'lmaydi. Prefiks oshkora yozilgan —
+keyin boshqa algoritmga o'tilsa eski pinlar jimgina noto'g'ri talqin
+qilinmaydi.
+
+Bir nechta pin qabul qilinadi (vergul bilan): kalit almashtirilayotganda
+eski va yangisi bir vaqtda amal qilishi kerak, aks holda almashtirish
+butun parkni bir zumda uzib qo'yardi.
+
+Format ikkala modulda alohida yozilgan — klient serverning moduliga
+bog'lanmasligi kerak. Ular ajralib ketmasligi uchun **bir xil sinov
+vektori** ikkala paketda ham qulflangan
+(`daemon/control/pin_test.go`, `control/cptls/cert_test.go`).
+
+| Tomon | Bayroq |
+| --- | --- |
+| CP | `-tls-cert` / `-tls-key`, yoki bo'sh — vaqtinchalik sertifikat |
+| CP | `-tls-hosts` — sertifikatga yoziladigan nomlar/IP'lar |
+| Node | `-cp-pin` (`CC01_CP_PIN`) — kutilayotgan pin(lar) |
+| Ikkalasi | `-insecure` / `-cp-insecure` — **faqat lokal sinov** |
+
+⚠️ Sertifikat berilmasa CP uni xotirada yaratadi: qayta ishga
+tushirilganda pin O'ZGARADI va hamma nodelarni qayta sozlash kerak
+bo'ladi. Ishlab chiqarishda `-tls-cert`/`-tls-key` majburiy.
+
+**Hali qurilmagani — mTLS.** Node hozir ham oldindan kelishilgan token
+bilan tanitiladi. Token endi TLS ichida ketadi, ya'ni tinglab olib
+bo'lmaydi, lekin u hamon **umumiy sir**: bitta node buzilsa, o'sha
+token bilan boshqa node ham ro'yxatdan o'ta oladi. Node sertifikatlari
+va ularni Noise identifikatoriga bog'lash — `cc01-idp` ishi.
+
 ### 5.2.1 O'rnatish va systemd
 
 `make package` bitta tavsifdan (`deploy/packaging/nfpm.yaml`) `amd64` va
@@ -1356,7 +1410,7 @@ Subdomain qoidalari hozir `core-server/utils.go` da (uzunlik 3–38, `^[a-z\d](?
 | --- | --- |
 | S-1 | Private kalitlar hech qachon diskka aniq matnda yozilmaydi; TPM/Keychain bo'lsa u ishlatiladi |
 | S-2 | Kalitlar `memguard` bilan `mlock` qilinadi, swap'ga tushmaydi |
-| S-3 | Barcha CP aloqasi mTLS 1.3, sertifikat pinning bilan |
+| S-3 | Barcha CP aloqasi mTLS 1.3, sertifikat pinning bilan — ✅ TLS 1.3 + SPKI pinning; **mTLS (node sertifikatlari) hali yo'q** |
 | S-4 | Cryptokey routing (`inner_src ∈ peer.allowed_ips`) — chetlab o'tib bo'lmaydi |
 | S-5 | Daemon `CAP_NET_ADMIN`+`CAP_BPF` bilan ishlaydi, to'liq root emas (`AmbientCapabilities`) — ✅ `CAP_NET_ADMIN` uchun tekshirilgan |
 | S-6 | systemd hardening: `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`, `RestrictSUIDSGID` — ✅ |

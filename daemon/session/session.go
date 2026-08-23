@@ -49,6 +49,12 @@ type Config struct {
 	// manzil aniqlanadi.
 	StunServer netip.AddrPort
 
+	// Pins — CP sertifikatining kutilayotgan SPKI pinlari.
+	Pins []string
+
+	// Insecure — CP kanalini shifrlamaslik (FAQAT lokal sinov).
+	Insecure bool
+
 	Logger *slog.Logger
 }
 
@@ -155,6 +161,8 @@ func (s *Session) build(ctx context.Context) (*active, error) {
 		AuthToken:    s.cfg.AuthToken,
 		OnRelays:     relay.update,
 		OnNetworkMap: routes.poke,
+		Pins:         s.cfg.Pins,
+		Insecure:     s.cfg.Insecure,
 		Logger:       s.log,
 	})
 	if err != nil {

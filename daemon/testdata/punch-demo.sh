@@ -88,6 +88,16 @@ $DOCKER run -d --name cc01-pcp --network $PUB --ip 172.35.0.5 \
   -tenant-net 'fd00:cc01:9a11::/64' -auth-token "$TOKEN" >/dev/null
 sleep 2
 
+# CP vaqtinchalik sertifikat yaratdi va pinini chiqardi. Nodelar
+# AYNAN shu pin bilan ulanadi — ommaviy CA self-signed sertifikatni
+# tasdiqlamaydi, pin esa undan kuchliroq: u aniq bitta kalitga
+# bog'lanadi.
+PIN=$($DOCKER logs cc01-pcp 2>&1 | grep -o 'sha256/[A-Za-z0-9+/=]*' | head -1)
+if [ -z "$PIN" ]; then
+  echo "✘ CP pini olinmadi"; exit 1
+fi
+echo "  CP pin: $PIN"
+
 KEY() { $DOCKER run --rm --entrypoint cc01d $IMAGE -genkey 2>/dev/null; }
 
 echo "── nodelar ──"
@@ -98,7 +108,7 @@ node() {
     --entrypoint sh $IMAGE -c 'sleep infinity' >/dev/null
   $DOCKER exec "$name" sh -c "ip route del default 2>/dev/null; ip route add default via $gw"
   $DOCKER exec -d "$name" sh -c "cc01d -key '$(KEY)' -cp 172.35.0.5:8443 \
-    -cp-token '$TOKEN' -stun 172.35.0.5:3478 -hostname $host -listen 51820 -v \
+    -cp-token '$TOKEN' -cp-pin '$PIN' -stun 172.35.0.5:3478 -hostname $host -listen 51820 -v \
     >/tmp/$host.log 2>&1"
 }
 node cc01-p1 $NETA 172.35.1.11 172.35.1.2 node-1

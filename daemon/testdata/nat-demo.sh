@@ -47,15 +47,25 @@ echo "  MASQUERADE yoqildi"
 echo "── Control Plane (STUN bilan) ──"
 $DOCKER run -d --name cc01-cp --network $PUB --ip 172.33.0.5 \
   --entrypoint cc01-cp $IMAGE \
-  -listen :8443 -stun :3478 -tenant-net 'fd00:cc01:da7::/64' -auth-token "$TOKEN" >/dev/null
+  -listen :8443 -stun :3478 -tenant-net 'fd00:cc01:da7::/64' -auth-token "$TOKEN" -tls-hosts 172.33.0.5 >/dev/null
 sleep 2
+
+# CP vaqtinchalik sertifikat yaratdi va pinini chiqardi. Nodelar
+# AYNAN shu pin bilan ulanadi — ommaviy CA self-signed sertifikatni
+# tasdiqlamaydi, pin esa undan kuchliroq: u aniq bitta kalitga
+# bog'lanadi.
+PIN=$($DOCKER logs cc01-cp 2>&1 | grep -o 'sha256/[A-Za-z0-9+/=]*' | head -1)
+if [ -z "$PIN" ]; then
+  echo "✘ CP pini olinmadi"; exit 1
+fi
+echo "  CP pin: $PIN"
 
 KEY() { $DOCKER run --rm --entrypoint cc01d $IMAGE -genkey 2>/dev/null; }
 
 echo "── node-2 (public tarmoqda) ──"
 $DOCKER run -d --name cc01-n2 --network $PUB --ip 172.33.0.12 \
   --cap-add NET_ADMIN --device /dev/net/tun --entrypoint cc01d $IMAGE \
-  -key "$(KEY)" -cp 172.33.0.5:8443 -cp-token "$TOKEN" \
+  -key "$(KEY)" -cp 172.33.0.5:8443 -cp-token "$TOKEN" -cp-pin "$PIN" \
   -stun 172.33.0.5:3478 -hostname node-2 -listen 51820 -v >/dev/null
 
 echo "── node-1 (NAT ortida) ──"
@@ -75,7 +85,7 @@ else
   exit 1
 fi
 
-$DOCKER exec -d cc01-n1 sh -c "cc01d -key '$(KEY)' -cp 172.33.0.5:8443 -cp-token '$TOKEN' \
+$DOCKER exec -d cc01-n1 sh -c "cc01d -key '$(KEY)' -cp 172.33.0.5:8443 -cp-token '$TOKEN' -cp-pin '$PIN' \
   -stun 172.33.0.5:3478 -hostname node-1 -listen 51820 -v > /tmp/n1.log 2>&1"
 
 sleep 8

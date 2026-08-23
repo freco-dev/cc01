@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/netip"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/freco-dev/cc01/daemon/router"
 	cc01v1 "github.com/freco-dev/cc01/proto/gen/cc01/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -53,6 +55,15 @@ type Config struct {
 	// mumkin. Chaqiruv NetworkMap oqimi ichida bajariladi, shuning
 	// uchun u bloklanmasligi shart.
 	OnNetworkMap func()
+
+	// Pins — CP sertifikatining kutilayotgan SPKI pinlari
+	// ("sha256/…"). Bir nechtasi kalit almashtirish uchun.
+	Pins []string
+
+	// Insecure — kanalni shifrlamasdan ochish. FAQAT lokal
+	// sinovlar uchun: bu rejimda NetworkMap, node kalitlari va
+	// autentifikatsiya tokeni ochiq matnda uzatiladi.
+	Insecure bool
 
 	Logger *slog.Logger
 }
@@ -100,9 +111,12 @@ func Dial(cfg Config) (*Client, error) {
 		logger = slog.Default()
 	}
 
-	// TODO(Faza 1): mTLS va node sertifikatlari (ARCHITECTURE.md §3.1.1).
-	conn, err := grpc.NewClient(cfg.Address,
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	creds, err := transportCredentials(cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	conn, err := grpc.NewClient(cfg.Address, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return nil, fmt.Errorf("control: CP ga ulanish (%s): %w", cfg.Address, err)
 	}
@@ -273,4 +287,42 @@ func shortID(id string) string {
 		return id[:12]
 	}
 	return id
+}
+
+// transportCredentials kanalning himoyasini tanlaydi.
+//
+// Standart — TLS 1.3. Shifrlanmagan kanal FAQAT oshkora so'ralganda
+// ochiladi va bu haqda ogohlantiriladi: bu kanal orqali butun
+// NetworkMap (kim tarmoqda, qaysi manzilda) va autentifikatsiya
+// tokeni o'tadi.
+func transportCredentials(cfg Config, logger *slog.Logger) (credentials.TransportCredentials, error) {
+	if cfg.Insecure {
+		if len(cfg.Pins) > 0 {
+			return nil, errors.New(
+				"control: -cp-insecure va -cp-pin birga berilmaydi; qaysi biri kerakligini tanlang")
+		}
+
+		logger.Warn("CP KANALI SHIFRLANMAGAN — NetworkMap va token ochiq matnda uzatiladi; " +
+			"faqat lokal sinov uchun")
+		return insecure.NewCredentials(), nil
+	}
+
+	if len(cfg.Pins) == 0 {
+		// Pin bo'lmasa tizim ildiz sertifikatlariga tayanamiz. Bu
+		// ishlaydi, lekin self-signed CP uchun emas — shuning uchun
+		// aniq maslahat beramiz.
+		logger.Info("CP sertifikati tizim ildizlari bilan tekshiriladi",
+			"maslahat", "self-signed CP uchun -cp-pin bering")
+	}
+
+	return credentials.NewTLS(tlsConfig(serverNameFor(cfg.Address), cfg.Pins)), nil
+}
+
+// serverNameFor manzildan TLS uchun host qismini ajratadi.
+func serverNameFor(address string) string {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return address
+	}
+	return host
 }
