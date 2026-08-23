@@ -115,6 +115,52 @@ nat-demo: check-docker ## NAT ortidagi node: STUN bilan ikki tomonlama ulanish
 relay-demo: check-docker ## Ikkita node har biri o'z NAT'i ortida: relay orqali
 	sh daemon/testdata/relay-demo.sh
 
+# ── Paketlar (deb/rpm) ────────────────────────────────────────────────────
+# Binarlar konteynerda quriladi: host macOS bo'lishi mumkin, paketga
+# esa Linux binari kerak. nfpm bitta tavsifdan ikkala formatni beradi.
+# Paket versiyasi. deb raqam bilan boshlanishini talab qiladi, rpm esa
+# `-` ni ajratuvchi deb o'qiydi — shuning uchun teg yo'q bo'lganda
+# xeshni 0.0.0 ostiga qo'yamiz va `-` ishlatmaymiz.
+GIT_TAG   := $(shell git describe --tags --abbrev=0 2>/dev/null)
+GIT_SHA   := $(shell git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)
+GIT_DIRTY := $(shell git diff --quiet 2>/dev/null || echo .dirty)
+
+ifeq ($(GIT_TAG),)
+  VERSION ?= 0.0.0+g$(GIT_SHA)$(GIT_DIRTY)
+else
+  VERSION ?= $(patsubst v%,%,$(GIT_TAG))$(GIT_DIRTY)
+endif
+PKG_ARCH ?= amd64 arm64
+
+.PHONY: package
+package: check-docker ## deb va rpm paketlarini quradi (dist/)
+	@for arch in $(PKG_ARCH); do \
+	  echo "→ $$arch binarlari"; \
+	  rm -rf dist/stage; mkdir -p dist/stage; \
+	  $(DOCKER) run --rm -v "$(CURDIR)":/src -w /src/daemon \
+	    -e GOWORK=off -e CGO_ENABLED=0 -e GOOS=linux -e GOARCH=$$arch \
+	    -e GOCACHE=/tmp/gocache -e GOMODCACHE=/tmp/gomod \
+	    golang:1.25 sh -c \
+	      'go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" \
+	         -o /src/dist/stage/cc01d ./cmd/cc01d && \
+	       go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" \
+	         -o /src/dist/stage/cc01  ./cmd/cc01' || exit 1; \
+	  echo "→ $$arch paketlari"; \
+	  for format in deb rpm; do \
+	    $(DOCKER) run --rm -v "$(CURDIR)":/src -w /src \
+	      -e ARCH=$$arch -e VERSION=$(VERSION) \
+	      goreleaser/nfpm:latest package \
+	      --config deploy/packaging/nfpm.yaml --target dist --packager $$format || exit 1; \
+	  done; \
+	done
+	@rm -rf dist/stage
+	@echo
+	@ls -1 dist/*.deb dist/*.rpm
+
+.PHONY: package-verify
+package-verify: check-docker ## Paketni toza konteynerda o'rnatib tekshiradi
+	sh deploy/packaging/verify.sh
+
 # ── .NET (access-server) ──────────────────────────────────────────────────
 
 .PHONY: dotnet-build
@@ -210,4 +256,5 @@ check: lint test check-modules proto-lint dotnet-build dotnet-test dotnet-vuln #
 .PHONY: clean
 clean: ## Build artefaktlarini tozalaydi
 	go clean -cache -testcache
+	rm -rf dist
 	dotnet clean $(DOTNET_SLN) --nologo || true

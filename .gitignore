@@ -27,3 +27,6 @@
 # go.work ATAYLAB ignore QILINMAYDI: barcha modullar shu repoda,
 # workspace fayli umumiy va commit qilinadi.
 go.work.sum
+
+# Paket artefaktlari.
+/dist/

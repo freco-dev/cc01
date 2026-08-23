@@ -10,7 +10,9 @@ import (
 	"os"
 )
 
-const version = "dev"
+// version — build vaqtida ldflags bilan o'rnatiladi
+// (`make package`). Paketsiz qurishda "dev" bo'lib qoladi.
+var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {

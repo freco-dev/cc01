@@ -86,6 +86,19 @@ func Listen(socket string, service cc01v1.DaemonServiceServer, logger *slog.Logg
 		return nil, fmt.Errorf("ipc: ruxsatlarni o'rnatish: %w", err)
 	}
 
+	// Guruh yo'qligi halokatli emas — konteynerda yoki paketsiz
+	// o'rnatishda u bo'lmasligi normal. Bunda soket root:root bo'lib
+	// qoladi va faqat root ulana oladi; buni jimgina qoldirmaymiz,
+	// chunki foydalanuvchi keyin "ruxsat yo'q" xatosini ko'radi.
+	if err := applyOwnership(socket, DefaultGroup); err != nil {
+		if errors.Is(err, errGroupMissing) {
+			logger.Info("soket guruhi yo'q, faqat root ulana oladi",
+				"group", DefaultGroup, "socket", socket)
+		} else {
+			logger.Warn("soket egaligini o'rnatib bo'lmadi", "err", err)
+		}
+	}
+
 	grpcServer := grpc.NewServer()
 	cc01v1.RegisterDaemonServiceServer(grpcServer, service)
 

@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/freco-dev/cc01/daemon/conn"
 	"github.com/freco-dev/cc01/daemon/engine"
@@ -32,7 +33,9 @@ import (
 	"github.com/freco-dev/cc01/daemon/tun"
 )
 
-const version = "dev"
+// version — build vaqtida ldflags bilan o'rnatiladi
+// (`make package`). Paketsiz qurishda "dev" bo'lib qoladi.
+var version = "dev"
 
 func main() {
 	var (
@@ -117,6 +120,7 @@ func main() {
 		privateKey:   *privateKey,
 		listenPort:   uint16(*listenPort),
 		ifaceName:    *ifaceName,
+		socketPath:   *socketPath,
 		localAddr:    *localAddr,
 		peerKey:      *peerKey,
 		peerEndpoint: *peerEndpoint,
@@ -130,6 +134,7 @@ type config struct {
 	privateKey   string
 	listenPort   uint16
 	ifaceName    string
+	socketPath   string
 	localAddr    string
 	peerKey      string
 	peerEndpoint string
@@ -195,6 +200,27 @@ func run(cfg config, logger *slog.Logger) error {
 	}
 
 	datapath.Start()
+
+	// IPC statik rejimda ham ochiladi: `-socket` bayrog'i qabul
+	// qilinadi, ya'ni u ishlashi kerak. `cc01 status` va `peer list`
+	// bu yerda CP rejimidagidek foydali.
+	backend := &staticBackend{
+		engine:  datapath,
+		address: address,
+		started: time.Now(),
+	}
+
+	ipcServer, err := ipc.Listen(cfg.socketPath, ipc.NewService(backend, version), logger)
+	if err != nil {
+		logger.Warn("IPC ochilmadi, `cc01 status` ishlamaydi", "err", err)
+	} else {
+		defer ipcServer.Close()
+		go func() {
+			if err := ipcServer.Serve(); err != nil {
+				logger.Error("IPC to'xtadi", "err", err)
+			}
+		}()
+	}
 
 	logger.Info("cc01d tayyor",
 		"pubkey", identity.PublicKey().String(),

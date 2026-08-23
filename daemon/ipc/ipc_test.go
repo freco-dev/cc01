@@ -3,13 +3,16 @@ package ipc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/netip"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -600,5 +603,62 @@ func TestDoctor_OmitsRouteCheckWhenDown(t *testing.T) {
 		if check.GetName() == "marshrutlar" {
 			t.Error("tushirilgan mesh uchun marshrut tekshiruvi berildi")
 		}
+	}
+}
+
+// Guruh yo'q bo'lsa aniq xato qaytishi kerak, "topilmadi" emas —
+// chaqiruvchi buni halokatli emas deb ajratishi kerak.
+func TestApplyOwnership_ReportsMissingGroup(t *testing.T) {
+	socket := shortSocket(t)
+	if err := os.WriteFile(socket, nil, 0o660); err != nil {
+		t.Fatalf("fayl yaratish: %v", err)
+	}
+
+	err := applyOwnership(socket, "cc01-yoq-bunday-guruh")
+	if !errors.Is(err, errGroupMissing) {
+		t.Fatalf("errGroupMissing kutilgan edi, olindi: %v", err)
+	}
+}
+
+// Bo'sh guruh — hech narsa qilinmaydi.
+func TestApplyOwnership_EmptyGroupIsNoop(t *testing.T) {
+	if err := applyOwnership("/bunday/yol/yoq", ""); err != nil {
+		t.Fatalf("bo'sh guruh xato berdi: %v", err)
+	}
+}
+
+// Mavjud guruhga o'rnatish ishlashi kerak. O'z guruhimizni
+// ishlatamiz — u albatta bor va uni o'zgartirish uchun root shart emas.
+func TestApplyOwnership_SetsExistingGroup(t *testing.T) {
+	current, err := user.Current()
+	if err != nil {
+		t.Skipf("joriy foydalanuvchi aniqlanmadi: %v", err)
+	}
+
+	group, err := user.LookupGroupId(current.Gid)
+	if err != nil {
+		t.Skipf("guruh nomi aniqlanmadi: %v", err)
+	}
+
+	socket := shortSocket(t)
+	if err := os.WriteFile(socket, nil, 0o660); err != nil {
+		t.Fatalf("fayl yaratish: %v", err)
+	}
+
+	if err := applyOwnership(socket, group.Name); err != nil {
+		t.Fatalf("applyOwnership: %v", err)
+	}
+
+	info, err := os.Stat(socket)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Skip("bu platformada gid o'qib bo'lmaydi")
+	}
+	if fmt.Sprint(stat.Gid) != current.Gid {
+		t.Errorf("gid %d, kutilgan %s", stat.Gid, current.Gid)
 	}
 }

@@ -74,14 +74,15 @@ func printStatus(status *cc01v1.StatusResponse, asJSON bool) error {
 		return nil
 	}
 
-	rows := [][2]string{
-		{"holat", "ulangan"},
-		{"node", shorten(status.GetNodeId(), 16)},
-		{"hostname", status.GetHostname()},
-		{"manzil", status.GetAddress()},
-		{"interfeys", fmt.Sprintf("%s (udp/%d)", status.GetInterface(), status.GetListenPort())},
-		{"tenant", status.GetTenant()},
-	}
+	// Bo'sh maydonlar chiqarilmaydi: statik rejimda node_id, tenant
+	// va hostname yo'q, va bo'sh qator faqat chalg'itadi.
+	rows := [][2]string{{"holat", "ulangan"}}
+	rows = appendIfSet(rows, "node", shorten(status.GetNodeId(), 16))
+	rows = appendIfSet(rows, "hostname", status.GetHostname())
+	rows = appendIfSet(rows, "manzil", status.GetAddress())
+	rows = append(rows, [2]string{"interfeys",
+		fmt.Sprintf("%s (udp/%d)", status.GetInterface(), status.GetListenPort())})
+	rows = appendIfSet(rows, "tenant", status.GetTenant())
 
 	if cp := status.GetControlPlane(); cp != "" {
 		rows = append(rows, [2]string{"control plane", cp})
@@ -140,4 +141,12 @@ func formatDuration(d time.Duration) string {
 	default:
 		return fmt.Sprintf("%dh %dm", int(d.Hours()), int(d.Minutes())%60)
 	}
+}
+
+// appendIfSet bo'sh bo'lmagan qiymatni qo'shadi.
+func appendIfSet(rows [][2]string, name, value string) [][2]string {
+	if value == "" {
+		return rows
+	}
+	return append(rows, [2]string{name, value})
 }

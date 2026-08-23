@@ -253,7 +253,8 @@ cc01/
 │   ├── terraform/{pop-tas1, pop-fra1, cp-cluster}
 │   ├── ansible/roles/{edge, relay, bgp}
 │   ├── k8s/{cp-*.yaml}
-│   └── systemd/cc01d.service
+│   ├── packaging/                 #   nfpm → deb/rpm  ✅
+│   └── systemd/cc01d.service      #   ✅
 │
 ├── test/
 │   ├── integration/               #   Docker Compose: 3 node + CP + relay
@@ -971,6 +972,45 @@ Linux'da 108 bayt, macOS/BSD'da 104. Chegaradan oshsa yadro
 | `FAILED_PRECONDITION` | 14 | Mesh'ga ulanmagan (`cc01 up` kerak) |
 | `INVALID_ARGUMENT` | 2 | Noto'g'ri parametr |
 
+### 5.2.1 O'rnatish va systemd
+
+`make package` bitta tavsifdan (`deploy/packaging/nfpm.yaml`) `amd64` va
+`arm64` uchun `deb` va `rpm` quradi. nfpm tanlandi, chunki
+`dpkg-buildpackage` va `rpmbuild` ikki xil host muhitini talab qiladi —
+nfpm esa konteynerda ishlaydi va paketni macOS'dan ham qurish mumkin.
+
+Paket nima o'rnatadi:
+
+| Fayl | Vazifasi |
+| --- | --- |
+| `/usr/bin/cc01d`, `/usr/bin/cc01` | demon va CLI |
+| `/lib/systemd/system/cc01d.service` | unit (S-5, S-6 hardening) |
+| `/etc/cc01/cc01d.env` | konfiguratsiya, `0600`, yangilanishda **saqlanadi** |
+| `/usr/lib/sysusers.d/cc01.conf` | `cc01` guruhi |
+| `/usr/lib/tmpfiles.d/cc01.conf` | `/run/cc01` papkasi |
+| `/usr/lib/cc01/cc01-cleanup` | `ExecStopPost` — halokatdan keyingi tozalash |
+
+**Demon ataylab avtomatik yoqilmaydi.** Unga node kaliti va CP manzili
+kerak, ular esa o'rnatishdan keyin hali bo'sh — avtomatik yoqilsa
+foydalanuvchi faqat xato logini olardi. `postinstall` keyingi qadamlarni
+ko'rsatadi.
+
+**Soket egaligi.** `0660` ning o'zi yetarli emas: soket `root:root`
+bo'lib qolsa, `cc01` guruhidagi foydalanuvchi ham ulana olmaydi va CLI
+bergan "demon guruhiga qo'shiling" maslahati ishlamaydi. Demon soketni
+`cc01` guruhiga o'tkazadi; guruh bo'lmasa (konteyner, paketsiz
+o'rnatish) buni logga yozadi va faqat root ulana oladi.
+
+**Root shart emas.** `CAP_NET_ADMIN` bilan demon `uid≠0` da ham TUN
+yaratadi va marshrut qo'yadi — konteynerda `setcap cap_net_admin+ep`
+va oddiy foydalanuvchi bilan tekshirilgan. `cc01 doctor` aynan shu
+maslahatni beradi.
+
+`make package-verify` paketni toza Debian konteyneriga o'rnatib
+tekshiradi: fayllar joyidami, guruh yaratildimi, `systemd-analyze
+verify` unit'dan norozimi, demon ishlamayotganda CLI 10-kod
+qaytaradimi, o'chirishdan keyin konfiguratsiya saqlanadimi.
+
 ### 5.3 Tunnel data plane protokoli
 
 ```
@@ -1318,10 +1358,10 @@ Subdomain qoidalari hozir `core-server/utils.go` da (uzunlik 3–38, `^[a-z\d](?
 | S-2 | Kalitlar `memguard` bilan `mlock` qilinadi, swap'ga tushmaydi |
 | S-3 | Barcha CP aloqasi mTLS 1.3, sertifikat pinning bilan |
 | S-4 | Cryptokey routing (`inner_src ∈ peer.allowed_ips`) — chetlab o'tib bo'lmaydi |
-| S-5 | Daemon `CAP_NET_ADMIN`+`CAP_BPF` bilan ishlaydi, to'liq root emas (`AmbientCapabilities`) |
-| S-6 | systemd hardening: `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`, `RestrictSUIDSGID` |
+| S-5 | Daemon `CAP_NET_ADMIN`+`CAP_BPF` bilan ishlaydi, to'liq root emas (`AmbientCapabilities`) — ✅ `CAP_NET_ADMIN` uchun tekshirilgan |
+| S-6 | systemd hardening: `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`, `RestrictSUIDSGID` — ✅ |
 | S-7 | Supply chain: `go.sum` verify, SBOM (CycloneDX), Sigstore bilan imzolangan relizlar |
-| S-8 | Reproducible builds (`-trimpath`, `CGO_ENABLED=0` mumkin bo'lganda) |
+| S-8 | Reproducible builds (`-trimpath`, `CGO_ENABLED=0` mumkin bo'lganda) — ✅ `make package` |
 | S-9 | Har bir reliz oldidan `govulncheck` — HIGH/CRITICAL bo'lsa bloklanadi |
 | S-10 | Audit log tamper-evident (hash chain), ClickHouse'ga append-only |
 | S-11 | AP ↔ Edge kanali mTLS; AP `/internal/*` listeneri public interfeysga bind qilinmaydi |
@@ -1462,7 +1502,7 @@ Faza 0 dan farqli — bu yerda haqiqiy overlay boshlanadi. Foundation ishlari (T
 | CLI ↔ demon IPC (UNIX soket, gRPC) | `SO_PEERCRED`, `0660`, exit kodlari §5.2 | ✅ `daemon/ipc` |
 | CLI: `status`, `peer list`, `doctor` | Ishlab turgan mesh'da yo'l holati ko'rinadi | ✅ `make cp-demo` |
 | CLI: `up`, `down` (demon hayot sikli) | `down` → 0 marshrut, `up` → o'sha manzil qaytadi | ✅ `daemon/session` |
-| Linux paketlar (deb/rpm) + systemd unit | Toza VM'da 1 buyruq bilan o'rnatish | ⏳ |
+| Linux paketlar (deb/rpm) + systemd unit | Toza konteynerda o'rnatiladi, `make package-verify` | ✅ `deploy/packaging` |
 | AP: `Plan`, `Subscription`, kvota modeli | Tarif o'zgarishi 60 s ichida edge'da kuchga kiradi | ⏳ |
 | **MVP demo** | 3 shahar, 3 node, o'zaro ping < 50 ms, public IPv6 internetdan erishiladi | ⏳ |
 

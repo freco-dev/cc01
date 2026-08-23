@@ -1,0 +1,59 @@
+# nfpm — bitta tavsifdan deb va rpm quradi.
+#
+# Nega nfpm: `dpkg-buildpackage` va `rpmbuild` ikki xil host muhitini
+# talab qiladi. nfpm bitta statik Go binari va konteynerda ishlaydi,
+# ya'ni paketni macOS'dan ham qurish mumkin.
+name: cc01
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: net
+priority: optional
+maintainer: freco-dev <computer.studio77@gmail.com>
+description: |
+  cc01 — overlay mesh VPN, public IPv6 va ingress tunneling.
+  Uchala mahsulot bitta data plane ustida ishlaydi.
+vendor: cc01
+homepage: https://github.com/freco-dev/cc01
+license: Proprietary
+
+depends:
+  - iproute2
+
+contents:
+  # Binarlar sobit staging papkasidan olinadi: nfpm `src` maydonida
+  # muhit o'zgaruvchisini kengaytirmaydi, shuning uchun Makefile har
+  # bir arxitektura uchun shu papkani to'ldiradi.
+  - src: ./dist/stage/cc01d
+    dst: /usr/bin/cc01d
+  - src: ./dist/stage/cc01
+    dst: /usr/bin/cc01
+
+  - src: ./deploy/packaging/cc01-cleanup
+    dst: /usr/lib/cc01/cc01-cleanup
+    file_info:
+      mode: 0755
+
+  - src: ./deploy/systemd/cc01d.service
+    dst: /lib/systemd/system/cc01d.service
+
+  - src: ./deploy/systemd/sysusers.conf
+    dst: /usr/lib/sysusers.d/cc01.conf
+  - src: ./deploy/systemd/tmpfiles.conf
+    dst: /usr/lib/tmpfiles.d/cc01.conf
+
+  # Konfiguratsiya yangilanishda saqlanadi — unda node kaliti bor.
+  - src: ./deploy/systemd/cc01d.env
+    dst: /etc/cc01/cc01d.env
+    type: config|noreplace
+    file_info:
+      mode: 0600
+
+scripts:
+  postinstall: ./deploy/packaging/postinstall.sh
+  preremove: ./deploy/packaging/preremove.sh
+
+overrides:
+  rpm:
+    depends:
+      - iproute
