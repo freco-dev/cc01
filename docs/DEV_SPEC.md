@@ -592,6 +592,41 @@ message AllocateResponse {
 | `cgroup_sock` | `BPF_PROG_TYPE_CGROUP_SOCK_ADDR` | `/sys/fs/cgroup/cc01` | — | Ilova darajasidagi bind cheklovi (v1.1) |
 | `sk_lookup` | `BPF_PROG_TYPE_SK_LOOKUP` | net namespace | — | Bitta portni bir nechta socket'ga taqsimlash (v1.2) |
 
+**Hozirgi holat.** Skelet qurilgan va haqiqiy yadroda tekshirilgan:
+yuklash, native→generic fallback, blocklist bosqichi, dry-run va
+hisoblagichlar. Rate limit, conntrack va policy trie (§4.2, §4.3)
+shu asos ustiga qo'shiladi.
+
+| Qism | Holat |
+| --- | --- |
+| `xdp_filter` yuklash + biriktirish | ✅ `daemon/xdp` — native rejimda tekshirilgan |
+| Blocklist bosqichi | ✅ paket rostdan tashlanadi |
+| Dry-run (`F_ENFORCE`) | ✅ hisoblaydi, tashlamaydi |
+| Hisoblagichlar (per-CPU) | ✅ |
+| Rate limit (token bucket) | ⏳ |
+| Conntrack fast path | ⏳ |
+| Policy LPM trie | ⏳ |
+| Ring buffer hodisalari | ⏳ |
+| `tc_ingress` / `tc_egress` | ⏳ |
+
+**Build quvuri.** `.o` fayl repoga **commit qilinadi** (protobuf
+generatsiyasi kabi): demonni qurish uchun clang kerak emas va ishga
+tushirishda tashqi fayl qidirilmaydi — u `//go:embed` bilan binarga
+kiradi.
+
+    make bpf         clang konteynerda kompilyatsiya qiladi
+    make bpf-verify  haqiqiy yadro verifier'iga yuklab ko'radi
+
+⚠️ `bpf-verify` testlar HAQIQATAN bajarilganini alohida tekshiradi.
+Muhit yaroqsiz bo'lsa Go testlari `SKIP` bo'ladi va bu o'tgan testga
+o'xshaydi — ya'ni verifier umuman ishlamagan bo'lsa ham ko'k rang
+ko'rinardi.
+
+**Tuzilmalar ikki tomonda takrorlanadi.** C va Go nusxalari bayt-bayt
+mos kelishi shart; mos kelmasa yadro xato bermaydi, u baytlarni
+boshqacha talqin qiladi va filtr jimgina noto'g'ri ishlaydi. O'lchamlar
+va maydon siljishlari `daemon/xdp/layout_test.go` da qulflangan.
+
 **Yuklash strategiyasi:**
 
 ```

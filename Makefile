@@ -127,6 +127,36 @@ raft-demo: check-docker ## Control Plane klasteri: 3 replika, lider failover
 punch-sym-demo: check-docker ## Birthday punching: symmetric NAT ortidagi node bilan to'g'ridan-to'g'ri
 	sh daemon/testdata/punch-sym-demo.sh
 
+# ── eBPF ──────────────────────────────────────────────────────────────────
+# Natija (.o) repoga commit qilinadi: `go build` uchun clang kerak emas.
+
+.PHONY: bpf
+bpf: check-docker ## XDP dasturini kompilyatsiya qiladi (daemon/bpf/*.o)
+	$(DOCKER) build -q -t cc01-bpf-build -f daemon/bpf/Dockerfile daemon/bpf >/dev/null
+	$(DOCKER) run --rm -v "$(CURDIR)/daemon":/daemon -w /daemon/bpf \
+	  cc01-bpf-build sh build.sh
+	@echo "  Natijani commit qiling — u generatsiya qilingan artefakt."
+
+.PHONY: bpf-verify
+bpf-verify: check-docker ## Dasturni haqiqiy yadro verifier'iga yuklab ko'radi
+	@# XDP testlari root, /sys/fs/bpf va veth yaratish imkonini talab
+	@# qiladi — shuning uchun privileged konteyner.
+	@#
+	@# Natija SKIP bo'lsa test o'tgandek ko'rinardi, lekin verifier
+	@# umuman ishlamagan bo'lardi. Shuning uchun kamida bitta test
+	@# HAQIQATAN bajarilganini tekshiramiz.
+	@$(DOCKER) run --rm --privileged -v "$(CURDIR)":/src -w /src/daemon \
+	  -e GOWORK=off -e GOCACHE=/tmp/gocache -e GOMODCACHE=/tmp/gomod \
+	  golang:1.25 sh -c 'apt-get update -qq >/dev/null 2>&1 && \
+	    apt-get install -y -qq iproute2 iputils-ping >/dev/null 2>&1 && \
+	    go test -count=1 -run TestXDP -v ./xdp/...' 2>&1 | tee /tmp/cc01-bpf-verify.log
+	@if ! grep -q '^--- PASS: TestXDP_LoadsAndAttaches' /tmp/cc01-bpf-verify.log; then \
+	  echo; echo "✘ Verifier testi BAJARILMADI (o'tkazib yuborilgan yoki yiqilgan)."; \
+	  echo "  O'tkazib yuborilgan test o'tgan testga o'xshaydi — buni qabul qilmaymiz."; \
+	  exit 1; \
+	fi
+	@echo "✔ dastur haqiqiy yadro verifier'idan o'tdi"
+
 # ── Paketlar (deb/rpm) ────────────────────────────────────────────────────
 # Binarlar konteynerda quriladi: host macOS bo'lishi mumkin, paketga
 # esa Linux binari kerak. nfpm bitta tavsifdan ikkala formatni beradi.

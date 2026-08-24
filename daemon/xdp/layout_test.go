@@ -1,0 +1,96 @@
+package xdp
+
+import (
+	"testing"
+	"unsafe"
+)
+
+// Go tuzilmalari C dagilar bilan BAYT-BAYT mos kelishi shart.
+//
+// Mos kelmasa yadro xato BERMAYDI — u baytlarni shunchaki boshqacha
+// talqin qiladi. Filtr jimgina noto'g'ri ishlaydi: masalan
+// `expires_ns` o'rniga `hits` o'qilib, hamma yozuv darhol eskirgan
+// deb hisoblanadi.
+//
+// `bpf/include/cc01_maps.h`:
+//
+//	struct cc01_config { __u32 flags; __u32 _pad; };        // 8
+//	struct cc01_block  { __u64 expires_ns; __u64 hits; };   // 16
+func TestLayout_MatchesKernelStructs(t *testing.T) {
+	cases := []struct {
+		name string
+		got  uintptr
+		want uintptr
+	}{
+		{"cc01_config", unsafe.Sizeof(configValue{}), 8},
+		{"cc01_block", unsafe.Sizeof(blockValue{}), 16},
+	}
+
+	for _, tc := range cases {
+		if tc.got != tc.want {
+			t.Errorf("%s o'lchami %d bayt, C tomonda %d — "+
+				"bpf/include/cc01_maps.h bilan solishtiring", tc.name, tc.got, tc.want)
+		}
+	}
+}
+
+// Maydonlarning joylashuvi ham muhim: o'lcham to'g'ri, lekin tartib
+// noto'g'ri bo'lsa test o'lcham bo'yicha o'tib ketardi.
+func TestLayout_FieldOffsets(t *testing.T) {
+	var block blockValue
+
+	if offset := unsafe.Offsetof(block.ExpiresNS); offset != 0 {
+		t.Errorf("ExpiresNS siljishi %d, 0 kutilgan edi", offset)
+	}
+	if offset := unsafe.Offsetof(block.Hits); offset != 8 {
+		t.Errorf("Hits siljishi %d, 8 kutilgan edi", offset)
+	}
+}
+
+// Statistika indekslari C dagi enum bilan mos kelishi kerak.
+//
+// Farq bo'lsa biz boshqa hisoblagichni o'qiymiz va raqamlar
+// ishonchsiz bo'lib qoladi — buni sezish qiyin.
+func TestLayout_StatIndexes(t *testing.T) {
+	expected := map[int]string{
+		0: "CC01_STAT_TOTAL",
+		1: "CC01_STAT_PASS",
+		2: "CC01_STAT_DROP_BLOCKLIST",
+		3: "CC01_STAT_DROP_MALFORMED",
+		4: "CC01_STAT_NOT_IPV6",
+	}
+
+	actual := map[int]string{
+		StatTotal:         "CC01_STAT_TOTAL",
+		StatPass:          "CC01_STAT_PASS",
+		StatDropBlocklist: "CC01_STAT_DROP_BLOCKLIST",
+		StatDropMalformed: "CC01_STAT_DROP_MALFORMED",
+		StatNotIPv6:       "CC01_STAT_NOT_IPV6",
+	}
+
+	for index, name := range expected {
+		if actual[index] != name {
+			t.Errorf("indeks %d: Go'da %q, C'da %q", index, actual[index], name)
+		}
+	}
+
+	if statMax != len(expected) {
+		t.Errorf("statMax = %d, %d ta hisoblagich sanaldi", statMax, len(expected))
+	}
+}
+
+// Har bir hisoblagichning nomi bo'lishi kerak — aks holda
+// diagnostika chiqishida bo'sh qator paydo bo'lardi.
+func TestStats_AllCountersNamed(t *testing.T) {
+	var stats Stats
+
+	for index := range statMax {
+		if name := stats.Name(index); name == "" || name == "noma'lum" {
+			t.Errorf("hisoblagich %d nomsiz", index)
+		}
+	}
+
+	if name := stats.Name(statMax); name != "noma'lum" {
+		t.Errorf("chegaradan tashqari indeks %q qaytardi", name)
+	}
+}
