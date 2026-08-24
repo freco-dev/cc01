@@ -5,6 +5,7 @@ package tcpolicy
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"log/slog"
 	"net/netip"
@@ -1103,5 +1104,234 @@ func TestXDPPolicy_LeavesDSCPAloneByDefault(t *testing.T) {
 	trafficClass := (packet[0]&0x0f)<<4 | packet[1]>>4
 	if dscp := trafficClass >> 2; dscp != 0 {
 		t.Errorf("DSCP sozlanmagan, lekin %d qo'yilgan", dscp)
+	}
+}
+
+// Identity avtomatik ajratilishi kerak: operator CIDR bilan
+// ishlaydi, yadro esa raqam bilan.
+func TestXDPPolicy_AllocatesIdentities(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	first := netip.MustParsePrefix("2a0e:1::/64")
+	second := netip.MustParsePrefix("2a0e:2::/64")
+
+	a, err := filter.IdentityFor(first)
+	if err != nil {
+		t.Fatalf("IdentityFor: %v", err)
+	}
+	b, err := filter.IdentityFor(second)
+	if err != nil {
+		t.Fatalf("IdentityFor: %v", err)
+	}
+
+	if a == b {
+		t.Fatalf("ikkita prefiks bir xil guruh oldi: %d", a)
+	}
+	if a == IdentityUnknown || b == IdentityUnknown {
+		t.Error("nol guruh ajratildi — u 'noma'lum manba' uchun ajratilgan")
+	}
+
+	// Takroriy chaqiruv O'SHA raqamni qaytarishi kerak.
+	again, err := filter.IdentityFor(first)
+	if err != nil {
+		t.Fatalf("takroriy IdentityFor: %v", err)
+	}
+	if again != a {
+		t.Errorf("takroriy chaqiruv boshqa guruh berdi: %d va %d", a, again)
+	}
+}
+
+// Qoidalar ro'yxati prefikslari va hisoblagichlari bilan
+// qaytarilishi kerak.
+func TestXDPPolicy_ListsRulesWithPrefixes(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	prefix := netip.MustParsePrefix(peerAddr + "/128")
+	identity, err := filter.IdentityFor(prefix)
+	if err != nil {
+		t.Fatalf("IdentityFor: %v", err)
+	}
+
+	if err := filter.AddRule(Rule{
+		Identity: identity, Proto: 58, Verdict: Allow, RuleID: 100,
+	}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	inject(t, device, echoRequest(t, 80))
+	time.Sleep(150 * time.Millisecond)
+
+	rules, err := filter.Rules()
+	if err != nil {
+		t.Fatalf("Rules: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("%d ta qoida, 1 kutilgan edi", len(rules))
+	}
+
+	rule := rules[0]
+	if rule.RuleID != 100 {
+		t.Errorf("qoida ID %d", rule.RuleID)
+	}
+	if rule.Prefix != prefix {
+		t.Errorf("prefiks %v, %v kutilgan edi", rule.Prefix, prefix)
+	}
+	if rule.Hits == 0 {
+		t.Error("hisoblagich to'ldirilmadi")
+	}
+}
+
+// Qoidani ID bo'yicha o'chirish ishlashi kerak: CLI aynan shuni
+// ishlatadi.
+func TestXDPPolicy_RemovesByID(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	if err := filter.AddRule(Rule{Identity: 7, Verdict: Allow, RuleID: 55}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	if _, err := filter.RemoveByID(55); err != nil {
+		t.Fatalf("RemoveByID: %v", err)
+	}
+
+	rules, _ := filter.Rules()
+	if len(rules) != 0 {
+		t.Errorf("qoida o'chirilmadi: %d ta qoldi", len(rules))
+	}
+
+	if _, err := filter.RemoveByID(55); !errors.Is(err, ErrRuleNotFound) {
+		t.Errorf("mavjud bo'lmagan ID uchun ErrRuleNotFound kutilgan edi: %v", err)
+	}
+}
+
+// Simulyatsiya YADRODAGI tartibni aynan takrorlashi kerak.
+//
+// Farq qilsa `firewall test` yolg'on gapiradi va bu qoidani
+// noto'g'ri yozishga olib keladi — eng yomon nosozlik turi.
+func TestXDPPolicy_SimulateMatchesKernel(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	peer := netip.MustParseAddr(peerAddr)
+	identity, err := filter.IdentityFor(netip.PrefixFrom(peer, 128))
+	if err != nil {
+		t.Fatalf("IdentityFor: %v", err)
+	}
+
+	// Qoidasiz: deny-by-default.
+	decision, err := filter.Simulate(peer, 443, 6, Ingress)
+	if err != nil {
+		t.Fatalf("Simulate: %v", err)
+	}
+	if decision.Matched || decision.Verdict != Drop {
+		t.Errorf("qoidasiz holat: matched=%v verdict=%v", decision.Matched, decision.Verdict)
+	}
+
+	// Umumiy ruxsat.
+	if err := filter.AddRule(Rule{Identity: identity, Verdict: Allow, RuleID: 1}); err != nil {
+		t.Fatalf("AddRule(any): %v", err)
+	}
+	decision, _ = filter.Simulate(peer, 443, 6, Ingress)
+	if !decision.Matched || decision.Rule.RuleID != 1 {
+		t.Errorf("umumiy qoida topilmadi: %+v", decision)
+	}
+
+	// Aniqroq taqiq ustunlik qilishi kerak.
+	if err := filter.AddRule(Rule{
+		Identity: identity, Port: 443, Proto: 6, Verdict: Drop, RuleID: 2,
+	}); err != nil {
+		t.Fatalf("AddRule(443): %v", err)
+	}
+	decision, _ = filter.Simulate(peer, 443, 6, Ingress)
+	if decision.Rule.RuleID != 2 || decision.Verdict != Drop {
+		t.Errorf("aniqroq qoida ustunlik qilmadi: %+v", decision)
+	}
+
+	// Boshqa port hali ham umumiy qoidaga tushadi.
+	decision, _ = filter.Simulate(peer, 80, 6, Ingress)
+	if decision.Rule.RuleID != 1 {
+		t.Errorf("boshqa port noto'g'ri qoidaga tushdi: %+v", decision)
+	}
+
+	// Simulyatsiya YADRO bilan mos kelishini tekshiramiz: ICMPv6
+	// paketini yuborib, natijani solishtiramiz.
+	sim, _ := filter.Simulate(peer, 0, 58, Ingress)
+
+	before, _ := filter.Stats()
+	inject(t, device, echoRequest(t, 90))
+	time.Sleep(150 * time.Millisecond)
+	after, _ := filter.Stats()
+
+	allowed := after[StatAllow] > before[StatAllow]
+	if allowed != (sim.Verdict == Allow) {
+		t.Errorf("simulyatsiya yadrodan farq qildi: simulyatsiya=%v yadro=allow:%v",
+			sim.Verdict, allowed)
+	}
+}
+
+// Flush hamma qoidani va bog'lanishni o'chirishi kerak.
+func TestXDPPolicy_Flush(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	identity, err := filter.IdentityFor(netip.MustParsePrefix("2a0e:1::/64"))
+	if err != nil {
+		t.Fatalf("IdentityFor: %v", err)
+	}
+	for id := range uint32(3) {
+		if err := filter.AddRule(Rule{
+			Identity: identity, Port: uint16(1000 + id), Verdict: Allow, RuleID: id + 1,
+		}); err != nil {
+			t.Fatalf("AddRule: %v", err)
+		}
+	}
+
+	removed, err := filter.Flush()
+	if err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if removed != 3 {
+		t.Errorf("%d ta qoida o'chirildi, 3 kutilgan edi", removed)
+	}
+
+	rules, _ := filter.Rules()
+	if len(rules) != 0 {
+		t.Errorf("Flush'dan keyin %d ta qoida qoldi", len(rules))
+	}
+	if bindings := filter.Bindings(); len(bindings) != 0 {
+		t.Errorf("Flush'dan keyin %d ta bog'lanish qoldi", len(bindings))
 	}
 }

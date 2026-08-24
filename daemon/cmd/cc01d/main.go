@@ -48,6 +48,8 @@ func main() {
 		cpPin        = flag.String("cp-pin", os.Getenv("CC01_CP_PIN"), "CP sertifikatining SPKI pini (sha256/…); bir nechtasi vergul bilan")
 		cpInsecure   = flag.Bool("cp-insecure", false, "CP kanalini shifrlamaslik (FAQAT lokal sinov)")
 		stateDir     = flag.String("state-dir", stateDirDefault(), "node sertifikati saqlanadigan papka")
+		firewall     = flag.Bool("firewall", false, "overlay interfeysida eBPF policy filtrini yoqish")
+		fwEnforce    = flag.Bool("firewall-enforce", false, "policy hukmini qo'llash (aks holda dry-run)")
 		advertise    = flag.String("advertise", "", "e'lon qilinadigan underlay manzil host:port")
 		stunServer   = flag.String("stun", os.Getenv("CC01_STUN"), "STUN serveri host:port (NAT ortida public manzilni aniqlash uchun)")
 		socketPath   = flag.String("socket", ipc.DefaultSocket, "IPC soketi (`cc01` CLI uchun)")
@@ -103,20 +105,22 @@ func main() {
 		}
 
 		if err := runWithControlPlane(controlConfig{
-			privateKey:  *privateKey,
-			controlAddr: *controlAddr,
-			tenant:      *tenant,
-			hostname:    name,
-			authToken:   *cpToken,
-			listenPort:  uint16(*listenPort),
-			ifaceName:   *ifaceName,
-			advertised:  advertised,
-			stunServer:  stunAddr,
-			socketPath:  *socketPath,
-			startDown:   *startDown,
-			cpPins:      splitList(*cpPin),
-			cpInsecure:  *cpInsecure,
-			stateDir:    *stateDir,
+			privateKey:      *privateKey,
+			controlAddr:     *controlAddr,
+			tenant:          *tenant,
+			hostname:        name,
+			authToken:       *cpToken,
+			listenPort:      uint16(*listenPort),
+			ifaceName:       *ifaceName,
+			advertised:      advertised,
+			stunServer:      stunAddr,
+			socketPath:      *socketPath,
+			startDown:       *startDown,
+			cpPins:          splitList(*cpPin),
+			cpInsecure:      *cpInsecure,
+			stateDir:        *stateDir,
+			firewall:        *firewall,
+			firewallEnforce: *fwEnforce,
 		}, logger); err != nil {
 			fail(err)
 		}

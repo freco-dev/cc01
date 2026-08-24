@@ -33,6 +33,8 @@ func main() {
 		err = runStatus(args)
 	case "peer":
 		err = runPeer(args)
+	case "firewall":
+		err = runFirewall(args)
 	case "doctor":
 		err = runDoctor(args)
 	case "version":
@@ -59,6 +61,7 @@ Buyruqlar:
   down                          mesh'ni tushirish (demon ishlashda davom etadi)
   status [--json] [--watch]     demon holati
   peer list [--json] [--online] peerlar va ular bilan qaysi yo'l ishlatilyapti
+  firewall <buyruq>             eBPF policy (add/del/list/test/mode/flush)
   doctor                        muhit tekshiruvi
   version
 

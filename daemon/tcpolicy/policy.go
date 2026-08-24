@@ -33,9 +33,11 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"sync"
 	"sync/atomic"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/rlimit"
 )
 
 //go:embed tc_policy.o
@@ -207,6 +209,16 @@ type Filter struct {
 	// generation — qoidalar to'plamining avlodi. Har bir
 	// o'zgarishda oshadi va keshlangan hukmlarni eskirtiradi.
 	generation atomic.Uint32
+
+	// identities — prefiks↔guruh bog'lanishining xotiradagi
+	// nusxasi.
+	//
+	// Yadro LPM trie'si teskari qidirishga (identity → prefiks)
+	// yaramaydi va CLI aynan shuni ko'rsatishi kerak: operator
+	// raqam emas, CIDR bilan o'ylaydi.
+	identityMu   sync.Mutex
+	identities   map[netip.Prefix]uint32
+	nextIdentity uint32
 }
 
 // Load dasturni yuklaydi va interfeysga biriktiradi.
@@ -239,6 +251,10 @@ func Load(cfg Config) (*Filter, error) {
 			ErrNotLayer3, cfg.Interface)
 	}
 
+	if err := removeMemlock(); err != nil {
+		return nil, fmt.Errorf("tcpolicy: %w", err)
+	}
+
 	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(programELF))
 	if err != nil {
 		return nil, fmt.Errorf("tcpolicy: dasturni o'qish: %w", err)
@@ -261,9 +277,11 @@ func Load(cfg Config) (*Filter, error) {
 	}
 
 	filter := &Filter{
-		collection: collection,
-		iface:      cfg.Interface,
-		log:        cfg.Logger.With("component", "tcpolicy"),
+		collection:   collection,
+		iface:        cfg.Interface,
+		identities:   make(map[netip.Prefix]uint32),
+		nextIdentity: firstIdentity,
+		log:          cfg.Logger.With("component", "tcpolicy"),
 	}
 
 	// Sozlama biriktirishdan OLDIN: aks holda dastur ishlay
@@ -357,6 +375,9 @@ func (f *Filter) invalidate() error {
 // uchun).
 func (f *Filter) Generation() uint32 { return f.generation.Load() }
 
+// Enforcing — hukm qo'llanyaptimi yoki dry-run.
+func (f *Filter) Enforcing() bool { return f.config.Enforce }
+
 // SetEnforce hukmni qo'llashni yoqadi yoki o'chiradi, qolgan
 // sozlamalarga tegmasdan.
 func (f *Filter) SetEnforce(enforce bool) error {
@@ -375,6 +396,22 @@ func (f *Filter) SetIdentity(prefix netip.Prefix, identity uint32) error {
 		return fmt.Errorf("tcpolicy: faqat IPv6 prefiks: %v", prefix)
 	}
 
+	f.identityMu.Lock()
+	f.identities[prefix.Masked()] = identity
+	if identity >= f.nextIdentity {
+		f.nextIdentity = identity + 1
+	}
+	f.identityMu.Unlock()
+
+	return f.setIdentity(prefix, identity)
+}
+
+// setIdentityLocked — identityMu ushlab turilganda chaqiriladi.
+func (f *Filter) setIdentityLocked(prefix netip.Prefix, identity uint32) error {
+	return f.setIdentity(prefix, identity)
+}
+
+func (f *Filter) setIdentity(prefix netip.Prefix, identity uint32) error {
 	identities := f.collection.Maps["cc01_identity"]
 	if identities == nil {
 		return errors.New("tcpolicy: identity map topilmadi")
@@ -400,6 +437,10 @@ func (f *Filter) RemoveIdentity(prefix netip.Prefix) error {
 	key := identityKey{PrefixLen: uint32(prefix.Bits())}
 	addr := prefix.Masked().Addr().As16()
 	copy(key.Addr[:], addr[:])
+
+	f.identityMu.Lock()
+	delete(f.identities, prefix.Masked())
+	f.identityMu.Unlock()
 
 	if err := identities.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 		return fmt.Errorf("tcpolicy: identity yozuvini o'chirish (%v): %w", prefix, err)
@@ -555,3 +596,19 @@ type policyValue struct {
 	RuleID  uint32
 	Hits    uint64
 }
+
+// removeMemlock BPF xotira chegarasini olib tashlaydi.
+//
+// Eski yadrolarda BPF map'lari `RLIMIT_MEMLOCK` hisobiga tushadi va
+// standart chegara (odatda 64 KB) hatto kichik map uchun ham
+// yetmaydi. Yangi yadrolarda hisob memcg'ga ko'chgan, lekin
+// konteynerda chegara baribir past bo'lishi mumkin.
+//
+// Bir marta bajariladi: chegarani har yuklashda o'zgartirish
+// keraksiz syscall.
+var removeMemlock = sync.OnceValue(func() error {
+	if err := rlimit.RemoveMemlock(); err != nil {
+		return fmt.Errorf("BPF xotira chegarasi: %w", err)
+	}
+	return nil
+})

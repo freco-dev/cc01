@@ -23,10 +23,12 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"sync"
 	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/rlimit"
 )
 
 // Dastur BINARY ko'rinishida ichkariga joylashtiriladi.
@@ -181,6 +183,10 @@ func Load(cfg Config) (*Filter, error) {
 	iface, err := net.InterfaceByName(cfg.Interface)
 	if err != nil {
 		return nil, fmt.Errorf("xdp: interfeys topilmadi (%s): %w", cfg.Interface, err)
+	}
+
+	if err := removeMemlock(); err != nil {
+		return nil, fmt.Errorf("xdp: %w", err)
 	}
 
 	spec, err := ebpf.LoadCollectionSpecFromReader(newReader(programELF))
@@ -600,3 +606,19 @@ func (f *Filter) RunSweeper(ctx context.Context) {
 		}
 	}
 }
+
+// removeMemlock BPF xotira chegarasini olib tashlaydi.
+//
+// Eski yadrolarda BPF map'lari `RLIMIT_MEMLOCK` hisobiga tushadi va
+// standart chegara (odatda 64 KB) hatto kichik map uchun ham
+// yetmaydi. Yangi yadrolarda hisob memcg'ga ko'chgan, lekin
+// konteynerda chegara baribir past bo'lishi mumkin.
+//
+// Bir marta bajariladi: chegarani har yuklashda o'zgartirish
+// keraksiz syscall.
+var removeMemlock = sync.OnceValue(func() error {
+	if err := rlimit.RemoveMemlock(); err != nil {
+		return fmt.Errorf("BPF xotira chegarasi: %w", err)
+	}
+	return nil
+})

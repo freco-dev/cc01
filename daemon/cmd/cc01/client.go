@@ -91,3 +91,24 @@ func translate(err error, socket string) error {
 func socketFlag(set *flag.FlagSet) *string {
 	return set.String("socket", ipc.DefaultSocket, "demon soketi")
 }
+
+// connectFirewall demonning firewall xizmatiga ulanadi.
+func connectFirewall(socket string) (cc01v1.FirewallServiceClient, func(), error) {
+	conn, err := ipc.Dial(socket)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Ulanish holatini tekshiramiz: gRPC dangasa va soket
+	// yo'qligini birinchi chaqiruvgacha sezmaydi.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	daemon := cc01v1.NewDaemonServiceClient(conn)
+	if _, err := daemon.Status(ctx, &cc01v1.StatusRequest{}); err != nil {
+		_ = conn.Close()
+		return nil, nil, translate(err, socket)
+	}
+
+	return cc01v1.NewFirewallServiceClient(conn), func() { _ = conn.Close() }, nil
+}

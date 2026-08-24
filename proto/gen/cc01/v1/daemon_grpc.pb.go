@@ -323,3 +323,325 @@ var DaemonService_ServiceDesc = grpc.ServiceDesc{
 	},
 	Metadata: "cc01/v1/daemon.proto",
 }
+
+const (
+	FirewallService_AddRule_FullMethodName   = "/cc01.v1.FirewallService/AddRule"
+	FirewallService_DelRule_FullMethodName   = "/cc01.v1.FirewallService/DelRule"
+	FirewallService_ListRules_FullMethodName = "/cc01.v1.FirewallService/ListRules"
+	FirewallService_TestRule_FullMethodName  = "/cc01.v1.FirewallService/TestRule"
+	FirewallService_SetMode_FullMethodName   = "/cc01.v1.FirewallService/SetMode"
+	FirewallService_Flush_FullMethodName     = "/cc01.v1.FirewallService/Flush"
+)
+
+// FirewallServiceClient is the client API for FirewallService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// FirewallService — eBPF policy boshqaruvi (DEV_SPEC §5.1, §5.2).
+//
+// Qoidalar YADRODA yashaydi va demon qayta ishga tushganda
+// yo'qoladi. Doimiy saqlash Control Plane vazifasi: u qoidalarni
+// tarqatadi va node ularni qayta qo'llaydi.
+type FirewallServiceClient interface {
+	// AddRule qoida qo'shadi yoki mavjudini yangilaydi.
+	AddRule(ctx context.Context, in *AddRuleRequest, opts ...grpc.CallOption) (*AddRuleResponse, error)
+	// DelRule qoidani identifikatori bo'yicha o'chiradi.
+	DelRule(ctx context.Context, in *DelRuleRequest, opts ...grpc.CallOption) (*DelRuleResponse, error)
+	// ListRules barcha qoidalarni hisoblagichlari bilan qaytaradi.
+	ListRules(ctx context.Context, in *ListRulesRequest, opts ...grpc.CallOption) (*ListRulesResponse, error)
+	// TestRule paket qaysi qoidaga tushishini hisoblaydi.
+	//
+	// Yadroga paket yubormaydi: qidiruv tartibi userspace'da
+	// takrorlanadi. Operator qoidani yozgandan keyin uni ishlab
+	// chiqarish trafigini kutmasdan sinab ko'rishi kerak.
+	TestRule(ctx context.Context, in *TestRuleRequest, opts ...grpc.CallOption) (*TestRuleResponse, error)
+	// SetMode enforce yoki dry-run rejimiga o'tkazadi.
+	SetMode(ctx context.Context, in *SetModeRequest, opts ...grpc.CallOption) (*SetModeResponse, error)
+	// Flush barcha qoidalarni o'chiradi.
+	Flush(ctx context.Context, in *FlushRequest, opts ...grpc.CallOption) (*FlushResponse, error)
+}
+
+type firewallServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewFirewallServiceClient(cc grpc.ClientConnInterface) FirewallServiceClient {
+	return &firewallServiceClient{cc}
+}
+
+func (c *firewallServiceClient) AddRule(ctx context.Context, in *AddRuleRequest, opts ...grpc.CallOption) (*AddRuleResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AddRuleResponse)
+	err := c.cc.Invoke(ctx, FirewallService_AddRule_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *firewallServiceClient) DelRule(ctx context.Context, in *DelRuleRequest, opts ...grpc.CallOption) (*DelRuleResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DelRuleResponse)
+	err := c.cc.Invoke(ctx, FirewallService_DelRule_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *firewallServiceClient) ListRules(ctx context.Context, in *ListRulesRequest, opts ...grpc.CallOption) (*ListRulesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListRulesResponse)
+	err := c.cc.Invoke(ctx, FirewallService_ListRules_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *firewallServiceClient) TestRule(ctx context.Context, in *TestRuleRequest, opts ...grpc.CallOption) (*TestRuleResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TestRuleResponse)
+	err := c.cc.Invoke(ctx, FirewallService_TestRule_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *firewallServiceClient) SetMode(ctx context.Context, in *SetModeRequest, opts ...grpc.CallOption) (*SetModeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetModeResponse)
+	err := c.cc.Invoke(ctx, FirewallService_SetMode_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *firewallServiceClient) Flush(ctx context.Context, in *FlushRequest, opts ...grpc.CallOption) (*FlushResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FlushResponse)
+	err := c.cc.Invoke(ctx, FirewallService_Flush_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// FirewallServiceServer is the server API for FirewallService service.
+// All implementations should embed UnimplementedFirewallServiceServer
+// for forward compatibility.
+//
+// FirewallService — eBPF policy boshqaruvi (DEV_SPEC §5.1, §5.2).
+//
+// Qoidalar YADRODA yashaydi va demon qayta ishga tushganda
+// yo'qoladi. Doimiy saqlash Control Plane vazifasi: u qoidalarni
+// tarqatadi va node ularni qayta qo'llaydi.
+type FirewallServiceServer interface {
+	// AddRule qoida qo'shadi yoki mavjudini yangilaydi.
+	AddRule(context.Context, *AddRuleRequest) (*AddRuleResponse, error)
+	// DelRule qoidani identifikatori bo'yicha o'chiradi.
+	DelRule(context.Context, *DelRuleRequest) (*DelRuleResponse, error)
+	// ListRules barcha qoidalarni hisoblagichlari bilan qaytaradi.
+	ListRules(context.Context, *ListRulesRequest) (*ListRulesResponse, error)
+	// TestRule paket qaysi qoidaga tushishini hisoblaydi.
+	//
+	// Yadroga paket yubormaydi: qidiruv tartibi userspace'da
+	// takrorlanadi. Operator qoidani yozgandan keyin uni ishlab
+	// chiqarish trafigini kutmasdan sinab ko'rishi kerak.
+	TestRule(context.Context, *TestRuleRequest) (*TestRuleResponse, error)
+	// SetMode enforce yoki dry-run rejimiga o'tkazadi.
+	SetMode(context.Context, *SetModeRequest) (*SetModeResponse, error)
+	// Flush barcha qoidalarni o'chiradi.
+	Flush(context.Context, *FlushRequest) (*FlushResponse, error)
+}
+
+// UnimplementedFirewallServiceServer should be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedFirewallServiceServer struct{}
+
+func (UnimplementedFirewallServiceServer) AddRule(context.Context, *AddRuleRequest) (*AddRuleResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AddRule not implemented")
+}
+func (UnimplementedFirewallServiceServer) DelRule(context.Context, *DelRuleRequest) (*DelRuleResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DelRule not implemented")
+}
+func (UnimplementedFirewallServiceServer) ListRules(context.Context, *ListRulesRequest) (*ListRulesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListRules not implemented")
+}
+func (UnimplementedFirewallServiceServer) TestRule(context.Context, *TestRuleRequest) (*TestRuleResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method TestRule not implemented")
+}
+func (UnimplementedFirewallServiceServer) SetMode(context.Context, *SetModeRequest) (*SetModeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetMode not implemented")
+}
+func (UnimplementedFirewallServiceServer) Flush(context.Context, *FlushRequest) (*FlushResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Flush not implemented")
+}
+func (UnimplementedFirewallServiceServer) testEmbeddedByValue() {}
+
+// UnsafeFirewallServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to FirewallServiceServer will
+// result in compilation errors.
+type UnsafeFirewallServiceServer interface {
+	mustEmbedUnimplementedFirewallServiceServer()
+}
+
+func RegisterFirewallServiceServer(s grpc.ServiceRegistrar, srv FirewallServiceServer) {
+	// If the following call panics, it indicates UnimplementedFirewallServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&FirewallService_ServiceDesc, srv)
+}
+
+func _FirewallService_AddRule_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddRuleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FirewallServiceServer).AddRule(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FirewallService_AddRule_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FirewallServiceServer).AddRule(ctx, req.(*AddRuleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _FirewallService_DelRule_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DelRuleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FirewallServiceServer).DelRule(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FirewallService_DelRule_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FirewallServiceServer).DelRule(ctx, req.(*DelRuleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _FirewallService_ListRules_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListRulesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FirewallServiceServer).ListRules(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FirewallService_ListRules_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FirewallServiceServer).ListRules(ctx, req.(*ListRulesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _FirewallService_TestRule_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TestRuleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FirewallServiceServer).TestRule(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FirewallService_TestRule_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FirewallServiceServer).TestRule(ctx, req.(*TestRuleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _FirewallService_SetMode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetModeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FirewallServiceServer).SetMode(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FirewallService_SetMode_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FirewallServiceServer).SetMode(ctx, req.(*SetModeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _FirewallService_Flush_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FlushRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FirewallServiceServer).Flush(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FirewallService_Flush_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FirewallServiceServer).Flush(ctx, req.(*FlushRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// FirewallService_ServiceDesc is the grpc.ServiceDesc for FirewallService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var FirewallService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "cc01.v1.FirewallService",
+	HandlerType: (*FirewallServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "AddRule",
+			Handler:    _FirewallService_AddRule_Handler,
+		},
+		{
+			MethodName: "DelRule",
+			Handler:    _FirewallService_DelRule_Handler,
+		},
+		{
+			MethodName: "ListRules",
+			Handler:    _FirewallService_ListRules_Handler,
+		},
+		{
+			MethodName: "TestRule",
+			Handler:    _FirewallService_TestRule_Handler,
+		},
+		{
+			MethodName: "SetMode",
+			Handler:    _FirewallService_SetMode_Handler,
+		},
+		{
+			MethodName: "Flush",
+			Handler:    _FirewallService_Flush_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "cc01/v1/daemon.proto",
+}

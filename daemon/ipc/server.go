@@ -23,6 +23,16 @@ import (
 	"google.golang.org/grpc"
 )
 
+// Registrar qo'shimcha gRPC xizmatini ro'yxatga oladi.
+type Registrar func(*grpc.Server)
+
+// WithFirewall firewall xizmatini qo'shadi.
+func WithFirewall(provider FirewallProvider) Registrar {
+	return func(server *grpc.Server) {
+		cc01v1.RegisterFirewallServiceServer(server, NewFirewallService(provider))
+	}
+}
+
 // DefaultSocket — standart soket yo'li (DEV_SPEC §5.2).
 const DefaultSocket = "/run/cc01/cc01.sock"
 
@@ -44,7 +54,12 @@ type Server struct {
 //
 // Mavjud soket fayli o'chiriladi: demon SIGKILL bilan tugagan bo'lsa
 // u orqada qolishi mumkin (DEV_SPEC §7.1 majburiy stsenariy 8).
-func Listen(socket string, service cc01v1.DaemonServiceServer, logger *slog.Logger) (*Server, error) {
+func Listen(
+	socket string,
+	service cc01v1.DaemonServiceServer,
+	logger *slog.Logger,
+	extra ...Registrar,
+) (*Server, error) {
 	if socket == "" {
 		socket = DefaultSocket
 	}
@@ -101,6 +116,12 @@ func Listen(socket string, service cc01v1.DaemonServiceServer, logger *slog.Logg
 
 	grpcServer := grpc.NewServer()
 	cc01v1.RegisterDaemonServiceServer(grpcServer, service)
+
+	// Qo'shimcha xizmatlar (masalan firewall) ixtiyoriy: eBPF
+	// mavjud bo'lmagan muhitda demon ularsiz ham ishlashi kerak.
+	for _, register := range extra {
+		register(grpcServer)
+	}
 
 	return &Server{
 		socket:   socket,

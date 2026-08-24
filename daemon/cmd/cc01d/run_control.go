@@ -42,6 +42,12 @@ type controlConfig struct {
 
 	// stateDir — node sertifikati saqlanadigan papka.
 	stateDir string
+
+	// firewall — overlay interfeysida eBPF policy filtrini yoqish.
+	firewall bool
+
+	// firewallEnforce — filtr hukmni qo'llaydimi.
+	firewallEnforce bool
 }
 
 // upTimeout — `cc01 up` ro'yxatdan o'tishni qancha kutadi.
@@ -77,25 +83,37 @@ func runWithControlPlane(cfg controlConfig, logger *slog.Logger) error {
 	}
 
 	mesh := session.New(session.Config{
-		Identity:    identity,
-		ControlAddr: cfg.controlAddr,
-		Tenant:      cfg.tenant,
-		Hostname:    cfg.hostname,
-		AuthToken:   cfg.authToken,
-		ListenPort:  cfg.listenPort,
-		IfaceName:   cfg.ifaceName,
-		Advertised:  cfg.advertised,
-		StunServer:  cfg.stunServer,
-		Pins:        cfg.cpPins,
-		Insecure:    cfg.cpInsecure,
-		ClientCert:  clientCert,
-		Logger:      logger,
+		Identity:        identity,
+		ControlAddr:     cfg.controlAddr,
+		Tenant:          cfg.tenant,
+		Hostname:        cfg.hostname,
+		AuthToken:       cfg.authToken,
+		ListenPort:      cfg.listenPort,
+		IfaceName:       cfg.ifaceName,
+		Advertised:      cfg.advertised,
+		StunServer:      cfg.stunServer,
+		Pins:            cfg.cpPins,
+		Insecure:        cfg.cpInsecure,
+		ClientCert:      clientCert,
+		Firewall:        cfg.firewall,
+		FirewallEnforce: cfg.firewallEnforce,
+		Logger:          logger,
 	})
 
 	// IPC mesh'dan OLDIN ochiladi: mesh ko'tarilmasa ham `cc01 status`
 	// va `cc01 doctor` ishlashi kerak — aks holda nosozlikni aynan
 	// kerak bo'lgan paytda ko'rib bo'lmaydi.
-	ipcServer, err := ipc.Listen(cfg.socketPath, ipc.NewService(mesh, version), logger)
+	// Filtr provider sifatida beriladi: u mesh ko'tarilgandan
+	// keyin paydo bo'ladi, IPC esa undan oldin ochiladi.
+	firewall := func() ipc.Firewall {
+		if policy := mesh.Policy(); policy != nil {
+			return policy
+		}
+		return nil
+	}
+
+	ipcServer, err := ipc.Listen(cfg.socketPath, ipc.NewService(mesh, version), logger,
+		ipc.WithFirewall(firewall))
 	if err != nil {
 		logger.Warn("IPC ochilmadi, `cc01 status` ishlamaydi", "err", err)
 	} else {

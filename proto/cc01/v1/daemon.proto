@@ -32,6 +32,157 @@ service DaemonService {
   rpc Doctor (DoctorRequest) returns (DoctorResponse);
 }
 
+// FirewallService — eBPF policy boshqaruvi (DEV_SPEC §5.1, §5.2).
+//
+// Qoidalar YADRODA yashaydi va demon qayta ishga tushganda
+// yo'qoladi. Doimiy saqlash Control Plane vazifasi: u qoidalarni
+// tarqatadi va node ularni qayta qo'llaydi.
+service FirewallService {
+  // AddRule qoida qo'shadi yoki mavjudini yangilaydi.
+  rpc AddRule (AddRuleRequest) returns (AddRuleResponse);
+
+  // DelRule qoidani identifikatori bo'yicha o'chiradi.
+  rpc DelRule (DelRuleRequest) returns (DelRuleResponse);
+
+  // ListRules barcha qoidalarni hisoblagichlari bilan qaytaradi.
+  rpc ListRules (ListRulesRequest) returns (ListRulesResponse);
+
+  // TestRule paket qaysi qoidaga tushishini hisoblaydi.
+  //
+  // Yadroga paket yubormaydi: qidiruv tartibi userspace'da
+  // takrorlanadi. Operator qoidani yozgandan keyin uni ishlab
+  // chiqarish trafigini kutmasdan sinab ko'rishi kerak.
+  rpc TestRule (TestRuleRequest) returns (TestRuleResponse);
+
+  // SetMode enforce yoki dry-run rejimiga o'tkazadi.
+  rpc SetMode (SetModeRequest) returns (SetModeResponse);
+
+  // Flush barcha qoidalarni o'chiradi.
+  rpc Flush (FlushRequest) returns (FlushResponse);
+}
+
+// FirewallDirection — qoida qaysi yo'nalishga tegishli.
+enum FirewallDirection {
+  FIREWALL_DIRECTION_UNSPECIFIED = 0;
+
+  // INGRESS — bizga kirayotgan paketlar; guruh MANBA prefiksidan.
+  FIREWALL_DIRECTION_INGRESS = 1;
+
+  // EGRESS — bizdan chiqayotgan paketlar; guruh MAQSAD prefiksidan.
+  FIREWALL_DIRECTION_EGRESS = 2;
+}
+
+// FirewallVerdict — qoida hukmi.
+enum FirewallVerdict {
+  FIREWALL_VERDICT_UNSPECIFIED = 0;
+  FIREWALL_VERDICT_DROP        = 1;
+  FIREWALL_VERDICT_ALLOW       = 2;
+}
+
+message AddRuleRequest {
+  FirewallDirection direction = 1;
+
+  // Prefix — manba (kirishda) yoki maqsad (chiqishda) prefiksi,
+  // masalan "2a0e:1::/64". Guruh raqami avtomatik ajratiladi.
+  string prefix = 2;
+
+  // Port — 0 = istalgan port.
+  uint32 port = 3;
+
+  // Proto — IP protokol raqami (6=TCP, 17=UDP, 58=ICMPv6).
+  // 0 = istalgan.
+  uint32 proto = 4;
+
+  FirewallVerdict verdict = 5;
+
+  // RuleId — 0 bo'lsa demon keyingi bo'sh raqamni beradi.
+  uint32 rule_id = 6;
+
+  // Comment — audit uchun izoh. Yadroda saqlanmaydi.
+  string comment = 7;
+}
+
+message AddRuleResponse {
+  FirewallRule rule = 1;
+}
+
+message DelRuleRequest {
+  uint32 rule_id = 1;
+}
+
+message DelRuleResponse {
+  FirewallRule rule = 1;
+}
+
+message ListRulesRequest {
+  // OnlyDirection — bo'sh bo'lmasa faqat shu yo'nalish.
+  FirewallDirection only_direction = 1;
+}
+
+message ListRulesResponse {
+  repeated FirewallRule rules = 1;
+
+  // Enforce — hukm qo'llanyaptimi yoki dry-run.
+  bool enforce = 2;
+
+  // Generation — qoidalar to'plamining avlodi.
+  uint32 generation = 3;
+}
+
+message FirewallRule {
+  FirewallDirection direction = 1;
+  string            prefix    = 2;
+  uint32            identity  = 3;
+  uint32            port      = 4;
+  uint32            proto     = 5;
+  FirewallVerdict   verdict   = 6;
+  uint32            rule_id   = 7;
+
+  // Hits — nechta paket shu qoida bo'yicha o'tgan yoki tashlangan.
+  uint64 hits = 8;
+}
+
+message TestRuleRequest {
+  FirewallDirection direction = 1;
+
+  // Addr — manba (kirishda) yoki maqsad (chiqishda) manzili.
+  string addr  = 2;
+  uint32 port  = 3;
+  uint32 proto = 4;
+}
+
+message TestRuleResponse {
+  // Matched — qoida topildimi. false bo'lsa deny-by-default.
+  bool matched = 1;
+
+  FirewallRule    rule    = 2;
+  FirewallVerdict verdict = 3;
+
+  // Identity — manzil qaysi guruhga tushdi.
+  uint32 identity = 4;
+
+  // Prefix — o'sha guruhning prefiksi.
+  string prefix = 5;
+
+  // Enforce — hukm HAQIQATDA qo'llanadimi.
+  bool enforce = 6;
+}
+
+message SetModeRequest {
+  // Enforce — true bo'lsa hukm qo'llanadi, false bo'lsa dry-run.
+  bool enforce = 1;
+}
+
+message SetModeResponse {
+  bool enforce = 1;
+}
+
+message FlushRequest {}
+
+message FlushResponse {
+  uint32 removed = 1;
+}
+
 message UpRequest {}
 
 message UpResponse {

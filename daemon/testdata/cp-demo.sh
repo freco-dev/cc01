@@ -15,7 +15,10 @@ cleanup() {
   $DOCKER rm -f cc01-cp cc01-n1 cc01-n2 cc01-n3 cc01-bad cc01-impostor >/dev/null 2>&1 || true
   $DOCKER network rm $NET >/dev/null 2>&1 || true
 }
-trap cleanup EXIT
+# KEEP=1 — konteynerlarni qoldiradi (tekshirish uchun).
+if [ -z "${KEEP:-}" ]; then
+  trap cleanup EXIT
+fi
 cleanup
 
 echo "── image quriladi ──"
@@ -45,11 +48,12 @@ for i in 1 2 3; do
   KEY=$($DOCKER run --rm --entrypoint cc01d $IMAGE -genkey 2>/dev/null)
   echo "$KEY" > "/tmp/cc01-node-$i.key"
   $DOCKER run -d --name "cc01-n$i" --network $NET --ip "172.32.88.1$i" \
-    --cap-add NET_ADMIN --device /dev/net/tun \
+    --cap-add NET_ADMIN --cap-add BPF --cap-add PERFMON \
+    --device /dev/net/tun \
     --entrypoint cc01d $IMAGE \
     -key "$KEY" \
     -cp 172.32.88.5:8443 -cp-token "$TOKEN" -cp-pin "$PIN" \
-    -state-dir /var/lib/cc01 \
+    -state-dir /var/lib/cc01 -firewall \
     -hostname "node-$i" -listen 51820 >/dev/null
 done
 
@@ -135,6 +139,25 @@ $DOCKER exec cc01-n1 cc01 peer list
 echo
 echo "═══ cc01 doctor (node-1) ═══"
 $DOCKER exec cc01-n1 cc01 doctor
+
+echo
+echo "═══ cc01 firewall (node-1) ═══"
+A2_ADDR=$($DOCKER exec cc01-n2 cc01 status | awk '/manzil/ {print $2}' | cut -d/ -f1)
+
+echo "── boshlang'ich holat (dry-run, qoidasiz) ──"
+$DOCKER exec cc01-n1 cc01 firewall list
+
+echo "── node-2 ga ICMPv6 ruxsati ──"
+$DOCKER exec cc01-n1 cc01 firewall add --allow --src "$A2_ADDR/128" --proto icmpv6
+
+echo "── qoida ishlaydimi (test) ──"
+$DOCKER exec cc01-n1 cc01 firewall test --src "$A2_ADDR" --proto icmpv6
+
+echo "── boshqa manzil ──"
+$DOCKER exec cc01-n1 cc01 firewall test --src fd00:cc01:c0de::99 --proto icmpv6
+
+echo "── ro'yxat ──"
+$DOCKER exec cc01-n1 cc01 firewall list
 
 echo
 echo "═══ marshrut jadvali 51820 (node-1) ═══"

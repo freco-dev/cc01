@@ -682,6 +682,53 @@ va maydon siljishlari `daemon/xdp/layout_test.go` da qulflangan.
 5. Program pin + link pin (BPF_LINK) → avtomatik detach'dan himoya
 ```
 
+#### `cc01 firewall` — CLI va kichik kompilyator
+
+`--src` va `--dst` **yo'nalishni tanlaydi**, ikkalasi birga
+berilmaydi:
+
+| Bayroq | Yo'nalish | Savol |
+| --- | --- | --- |
+| `--src CIDR` | kirish | kim **bizga** murojaat qilyapti |
+| `--dst CIDR` | chiqish | biz **kimga** murojaat qilyapmiz |
+
+"Manbadan maqsadga" shaklidagi qoidani hozirgi kalit sxemasi
+ifodalay olmaydi (guruh faqat bir tomondagi prefiksdan olinadi), va
+buni jimgina bir tomonga aylantirish operatorni aldardi — shuning
+uchun buyruq xato qaytaradi.
+
+**Guruh raqami avtomatik ajratiladi.** Operator CIDR bilan
+ishlaydi, yadro esa raqam bilan; almashtirishni demon bajaradi
+(`IdentityFor`). Bu — kichik policy kompilyatori. Uni CLI ga
+qoldirish har bir chaqiruvchida takrorlanardi.
+
+**`firewall test` yadroga paket yubormaydi**: qidiruv tartibi
+userspace'da AYNAN takrorlanadi. Operator qoidani yozgandan keyin
+uni ishlab chiqarish trafigini kutmasdan sinab ko'rishi kerak.
+
+⚠️ Tartib C dagi `lookup_verdict` bilan bir xil bo'lishi shart —
+farq qilsa buyruq yolg'on gapiradi va bu qoidani noto'g'ri yozishga
+olib keladi. Buni test qo'riqlaydi: simulyatsiya natijasi haqiqiy
+paket natijasi bilan solishtiriladi.
+
+**Dry-run har joyda aytiladi.** `add`, `test` va `list` rejimni
+ko'rsatadi: qoida yozilgan, lekin qo'llanmayotgan holat eng
+chalg'ituvchi holat.
+
+**`flush` `--force` talab qiladi**: deny-by-default siyosatida
+tozalash butun overlay trafigini kesadi.
+
+Qoidalar **yadroda** yashaydi va demon qayta ishga tushganda
+yo'qoladi. Doimiy saqlash Control Plane vazifasi — u qoidalarni
+tarqatadi va node ularni qayta qo'llaydi. Bu hali qurilmagan.
+
+⚠️ **eBPF uchun `CAP_BPF` va `CAP_PERFMON` kerak**, `CAP_NET_ADMIN`
+yetarli emas. Bundan tashqari `bpf` sistemaviy chaqiruvi
+`@privileged` guruhida va systemd'ning `@system-service` to'plamiga
+**kirmaydi** — uni oshkora ruxsat berish shart. Ikkalasi ham
+`deploy/systemd/cc01d.service` da bor; ularsiz filtr `operation not
+permitted` bilan yuklanmasdi.
+
 #### Policy qayerda qo'llanadi — hal qilingan
 
 §4.1 policy qo'llashni `tc_ingress` ga (`cc0`) qo'yardi, §4.3 dagi
@@ -1194,12 +1241,13 @@ cc01
 │   └── subnet advertise <cidr>              # subnet router rejimi
 │
 ├── firewall                                 # ── eBPF policy ──
-│   ├── add   --allow|--deny --src CIDR --dst CIDR --proto tcp --port 443 [--comment C]
-│   ├── del   <rule-id>
-│   ├── list  [--json] [--stats]             # hit counterlar bilan
-│   ├── test  --src A --dst B --proto tcp --port 443   # qaysi qoida ishlaydi?
-│   ├── mode  enforce|dry-run|panic
-│   └── flush [--force]
+│   ├── add   --allow|--deny (--src CIDR | --dst CIDR) [--proto tcp] [--port N]  ✅
+│   ├── del   <rule-id>                                                          ✅
+│   ├── list  [--json] [--in|--out]          # hit counterlar bilan              ✅
+│   ├── test  (--src ADDR | --dst ADDR) [--proto tcp] [--port N]                 ✅
+│   ├── mode  enforce|dry-run                                                    ✅²
+│   └── flush --force                                                            ✅
+│    ² panic rejimi qurilmagan — buyruq buni aniq aytadi
 │
 ├── relay
 │   ├── list                                 # mavjud relaylar + RTT

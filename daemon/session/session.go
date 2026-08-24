@@ -22,6 +22,7 @@ import (
 	"github.com/freco-dev/cc01/daemon/engine"
 	"github.com/freco-dev/cc01/daemon/noise"
 	"github.com/freco-dev/cc01/daemon/route"
+	"github.com/freco-dev/cc01/daemon/tcpolicy"
 	"github.com/freco-dev/cc01/daemon/tun"
 )
 
@@ -59,6 +60,21 @@ type Config struct {
 	// ClientCert — nodening TLS klient sertifikati.
 	ClientCert *tls.Certificate
 
+	// Firewall — overlay interfeysida eBPF policy filtrini yoqish.
+	//
+	// Xato bo'lsa mesh baribir ko'tariladi: filtr kuzatuv va
+	// himoya vositasi, uning yo'qligi ulanishni to'xtatish uchun
+	// sabab emas.
+	Firewall bool
+
+	// FirewallEnforce — filtr hukmni qo'llaydimi. false bo'lsa
+	// dry-run.
+	//
+	// ⚠️ Standart holatda FALSE. Deny-by-default siyosatida
+	// qoidalar hali yozilmagan bo'lsa, enforce butun overlay
+	// trafigini kesib qo'yardi.
+	FirewallEnforce bool
+
 	Logger *slog.Logger
 }
 
@@ -82,6 +98,7 @@ type active struct {
 	routes       *route.Reconciler
 	registration *control.Registration
 	endpoints    []netip.AddrPort
+	policy       *tcpolicy.Filter
 	since        time.Time
 
 	cancel context.CancelFunc
@@ -227,6 +244,23 @@ func (s *Session) build(ctx context.Context) (*active, error) {
 	})
 	routes.set(reconciler)
 
+	// eBPF policy filtri TUN yaratilgandan keyin biriktiriladi:
+	// u aynan `cc0` da, ochilgan ichki paketlar ustidan ishlaydi.
+	var policy *tcpolicy.Filter
+	if s.cfg.Firewall {
+		policy, err = tcpolicy.Load(tcpolicy.Config{
+			Interface: device.Name(),
+			Enforce:   s.cfg.FirewallEnforce,
+			Logger:    s.log,
+		})
+		if err != nil {
+			// Mesh baribir ko'tariladi: filtrsiz ham ulanish
+			// ishlaydi, faqat policy qo'llanmaydi.
+			s.log.Warn("eBPF policy filtri yuklanmadi", "err", err)
+			policy = nil
+		}
+	}
+
 	built := &active{
 		device:       device,
 		engine:       datapath,
@@ -235,6 +269,7 @@ func (s *Session) build(ctx context.Context) (*active, error) {
 		routes:       reconciler,
 		registration: registration,
 		endpoints:    endpoints,
+		policy:       policy,
 		since:        time.Now(),
 		cancel:       cancel,
 	}
@@ -279,6 +314,12 @@ func (s *Session) Down() error {
 	current.cancel()
 	current.done.Wait()
 	current.relay.close()
+
+	if current.policy != nil {
+		if err := current.policy.Close(); err != nil {
+			s.log.Warn("policy filtrini ajratish", "err", err)
+		}
+	}
 
 	// Marshrutlarni engine'dan OLDIN tozalaymiz: `Close()` interfeysni
 	// o'chiradi va u bilan birga marshrutlar ham ketadi, lekin holatni
@@ -393,4 +434,19 @@ func (s *Session) Peers() []engine.PeerSnapshot {
 		return nil
 	}
 	return current.engine.Snapshot()
+}
+
+// Policy — joriy eBPF filtri; mesh tushirilgan yoki filtr
+// yuklanmagan bo'lsa nil.
+//
+// IPC xizmati buni HAR CHAQIRUVDA so'raydi: soket mesh'dan oldin
+// ochiladi va filtr keyinroq paydo bo'ladi.
+func (s *Session) Policy() *tcpolicy.Filter {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.active == nil {
+		return nil
+	}
+	return s.active.policy
 }

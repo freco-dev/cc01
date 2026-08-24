@@ -662,3 +662,6 @@ func TestApplyOwnership_SetsExistingGroup(t *testing.T) {
 		t.Errorf("gid %d, kutilgan %s", stat.Gid, current.Gid)
 	}
 }
+
+// slogDiscard — testlarda log chiqishini yutadi.
+func slogDiscard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
