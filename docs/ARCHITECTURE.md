@@ -120,7 +120,7 @@ Bu hujjat **maqsadli** arxitekturani tasvirlaydi. Repozitoriyda hozir mavjud kod
 | Mesh VPN — yo'l tanlash (§6.2) | `daemon/path/` — holat mashinasi, disco ping/pong, gisterezis | ✅ relay-first, P2P-upgrade |
 | Node autentifikatsiyasi | `daemon/nodecert` + CP bog'lanishi (Raft'da) | ✅ token faqat ro'yxatga olish uchun |
 | Control Plane — Raft klasteri | `control/cluster` — FSM, snapshot, lider tanlash | ✅ failover 0.9–1.0 s |
-| Mesh VPN — CP kanali (§5.1.1) | TLS 1.3 + SPKI pinning; mTLS hali yo'q | ✅ noto'g'ri pin ulanishni to'xtatadi |
+| Mesh VPN — CP kanali (§5.1.1) | TLS 1.3 + SPKI pinning (server), node klient sertifikati | ✅ sertifikat almashtirish/bekor qilish ⏳ |
 | Mesh VPN — hole punching (cone NAT) | `daemon/engine` — disco pong AYNAN ping kelgan yo'l bilan qaytadi | ✅ `make punch-demo` |
 | Mesh VPN — hole punching (symmetric NAT) | `daemon/punch` — birthday paradoks, peerga xos soket | ✅ symmetric↔cone; symmetric↔symmetric imkonsiz |
 | Mesh VPN — to'liq ICE nomzod to'plami | — | Hali yo'q (`host`/`srflx` bor, `prflx` yo'q) |
