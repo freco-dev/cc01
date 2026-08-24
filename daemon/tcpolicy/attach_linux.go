@@ -22,10 +22,10 @@ import (
 // TCX afzal: link yopilganda dastur o'zi ajraladi, ya'ni demon
 // halokatli tugasa ham filtr ortda qolmaydi. clsact'da esa qdisc
 // va filtr qo'lda tozalanishi kerak.
-func attachIngress(program *ebpf.Program, index int) (func() error, error) {
+func attachTC(program *ebpf.Program, index int, direction tcDirection) (func() error, error) {
 	attachment, err := link.AttachTCX(link.TCXOptions{
 		Program:   program,
-		Attach:    ebpf.AttachTCXIngress,
+		Attach:    direction.tcx,
 		Interface: index,
 	})
 	if err == nil {
@@ -33,7 +33,7 @@ func attachIngress(program *ebpf.Program, index int) (func() error, error) {
 	}
 	tcxErr := err
 
-	detach, err := attachClsact(program, index)
+	detach, err := attachClsact(program, index, direction)
 	if err == nil {
 		return detach, nil
 	}
@@ -44,8 +44,32 @@ func attachIngress(program *ebpf.Program, index int) (func() error, error) {
 		tcxErr, err)
 }
 
+// tcDirection — kirish yoki chiqish yo'lining biriktirish
+// parametrlari.
+type tcDirection struct {
+	tcx    ebpf.AttachType
+	parent uint32
+	handle uint16
+	name   string
+}
+
+var (
+	directionIngress = tcDirection{
+		tcx:    ebpf.AttachTCXIngress,
+		parent: netlink.HANDLE_MIN_INGRESS,
+		handle: 1,
+		name:   "cc01_tc_ingress",
+	}
+	directionEgress = tcDirection{
+		tcx:    ebpf.AttachTCXEgress,
+		parent: netlink.HANDLE_MIN_EGRESS,
+		handle: 2,
+		name:   "cc01_tc_egress",
+	}
+)
+
 // attachClsact eski yo'l: clsact qdisc + BPF filtr.
-func attachClsact(program *ebpf.Program, index int) (func() error, error) {
+func attachClsact(program *ebpf.Program, index int, direction tcDirection) (func() error, error) {
 	link := &netlink.GenericLink{LinkAttrs: netlink.LinkAttrs{Index: index}}
 
 	qdisc := &netlink.GenericQdisc{
@@ -71,13 +95,13 @@ func attachClsact(program *ebpf.Program, index int) (func() error, error) {
 	filter := &netlink.BpfFilter{
 		FilterAttrs: netlink.FilterAttrs{
 			LinkIndex: index,
-			Parent:    netlink.HANDLE_MIN_INGRESS,
-			Handle:    netlink.MakeHandle(0, 1),
+			Parent:    direction.parent,
+			Handle:    netlink.MakeHandle(0, direction.handle),
 			Protocol:  protocolAll,
 			Priority:  1,
 		},
 		Fd:           program.FD(),
-		Name:         "cc01_tc_policy",
+		Name:         direction.name,
 		DirectAction: true,
 	}
 

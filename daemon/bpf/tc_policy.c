@@ -32,6 +32,8 @@
 #include <linux/ipv6.h>
 #include <linux/in.h>
 #include <linux/pkt_cls.h>
+#include <linux/tcp.h>
+#include <stddef.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
@@ -141,12 +143,13 @@ static __always_inline void l4_ports(const struct ipv6hdr *ip6, void *end,
  * va uchta qidiruv shundoq ham ko'rinib turibdi.
  */
 static __always_inline struct cc01_policy_value *
-lookup_verdict(__u32 identity, __u16 dport, __u8 proto)
+lookup_verdict(__u32 identity, __u16 dport, __u8 proto, __u8 direction)
 {
     struct cc01_policy_key key = {
         .identity = identity,
         .dport = dport,
         .proto = proto,
+        .direction = direction,
     };
 
     /* 1. Aniq port va protokol. */
@@ -227,7 +230,8 @@ static __always_inline void emit_event(const struct ipv6hdr *ip6,
 /* ct_build kesh kalitini yig'adi. */
 static __always_inline void ct_build(struct cc01_ct_key *key,
                                      const struct ipv6hdr *ip6,
-                                     __u16 sport, __u16 dport, __u8 proto)
+                                     __u16 sport, __u16 dport, __u8 proto,
+                                     __u8 direction)
 {
     __builtin_memset(key, 0, sizeof(*key));
     __builtin_memcpy(key->src, &ip6->saddr, sizeof(key->src));
@@ -235,15 +239,157 @@ static __always_inline void ct_build(struct cc01_ct_key *key,
     key->sport = sport;
     key->dport = dport;
     key->proto = proto;
+    key->direction = direction;
 }
 
-SEC("tc")
-int cc01_tc_policy(struct __sk_buff *skb)
+/* clamp_mss chiquvchi TCP SYN paketidagi MSS opsiyasini
+ * kichraytiradi.
+ *
+ * # Nega kerak
+ *
+ * Overlay MTU 1280, uchlar esa yo'lni 1500 deb hisoblab kattaroq
+ * MSS kelishib oladi. Natijada segmentlar sig'maydi va PMTU aniqlash
+ * ICMPv6 "Packet Too Big" ga tayanadi — u esa ko'pincha filtrlangan.
+ * Oqibat: ulanish o'rnatiladi, lekin katta uzatmalar QOTIB QOLADI.
+ *
+ * # Nega faqat SYN
+ *
+ * MSS faqat ulanish o'rnatilayotganda kelishiladi. Boshqa
+ * paketlarda MSS opsiyasi umuman bo'lmaydi.
+ */
+static __always_inline void clamp_mss(struct __sk_buff *skb, __u16 limit)
+{
+    if (limit == 0)
+        return;
+
+    void *data = (void *)(long)skb->data;
+    void *end = (void *)(long)skb->data_end;
+
+    struct ipv6hdr *ip6 = data;
+    if ((void *)(ip6 + 1) > end || ip6->nexthdr != IPPROTO_TCP)
+        return;
+
+    struct tcphdr *tcp = (void *)(ip6 + 1);
+    if ((void *)(tcp + 1) > end || !tcp->syn)
+        return;
+
+    /* Opsiyalar sarlavhadan keyin boshlanadi. doff — 32-bitlik
+     * so'zlarda; 5 dan katta bo'lsa opsiyalar bor.
+     */
+    __u32 doff = tcp->doff * 4;
+    if (doff <= sizeof(*tcp) || doff > 60)
+        return;
+
+    __u32 tcp_off = (__u32)((void *)tcp - data);
+    __u32 opt_off = tcp_off + sizeof(*tcp);
+    __u32 opt_end = tcp_off + doff;
+
+    /* Opsiyalar bo'ylab yuramiz. Halqa CHEKLANGAN: TCP opsiyalari
+     * eng ko'pi 40 bayt va eng kichigi 1 bayt, ya'ni 20 ta qadam
+     * har qanday holatni qoplaydi. Verifier cheksiz halqani rad
+     * etadi.
+     */
+    #pragma unroll
+    for (int step = 0; step < 20; step++) {
+        if (opt_off + 1 > opt_end)
+            return;
+
+        __u8 kind;
+        if (bpf_skb_load_bytes(skb, opt_off, &kind, 1) < 0)
+            return;
+
+        if (kind == 0)   /* End of options */
+            return;
+        if (kind == 1) { /* NOP */
+            opt_off += 1;
+            continue;
+        }
+
+        if (opt_off + 2 > opt_end)
+            return;
+
+        __u8 len;
+        if (bpf_skb_load_bytes(skb, opt_off + 1, &len, 1) < 0)
+            return;
+        if (len < 2 || opt_off + len > opt_end)
+            return;
+
+        if (kind == 2 && len == 4) {
+            __u16 mss;
+            if (bpf_skb_load_bytes(skb, opt_off + 2, &mss, 2) < 0)
+                return;
+
+            __u16 current = bpf_ntohs(mss);
+            if (current <= limit)
+                return;   /* allaqachon yetarlicha kichik */
+
+            __u16 replacement = bpf_htons(limit);
+
+            /* Checksum AVVAL tuzatiladi: bpf_skb_store_bytes
+             * data/data_end ni yaroqsiz qiladi va undan keyin
+             * paketga murojaat qilib bo'lmaydi.
+             */
+            __u32 csum_off = tcp_off + offsetof(struct tcphdr, check);
+            if (bpf_l4_csum_replace(skb, csum_off, mss, replacement, 2) < 0)
+                return;
+            if (bpf_skb_store_bytes(skb, opt_off + 2, &replacement, 2, 0) < 0)
+                return;
+
+            pstat_inc(CC01_PSTAT_MSS_CLAMPED);
+            return;
+        }
+
+        opt_off += len;
+    }
+}
+
+/* set_dscp chiquvchi paketga DSCP qo'yadi.
+ *
+ * IPv6'da traffic class sarlavhaning birinchi ikki baytiga
+ * taqsimlangan: version(4) | tc(8) | flowlabel(20). IPv6'da
+ * sarlavha checksum'i YO'Q, ya'ni faqat baytlarni yozish yetarli.
+ */
+static __always_inline void set_dscp(struct __sk_buff *skb, __u8 dscp)
+{
+    if (dscp == 0)
+        return;
+
+    void *data = (void *)(long)skb->data;
+    void *end = (void *)(long)skb->data_end;
+
+    if (data + 2 > end)
+        return;
+
+    __u8 head[2];
+    if (bpf_skb_load_bytes(skb, 0, head, 2) < 0)
+        return;
+
+    /* tc = DSCP(6 bit) | ECN(2 bit). ECN ga TEGMAYMIZ — u
+     * tiqilinlik nazorati uchun va uni o'chirish TCP ni
+     * sekinlashtirardi.
+     */
+    __u8 ecn = head[1] >> 4 & 0x3;
+    head[0] = (head[0] & 0xf0) | (dscp >> 2);
+    head[1] = (head[1] & 0x0f) | ((dscp & 0x3) << 6) | (ecn << 4);
+
+    (void)bpf_skb_store_bytes(skb, 0, head, 2, 0);
+}
+
+/* evaluate — ikkala yo'nalish uchun umumiy mantiq.
+ *
+ * Yagona farq qaysi manzil bo'yicha identity qidirilishida:
+ *
+ *	kirish   MANBA prefiksi — "kim bizga murojaat qilyapti"
+ *	chiqish  MAQSAD prefiksi — "biz kimga murojaat qilyapmiz"
+ */
+static __always_inline int evaluate(struct __sk_buff *skb, __u8 direction)
 {
     void *data = (void *)(long)skb->data;
     void *end = (void *)(long)skb->data_end;
 
-    pstat_inc(CC01_PSTAT_TOTAL);
+    pstat_inc(direction == CC01_DIR_EGRESS
+                  ? CC01_PSTAT_EGRESS_TOTAL
+                  : CC01_PSTAT_TOTAL);
 
     if (skb->protocol != bpf_htons(ETH_P_IPV6)) {
         pstat_inc(CC01_PSTAT_NOT_IPV6);
@@ -276,7 +422,7 @@ int cc01_tc_policy(struct __sk_buff *skb)
 
     /* ── Tez yo'l: hukm keshi ─────────────────────────────── */
     struct cc01_ct_key ckey;
-    ct_build(&ckey, ip6, sport, dport, proto);
+    ct_build(&ckey, ip6, sport, dport, proto, direction);
 
     struct cc01_ct_value *cached = bpf_map_lookup_elem(&cc01_conntrack, &ckey);
 
@@ -290,10 +436,16 @@ int cc01_tc_policy(struct __sk_buff *skb)
 
         if (cached->verdict == CC01_VERDICT_ALLOW) {
             pstat_inc(CC01_PSTAT_ALLOW);
+            if (direction == CC01_DIR_EGRESS) {
+                clamp_mss(skb, cfg->mss_clamp);
+                set_dscp(skb, cfg->dscp);
+            }
             return TC_ACT_OK;
         }
 
         pstat_inc(CC01_PSTAT_DROP);
+        if (direction == CC01_DIR_EGRESS)
+            pstat_inc(CC01_PSTAT_EGRESS_DROP);
         if (!(cfg->flags & CC01_F_ENFORCE))
             return TC_ACT_OK;
         return TC_ACT_SHOT;
@@ -303,9 +455,12 @@ int cc01_tc_policy(struct __sk_buff *skb)
 
     /* ── Sekin yo'l: to'liq policy qidiruvi ───────────────── */
 
-    /* 1-bosqich: manba prefiksidan identity. */
+    /* 1-bosqich: identity. Kirishda manba, chiqishda maqsad. */
     struct cc01_identity_key ikey = {.prefixlen = 128};
-    __builtin_memcpy(ikey.addr, &ip6->saddr, sizeof(ikey.addr));
+    if (direction == CC01_DIR_EGRESS)
+        __builtin_memcpy(ikey.addr, &ip6->daddr, sizeof(ikey.addr));
+    else
+        __builtin_memcpy(ikey.addr, &ip6->saddr, sizeof(ikey.addr));
 
     __u32 identity = CC01_IDENTITY_UNKNOWN;
     __u32 *found = bpf_map_lookup_elem(&cc01_identity, &ikey);
@@ -313,7 +468,7 @@ int cc01_tc_policy(struct __sk_buff *skb)
         identity = *found;
 
     /* 2-bosqich: hukm. */
-    struct cc01_policy_value *rule = lookup_verdict(identity, dport, proto);
+    struct cc01_policy_value *rule = lookup_verdict(identity, dport, proto, direction);
 
     __u8 verdict = CC01_VERDICT_DROP;   /* deny-by-default */
     __u32 rule_id = 0;
@@ -344,10 +499,16 @@ int cc01_tc_policy(struct __sk_buff *skb)
 
     if (verdict == CC01_VERDICT_ALLOW) {
         pstat_inc(CC01_PSTAT_ALLOW);
+        if (direction == CC01_DIR_EGRESS) {
+            clamp_mss(skb, cfg->mss_clamp);
+            set_dscp(skb, cfg->dscp);
+        }
         return TC_ACT_OK;
     }
 
     pstat_inc(CC01_PSTAT_DROP);
+    if (direction == CC01_DIR_EGRESS)
+        pstat_inc(CC01_PSTAT_EGRESS_DROP);
 
     /* Dry-run: hisoblaymiz, lekin o'tkazamiz.
      *
@@ -359,8 +520,25 @@ int cc01_tc_policy(struct __sk_buff *skb)
 
     emit_event(ip6, dport, proto, identity, rule_id, dry_run, cfg);
 
-    if (dry_run)
+    if (dry_run) {
+        if (direction == CC01_DIR_EGRESS) {
+            clamp_mss(skb, cfg->mss_clamp);
+            set_dscp(skb, cfg->dscp);
+        }
         return TC_ACT_OK;
+    }
 
     return TC_ACT_SHOT;
+}
+
+SEC("tc")
+int cc01_tc_ingress(struct __sk_buff *skb)
+{
+    return evaluate(skb, CC01_DIR_INGRESS);
+}
+
+SEC("tc")
+int cc01_tc_egress(struct __sk_buff *skb)
+{
+    return evaluate(skb, CC01_DIR_EGRESS);
 }

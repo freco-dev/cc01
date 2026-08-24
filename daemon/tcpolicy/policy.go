@@ -79,6 +79,9 @@ const (
 	StatEventLost
 	StatCacheHit
 	StatCacheMiss
+	StatEgressTotal
+	StatEgressDrop
+	StatMSSClamped
 	statMax
 )
 
@@ -92,6 +95,9 @@ var statNames = [statMax]string{
 	StatEventLost:     "yo'qolgan hodisalar",
 	StatCacheHit:      "keshdan topilgan",
 	StatCacheMiss:     "keshda yo'q",
+	StatEgressTotal:   "chiquvchi jami",
+	StatEgressDrop:    "chiqishda tashlangan",
+	StatMSSClamped:    "MSS kichraytirilgan",
 }
 
 // FlagEnforce — hukmni qo'llash. O'chirilgan bo'lsa (dry-run) hamma
@@ -104,9 +110,32 @@ const FlagEnforce uint32 = 1 << 0
 // ErrNotLayer3 — interfeys L3 emas.
 var ErrNotLayer3 = errors.New("tcpolicy: interfeys L3 emas")
 
+// Direction — qoida qaysi yo'nalishga tegishli.
+type Direction uint8
+
+const (
+	// Ingress — bizga kirayotgan paketlar. Identity MANBA
+	// prefiksidan olinadi: "kim bizga murojaat qilyapti".
+	Ingress Direction = 0
+
+	// Egress — bizdan chiqayotgan paketlar. Identity MAQSAD
+	// prefiksidan olinadi: "biz kimga murojaat qilyapmiz".
+	Egress Direction = 1
+)
+
+func (d Direction) String() string {
+	if d == Egress {
+		return "egress"
+	}
+	return "ingress"
+}
+
 // Rule — bitta ruxsat qoidasi.
 type Rule struct {
-	// Identity — manba guruhi.
+	// Direction — kirish yoki chiqish. Bo'sh qoldirilsa Ingress.
+	Direction Direction
+
+	// Identity — manba (kirishda) yoki maqsad (chiqishda) guruhi.
 	Identity uint32
 
 	// Port — maqsad porti. 0 = istalgan.
@@ -137,8 +166,27 @@ type Config struct {
 	// Bo'sh qoldirilsa DefaultEventSample ishlatiladi.
 	EventSample uint32
 
+	// MSSClamp — chiquvchi TCP SYN paketlaridagi MSS shu qiymatdan
+	// oshmasligi ta'minlanadi. 0 = o'chirilgan.
+	//
+	// Bo'sh qoldirilsa overlay MTU'siga mos qiymat hisoblanadi.
+	MSSClamp uint16
+
+	// DSCP — chiquvchi paketlarga qo'yiladigan belgi (0..63).
+	// 0 = tegilmaydi.
+	DSCP uint8
+
 	Logger *slog.Logger
 }
+
+// DefaultMSSClamp — overlay MTU'siga mos MSS.
+//
+// Hisob: 1280 (IPv6 minimumi) - 40 (IPv6 sarlavhasi) - 20 (TCP
+// sarlavhasi) = 1220.
+//
+// TCP opsiyalari uchun zaxira qoldirilmaydi: ular MSS ga kirmaydi,
+// segment o'lchamiga esa yadro o'zi hisobga oladi.
+const DefaultMSSClamp uint16 = 1220
 
 // DefaultEventSample — standart namuna olish qadami.
 //
@@ -205,10 +253,11 @@ func Load(cfg Config) (*Filter, error) {
 		return nil, fmt.Errorf("tcpolicy: yuklash: %w", err)
 	}
 
-	program := collection.Programs["cc01_tc_policy"]
-	if program == nil {
+	ingress := collection.Programs["cc01_tc_ingress"]
+	egress := collection.Programs["cc01_tc_egress"]
+	if ingress == nil || egress == nil {
 		collection.Close()
-		return nil, errors.New("tcpolicy: cc01_tc_policy dasturi topilmadi")
+		return nil, errors.New("tcpolicy: dasturlar topilmadi")
 	}
 
 	filter := &Filter{
@@ -222,6 +271,9 @@ func Load(cfg Config) (*Filter, error) {
 	if cfg.EventSample == 0 {
 		cfg.EventSample = DefaultEventSample
 	}
+	if cfg.MSSClamp == 0 {
+		cfg.MSSClamp = DefaultMSSClamp
+	}
 	filter.config = cfg
 
 	if err := filter.Configure(cfg); err != nil {
@@ -229,15 +281,29 @@ func Load(cfg Config) (*Filter, error) {
 		return nil, err
 	}
 
-	detach, err := attachIngress(program, iface.Index)
+	// Ikkala yo'nalish ham biriktiriladi. Biri muvaffaqiyatsiz
+	// bo'lsa ikkinchisi ham ajratiladi: yarim biriktirilgan filtr
+	// chalg'ituvchi — kirish tekshiriladi, chiqish esa yo'q.
+	detachIngress, err := attachTC(ingress, iface.Index, directionIngress)
 	if err != nil {
 		collection.Close()
 		return nil, err
 	}
-	filter.detach = detach
+
+	detachEgress, err := attachTC(egress, iface.Index, directionEgress)
+	if err != nil {
+		_ = detachIngress()
+		collection.Close()
+		return nil, err
+	}
+
+	filter.detach = func() error {
+		return errors.Join(detachEgress(), detachIngress())
+	}
 
 	filter.log.Info("policy filtri biriktirildi",
-		"interface", cfg.Interface, "enforce", cfg.Enforce)
+		"interface", cfg.Interface, "enforce", cfg.Enforce,
+		"mss_clamp", cfg.MSSClamp)
 
 	return filter, nil
 }
@@ -258,6 +324,8 @@ func (f *Filter) Configure(cfg Config) error {
 		Flags:       flags,
 		PolicyGen:   f.generation.Load(),
 		EventSample: cfg.EventSample,
+		MSSClamp:    cfg.MSSClamp,
+		DSCP:        cfg.DSCP,
 	}
 	if err := configMap.Put(uint32(0), value); err != nil {
 		return fmt.Errorf("tcpolicy: sozlamani yozish: %w", err)
@@ -346,7 +414,12 @@ func (f *Filter) AddRule(rule Rule) error {
 		return errors.New("tcpolicy: policy map topilmadi")
 	}
 
-	key := policyKey{Identity: rule.Identity, DPort: rule.Port, Proto: rule.Proto}
+	key := policyKey{
+		Identity:  rule.Identity,
+		DPort:     rule.Port,
+		Proto:     rule.Proto,
+		Direction: uint8(rule.Direction),
+	}
 	value := policyValue{Verdict: uint8(rule.Verdict), RuleID: rule.RuleID}
 
 	if err := rules.Put(key, value); err != nil {
@@ -362,7 +435,12 @@ func (f *Filter) RemoveRule(rule Rule) error {
 		return errors.New("tcpolicy: policy map topilmadi")
 	}
 
-	key := policyKey{Identity: rule.Identity, DPort: rule.Port, Proto: rule.Proto}
+	key := policyKey{
+		Identity:  rule.Identity,
+		DPort:     rule.Port,
+		Proto:     rule.Proto,
+		Direction: uint8(rule.Direction),
+	}
 	if err := rules.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 		return fmt.Errorf("tcpolicy: qoidani o'chirish: %w", err)
 	}
@@ -376,7 +454,12 @@ func (f *Filter) Hits(rule Rule) (uint64, bool, error) {
 		return 0, false, errors.New("tcpolicy: policy map topilmadi")
 	}
 
-	key := policyKey{Identity: rule.Identity, DPort: rule.Port, Proto: rule.Proto}
+	key := policyKey{
+		Identity:  rule.Identity,
+		DPort:     rule.Port,
+		Proto:     rule.Proto,
+		Direction: uint8(rule.Direction),
+	}
 	var value policyValue
 
 	if err := rules.Lookup(key, &value); err != nil {
@@ -449,6 +532,9 @@ type configValue struct {
 	Flags       uint32
 	PolicyGen   uint32
 	EventSample uint32
+	MSSClamp    uint16
+	DSCP        uint8
+	_           uint8
 }
 
 type identityKey struct {
@@ -457,10 +543,10 @@ type identityKey struct {
 }
 
 type policyKey struct {
-	Identity uint32
-	DPort    uint16
-	Proto    uint8
-	_        uint8
+	Identity  uint32
+	DPort     uint16
+	Proto     uint8
+	Direction uint8
 }
 
 type policyValue struct {

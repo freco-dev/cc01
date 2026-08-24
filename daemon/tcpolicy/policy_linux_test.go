@@ -795,3 +795,313 @@ func TestXDPPolicy_CachesDrops(t *testing.T) {
 	t.Logf("taqiq keshi: %d topildi, %d o'tkazib yuborildi",
 		stats[StatCacheHit], stats[StatCacheMiss])
 }
+
+// readMSS TUN'dan chiqqan paketdagi MSS opsiyasini o'qiydi.
+func readMSS(t *testing.T, packet []byte) (uint16, bool) {
+	t.Helper()
+
+	if len(packet) < 40+24 || packet[6] != 6 {
+		return 0, false
+	}
+
+	tcp := packet[40:]
+	doff := int(tcp[12]>>4) * 4
+	if doff < 20 || doff > len(tcp) {
+		return 0, false
+	}
+
+	// Opsiyalar bo'ylab yuramiz.
+	for offset := 20; offset+1 < doff; {
+		kind := tcp[offset]
+		if kind == 0 {
+			return 0, false
+		}
+		if kind == 1 {
+			offset++
+			continue
+		}
+		if offset+2 > doff {
+			return 0, false
+		}
+		length := int(tcp[offset+1])
+		if length < 2 || offset+length > doff {
+			return 0, false
+		}
+		if kind == 2 && length == 4 {
+			return binary.BigEndian.Uint16(tcp[offset+2 : offset+4]), true
+		}
+		offset += length
+	}
+	return 0, false
+}
+
+// Egress yo'li ham biriktirilishi kerak.
+func TestXDPPolicy_AttachesBothDirections(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	// Chiquvchi paket yuborib, egress hisoblagichini tekshiramiz.
+	dialPeer(t, 9)
+	time.Sleep(300 * time.Millisecond)
+
+	stats, err := filter.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats[StatEgressTotal] == 0 {
+		t.Fatal("egress dasturi paket ko'rmadi — biriktirilmagan bo'lishi mumkin")
+	}
+	t.Logf("egress: %d paket", stats[StatEgressTotal])
+}
+
+// MSS clamp chiquvchi SYN paketini HAQIQATDA o'zgartirishi kerak.
+//
+// Overlay MTU 1280, uchlar esa yo'lni 1500 deb hisoblab kattaroq
+// MSS kelishib oladi. Natijada ulanish o'rnatiladi, lekin katta
+// uzatmalar qotib qoladi — tashxislash juda qiyin nosozlik.
+func TestXDPPolicy_ClampsMSS(t *testing.T) {
+	requireKernel(t)
+
+	// MTU 1500: yadro MSS ni 1440 deb e'lon qiladi va
+	// kichraytirish ko'rinadi. MTU 1280 bo'lsa u allaqachon 1220
+	// bo'lardi va test hech narsani tekshirmasdi.
+	device := testDeviceMTU(t, 1500)
+
+	filter, err := Load(Config{
+		Interface: device.Name(), Enforce: true,
+		MSSClamp: 1220, Logger: quiet(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	// Egress uchun ruxsat: aks holda paket tashlanadi va MSS ga
+	// yetib bormaydi.
+	if err := filter.SetIdentity(netip.MustParsePrefix(peerAddr+"/128"), 30); err != nil {
+		t.Fatalf("SetIdentity: %v", err)
+	}
+	if err := filter.AddRule(Rule{
+		Direction: Egress, Identity: 30, Verdict: Allow, RuleID: 1,
+	}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	// Yadro paketni chiqarishi uchun uni marshrut orqali
+	// yuboramiz — xom soket bilan.
+	go dialPeer(t, 9)
+
+	packet := readTCPFromDevice(t, device, 3*time.Second)
+	if packet == nil {
+		stats, _ := filter.Stats()
+		t.Fatalf("chiquvchi paket kelmadi (egress=%d tashlangan=%d)",
+			stats[StatEgressTotal], stats[StatEgressDrop])
+	}
+
+	mss, found := readMSS(t, packet)
+	if !found {
+		t.Fatalf("MSS opsiyasi topilmadi (%d bayt)", len(packet))
+	}
+	if mss > 1220 {
+		t.Errorf("MSS kichraytirilmadi: %d (MTU 1500 da 1440 kutilardi)", mss)
+	}
+	t.Logf("MSS: %d (MTU 1500 da kichraytirilmasa 1440 bo'lardi)", mss)
+
+	stats, _ := filter.Stats()
+	if stats[StatMSSClamped] == 0 {
+		t.Error("MSS hisoblagichi to'ldirilmadi")
+	}
+}
+
+// Chegaradan kichik MSS ga tegilmasligi kerak.
+func TestXDPPolicy_LeavesSmallMSSAlone(t *testing.T) {
+	requireKernel(t)
+
+	// MTU 1280: yadro MSS ni 1220 deb e'lon qiladi — u allaqachon
+	// chegara ostida va unga tegilmasligi kerak.
+	device := testDeviceMTU(t, 1280)
+
+	filter, err := Load(Config{
+		Interface: device.Name(), Enforce: true,
+		MSSClamp: 1220, Logger: quiet(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	if err := filter.SetIdentity(netip.MustParsePrefix(peerAddr+"/128"), 31); err != nil {
+		t.Fatalf("SetIdentity: %v", err)
+	}
+	if err := filter.AddRule(Rule{
+		Direction: Egress, Identity: 31, Verdict: Allow,
+	}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	go dialPeer(t, 9)
+
+	packet := readTCPFromDevice(t, device, 3*time.Second)
+	if packet == nil {
+		t.Fatal("chiquvchi paket kelmadi")
+	}
+
+	mss, found := readMSS(t, packet)
+	if !found {
+		t.Fatal("MSS opsiyasi topilmadi")
+	}
+	if mss != 1220 {
+		t.Errorf("MSS o'zgartirildi: 1220 kutilgan edi, %d olindi", mss)
+	}
+
+	stats, _ := filter.Stats()
+	if stats[StatMSSClamped] != 0 {
+		t.Errorf("chegara ostidagi MSS ga tegildi (%d marta)", stats[StatMSSClamped])
+	}
+}
+
+// Egress policy: qoidasiz chiquvchi paket tashlanishi kerak.
+//
+// Bu buzilgan node tarmoqqa erkin murojaat qilishining oldini
+// oladi — kirish filtri buni qila olmaydi.
+func TestXDPPolicy_DeniesEgressByDefault(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	dialPeer(t, 9)
+	time.Sleep(300 * time.Millisecond)
+
+	stats, err := filter.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats[StatEgressDrop] == 0 {
+		t.Fatalf("qoidasiz chiquvchi paket tashlanmadi (egress=%d)",
+			stats[StatEgressTotal])
+	}
+}
+
+// Kirish va chiqish qoidalari ARALASHMASLIGI kerak: ular bitta
+// map'da yashaydi va faqat yo'nalish maydoni bilan ajraladi.
+func TestXDPPolicy_DirectionsAreSeparate(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	ingress := Rule{Direction: Ingress, Identity: 40, Verdict: Allow, RuleID: 1}
+	egress := Rule{Direction: Egress, Identity: 40, Verdict: Drop, RuleID: 2}
+
+	if err := filter.AddRule(ingress); err != nil {
+		t.Fatalf("AddRule(ingress): %v", err)
+	}
+	if err := filter.AddRule(egress); err != nil {
+		t.Fatalf("AddRule(egress): %v", err)
+	}
+
+	// Ikkalasi ham alohida yashashi kerak.
+	if _, found, _ := filter.Hits(ingress); !found {
+		t.Error("kirish qoidasi yo'qoldi")
+	}
+	if _, found, _ := filter.Hits(egress); !found {
+		t.Error("chiqish qoidasi yo'qoldi")
+	}
+
+	// Birini o'chirish ikkinchisiga tegmasligi kerak.
+	if err := filter.RemoveRule(egress); err != nil {
+		t.Fatalf("RemoveRule: %v", err)
+	}
+	if _, found, _ := filter.Hits(ingress); !found {
+		t.Error("chiqish qoidasi o'chirilganda kirish qoidasi ham ketdi")
+	}
+}
+
+// DSCP chiquvchi paketga qo'yilishi kerak.
+func TestXDPPolicy_MarksDSCP(t *testing.T) {
+	requireKernel(t)
+	device := testDeviceMTU(t, 1500)
+
+	const dscp = 46 // Expedited Forwarding
+
+	filter, err := Load(Config{
+		Interface: device.Name(), Enforce: true,
+		DSCP: dscp, Logger: quiet(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	if err := filter.SetIdentity(netip.MustParsePrefix(peerAddr+"/128"), 50); err != nil {
+		t.Fatalf("SetIdentity: %v", err)
+	}
+	if err := filter.AddRule(Rule{
+		Direction: Egress, Identity: 50, Verdict: Allow,
+	}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	go dialPeer(t, 9)
+
+	packet := readTCPFromDevice(t, device, 3*time.Second)
+	if packet == nil {
+		t.Fatal("chiquvchi paket kelmadi")
+	}
+
+	// IPv6: version(4) | traffic class(8) | flow label(20).
+	// Traffic class birinchi ikki baytga taqsimlangan.
+	trafficClass := (packet[0]&0x0f)<<4 | packet[1]>>4
+	if got := trafficClass >> 2; got != dscp {
+		t.Errorf("DSCP = %d, %d kutilgan edi (traffic class = %#x)",
+			got, dscp, trafficClass)
+	}
+}
+
+// DSCP qo'yilmagan bo'lsa paketga tegilmasligi kerak.
+func TestXDPPolicy_LeavesDSCPAloneByDefault(t *testing.T) {
+	requireKernel(t)
+	device := testDeviceMTU(t, 1500)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	if err := filter.SetIdentity(netip.MustParsePrefix(peerAddr+"/128"), 51); err != nil {
+		t.Fatalf("SetIdentity: %v", err)
+	}
+	if err := filter.AddRule(Rule{
+		Direction: Egress, Identity: 51, Verdict: Allow,
+	}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	go dialPeer(t, 9)
+
+	packet := readTCPFromDevice(t, device, 3*time.Second)
+	if packet == nil {
+		t.Fatal("chiquvchi paket kelmadi")
+	}
+
+	trafficClass := (packet[0]&0x0f)<<4 | packet[1]>>4
+	if dscp := trafficClass >> 2; dscp != 0 {
+		t.Errorf("DSCP sozlanmagan, lekin %d qo'yilgan", dscp)
+	}
+}

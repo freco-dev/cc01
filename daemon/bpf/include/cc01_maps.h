@@ -101,6 +101,24 @@ struct cc01_policy_cfg {
      * kuzatuv vositasini xizmatni o'chirish vositasiga aylantirardi.
      */
     __u32 event_sample;
+
+    /* mss_clamp — chiquvchi TCP SYN paketlaridagi MSS shu qiymatdan
+     * oshmasligi ta'minlanadi. 0 = o'chirilgan.
+     *
+     * Nega kerak: overlay MTU 1280 (IPv6 minimumi), uchlar esa
+     * yo'lni 1500 deb hisoblab kattaroq MSS kelishib oladi. Natijada
+     * segmentlar sig'maydi va PMTU aniqlash ICMPv6 "Packet Too Big"
+     * ga tayanadi — u esa ko'pincha filtrlangan bo'ladi. Oqibat:
+     * ulanish o'rnatiladi, lekin katta uzatmalar QOTIB QOLADI.
+     * Buni tashxislash juda qiyin.
+     */
+    __u16 mss_clamp;
+
+    /* dscp — chiquvchi paketlarga qo'yiladigan DSCP (0..63).
+     * 0 = tegilmaydi.
+     */
+    __u8  dscp;
+    __u8  _pad;
 };
 
 /* F_ENFORCE — hukmni qo'llash. O'chirilgan bo'lsa (dry-run) hamma
@@ -197,8 +215,17 @@ struct cc01_policy_key {
 
     /* proto — 0 = istalgan protokol. */
     __u8  proto;
-    __u8  _pad;
+
+    /* direction — CC01_DIR_*. Kirish va chiqish qoidalari BITTA
+     * map'da yashaydi va faqat shu maydon bilan ajraladi.
+     *
+     * Ilgari bu joyda `_pad` turardi, ya'ni o'lcham o'zgarmadi.
+     */
+    __u8  direction;
 };
+
+#define CC01_DIR_INGRESS 0
+#define CC01_DIR_EGRESS  1
 
 struct cc01_policy_value {
     /* verdict — CC01_VERDICT_*. */
@@ -233,6 +260,9 @@ enum cc01_policy_stat {
     CC01_PSTAT_EVENT_LOST,    /* ring buffer to'lgan — hodisa yo'qoldi */
     CC01_PSTAT_CT_HIT,        /* keshdan topildi — policy qidiruvi tejaldi */
     CC01_PSTAT_CT_MISS,       /* keshda yo'q yoki eskirgan */
+    CC01_PSTAT_EGRESS_TOTAL,  /* chiquvchi paketlar */
+    CC01_PSTAT_EGRESS_DROP,   /* chiqishda tashlangan */
+    CC01_PSTAT_MSS_CLAMPED,   /* MSS kichraytirilgan */
     CC01_PSTAT__MAX,
 };
 
@@ -286,7 +316,16 @@ struct cc01_ct_key {
     __u16 sport;
     __u16 dport;
     __u8  proto;
-    __u8  _pad[3];
+
+    /* direction — kirish va chiqish oqimlari alohida keshlanadi.
+     *
+     * Tuple'lar shundoq ham farq qiladi (manzillar o'rin
+     * almashadi), lekin oshkora maydon niyatni ko'rsatadi va
+     * kelajakdagi o'zgarishlarda tasodifiy to'qnashuvga yo'l
+     * qo'ymaydi.
+     */
+    __u8  direction;
+    __u8  _pad[2];
 };
 
 struct cc01_ct_value {

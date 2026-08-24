@@ -607,8 +607,8 @@ shu asos ustiga qo'shiladi.
 | Conntrack (hukm keshi) | ✅ avlod raqami bilan |
 | Policy (zero-trust ACL) | ✅ `daemon/tcpolicy` — `tc_ingress`, deny-by-default |
 | Ring buffer hodisalari | ✅ policy uchun; XDP ⏳ |
-| `tc_ingress` | ✅ policy uchun |
-| `tc_egress` | ⏳ |
+| `tc_ingress` | ✅ policy |
+| `tc_egress` | ✅ policy + MSS clamp + DSCP |
 
 **Tezlik cheklovi haqida ikkita majburiy tanlov.**
 
@@ -733,6 +733,54 @@ aniqroqdan umumiyroqqa: `(id, port, proto)` → `(id, 0, proto)` →
 | Dry-run | hisoblaydi, tashlamaydi |
 | L2 interfeysga biriktirish | rad etiladi |
 | Hodisa | manba, maqsad, port, protokol, qoida ID va sabab |
+
+#### Chiqish yo'li (`tc_egress`)
+
+Ikkala yo'nalish **bitta obyektda** quriladi va map'larni ulashadi.
+Alohida obyekt bo'lsa map'larni pin qilish kerak bo'lardi va ular
+ajralib ketishi mumkin edi.
+
+Yagona farq qaysi manzil bo'yicha identity qidirilishida:
+
+| Yo'nalish | Identity qayerdan | Savol |
+| --- | --- | --- |
+| Kirish | **manba** prefiksi | kim bizga murojaat qilyapti |
+| Chiqish | **maqsad** prefiksi | biz kimga murojaat qilyapmiz |
+
+Qoidalar ham bitta map'da yashaydi va faqat `direction` maydoni bilan
+ajraladi. Bu maydon ilgari `_pad` bo'lgan joyni egallaydi — kalit
+o'lchami o'zgarmadi.
+
+Chiqish filtri buzilgan node tarmoqqa erkin murojaat qilishining
+oldini oladi; kirish filtri buni qila olmaydi.
+
+**MSS clamp** — chiquvchi TCP SYN paketlaridagi MSS chegaralanadi.
+
+Nega kerak: overlay MTU 1280 (IPv6 minimumi), uchlar esa yo'lni 1500
+deb hisoblab kattaroq MSS kelishib oladi. Segmentlar sig'maydi va
+PMTU aniqlash ICMPv6 "Packet Too Big" ga tayanadi — u esa ko'pincha
+filtrlangan. Oqibat: **ulanish o'rnatiladi, lekin katta uzatmalar
+qotib qoladi**. Bu tashxislash eng qiyin nosozliklardan biri.
+
+Standart qiymat 1220 = 1280 − 40 (IPv6) − 20 (TCP).
+
+⚠️ Checksum **avval** tuzatiladi: `bpf_skb_store_bytes` `data` va
+`data_end` ni yaroqsiz qiladi va undan keyin paketga murojaat qilib
+bo'lmaydi.
+
+**DSCP** — IPv6'da sarlavha checksum'i yo'q, ya'ni faqat baytlarni
+yozish yetarli. ECN bitlariga **tegilmaydi**: ular tiqilinlik
+nazorati uchun va ularni o'chirish TCP ni sekinlashtirardi.
+
+**O'lchangan** (MTU 1500 li haqiqiy TUN, haqiqiy TCP ulanishi):
+
+| Tekshiruv | Natija |
+| --- | --- |
+| MSS clamp | 1440 → **1220** |
+| Chegara ostidagi MSS | tegilmaydi |
+| Chiqish qoidasi yo'q | tashlanadi |
+| Kirish/chiqish qoidalari | aralashmaydi |
+| DSCP | qo'yiladi; sozlanmagan bo'lsa tegilmaydi |
 
 #### Hukm keshi — va uni eskirtirish
 

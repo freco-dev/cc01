@@ -16,7 +16,7 @@ import (
 //	struct cc01_identity_key { __u32 prefixlen; __u8 addr[16]; };   // 20
 //	struct cc01_policy_key   { __u32; __u16; __u8; __u8; };         // 8
 //	struct cc01_policy_value { __u8; __u8[3]; __u32; __u64; };      // 16
-//	struct cc01_policy_cfg   { __u32 flags, policy_gen, event_sample; } // 12
+//	struct cc01_policy_cfg   { __u32 ×3; __u16; __u8; __u8; }       // 16
 func TestLayout_MatchesKernelStructs(t *testing.T) {
 	cases := []struct {
 		name string
@@ -26,7 +26,7 @@ func TestLayout_MatchesKernelStructs(t *testing.T) {
 		{"cc01_identity_key", unsafe.Sizeof(identityKey{}), 20},
 		{"cc01_policy_key", unsafe.Sizeof(policyKey{}), 8},
 		{"cc01_policy_value", unsafe.Sizeof(policyValue{}), 16},
-		{"cc01_policy_cfg", unsafe.Sizeof(configValue{}), 12},
+		{"cc01_policy_cfg", unsafe.Sizeof(configValue{}), 16},
 		{"cc01_event", eventSize, 56},
 	}
 
@@ -50,6 +50,11 @@ func TestLayout_FieldOffsets(t *testing.T) {
 	}
 	if offset := unsafe.Offsetof(key.Proto); offset != 6 {
 		t.Errorf("Proto siljishi %d, 6 kutilgan edi", offset)
+	}
+	// Yo'nalish ilgari `_pad` bo'lgan joyni egallaydi — o'lcham
+	// o'zgarmasligi kerak.
+	if offset := unsafe.Offsetof(key.Direction); offset != 7 {
+		t.Errorf("Direction siljishi %d, 7 kutilgan edi", offset)
 	}
 
 	var value policyValue
@@ -80,6 +85,9 @@ func TestLayout_StatIndexes(t *testing.T) {
 		"CC01_PSTAT_EVENT_LOST",
 		"CC01_PSTAT_CT_HIT",
 		"CC01_PSTAT_CT_MISS",
+		"CC01_PSTAT_EGRESS_TOTAL",
+		"CC01_PSTAT_EGRESS_DROP",
+		"CC01_PSTAT_MSS_CLAMPED",
 	}
 
 	actual := map[int]string{
@@ -92,6 +100,9 @@ func TestLayout_StatIndexes(t *testing.T) {
 		StatEventLost:     "CC01_PSTAT_EVENT_LOST",
 		StatCacheHit:      "CC01_PSTAT_CT_HIT",
 		StatCacheMiss:     "CC01_PSTAT_CT_MISS",
+		StatEgressTotal:   "CC01_PSTAT_EGRESS_TOTAL",
+		StatEgressDrop:    "CC01_PSTAT_EGRESS_DROP",
+		StatMSSClamped:    "CC01_PSTAT_MSS_CLAMPED",
 	}
 
 	if statMax != len(expected) {
@@ -127,5 +138,33 @@ func TestStats_AllCountersNamed(t *testing.T) {
 	}
 	if name := stats.Name(statMax); name != "noma'lum" {
 		t.Errorf("chegaradan tashqari indeks %q qaytardi", name)
+	}
+}
+
+// Yo'nalish qiymatlari C dagi CC01_DIR_* bilan mos kelishi kerak.
+func TestDirection_MatchesKernelValues(t *testing.T) {
+	if Ingress != 0 {
+		t.Errorf("Ingress = %d, C'da CC01_DIR_INGRESS = 0", Ingress)
+	}
+	if Egress != 1 {
+		t.Errorf("Egress = %d, C'da CC01_DIR_EGRESS = 1", Egress)
+	}
+	if Ingress.String() != "ingress" || Egress.String() != "egress" {
+		t.Errorf("nomlar: %q / %q", Ingress, Egress)
+	}
+}
+
+// MSS chegarasi overlay MTU'siga mos bo'lishi kerak.
+//
+// Hisob: 1280 (IPv6 minimumi) - 40 (IPv6) - 20 (TCP) = 1220.
+func TestDefaultMSSClamp_FitsOverlayMTU(t *testing.T) {
+	const (
+		overlayMTU = 1280
+		ipv6Header = 40
+		tcpHeader  = 20
+	)
+
+	if want := uint16(overlayMTU - ipv6Header - tcpHeader); DefaultMSSClamp != want {
+		t.Errorf("DefaultMSSClamp = %d, %d kutilgan edi", DefaultMSSClamp, want)
 	}
 }
