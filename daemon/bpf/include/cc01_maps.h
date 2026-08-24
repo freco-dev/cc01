@@ -23,6 +23,9 @@ enum cc01_stat {
     CC01_STAT_DROP_BLOCKLIST, /* blocklist bo'yicha tashlangan */
     CC01_STAT_DROP_MALFORMED, /* sarlavhasi buzuq */
     CC01_STAT_NOT_IPV6,       /* IPv6 emas — tegilmaydi */
+    CC01_STAT_DROP_RATELIMIT, /* tezlik chegarasidan oshgan */
+    CC01_STAT_AUTO_BLOCKED,   /* avtomatik blocklist'ga qo'shilgan */
+    CC01_STAT_RL_MAP_FULL,    /* chelaklar map'i to'lgan — cheklov ishlamadi */
     CC01_STAT__MAX,
 };
 
@@ -42,7 +45,32 @@ enum cc01_stat {
  */
 struct cc01_config {
     __u32 flags;
-    __u32 _pad;
+
+    /* rate_pps — bitta manba /64 uchun soniyasiga ruxsat etilgan
+     * paketlar. 0 = tezlik cheklanmaydi.
+     *
+     * Nega /64: IPv6'da bitta xost odatda butun /64 ni oladi, ya'ni
+     * manzil bo'yicha cheklash hujumchiga cheklovni bir necha
+     * milliard manzil bilan chetlab o'tish imkonini berardi.
+     */
+    __u32 rate_pps;
+
+    /* burst — chelakning sig'imi (paketlarda). Qisqa portlashlarga
+     * ruxsat beradi: aks holda oddiy TCP oynasi ham cheklovga
+     * tushardi.
+     */
+    __u32 burst;
+
+    /* auto_block_after — nechta tashlangandan keyin manba
+     * blocklist'ga qo'shiladi. 0 = qo'shilmaydi.
+     *
+     * Blocklist eng arzon yo'l: keyingi paketlar token chelagini
+     * hisoblamasdan tashlanadi.
+     */
+    __u32 auto_block_after;
+
+    /* auto_block_ns — avtomatik blok qancha davom etadi. */
+    __u64 auto_block_ns;
 };
 
 /* F_ENFORCE — hukmni qo'llash. O'chirilgan bo'lsa (dry-run) hamma
@@ -72,6 +100,39 @@ struct cc01_block {
      * Atomik oshiriladi: yozuv hamma yadro uchun umumiy.
      */
     __u64 hits;
+};
+
+/* Tezlik cheklovi: manba /64 bo'yicha token chelak.
+ *
+ * Kalit — manzilning birinchi 8 bayti.
+ */
+struct cc01_rl_key {
+    __u8 prefix[8];
+};
+
+struct cc01_rl_value {
+    /* Chelak bir nechta yadrodan bir vaqtda o'zgartiriladi va
+     * "o'qi-hisobla-yoz" ketma-ketligi atomik bo'lishi kerak.
+     * Per-CPU map bu yerda yaramaydi: cheklov GLOBAL bo'lishi
+     * kerak, aks holda u yadrolar soniga bo'linib ketardi va
+     * bitta oqim (RSS tufayli bitta yadroga tushib) chegaraning
+     * faqat N-dan bir qismini olardi.
+     */
+    struct bpf_spin_lock lock;
+
+    /* tokens_milli — qolgan tokenlar, mingdan bir aniqlikda.
+     *
+     * Butun sonlarda ishlaymiz: BPF'da suzuvchi nuqta yo'q. Mingga
+     * ko'paytirish qisqa oraliqlarda to'ldirish nolga
+     * yaxlitlanmasligi uchun.
+     */
+    __u64 tokens_milli;
+
+    /* last_ns — oxirgi to'ldirish vaqti (bpf_ktime_get_ns). */
+    __u64 last_ns;
+
+    /* dropped — shu manbadan nechta paket tashlangan. */
+    __u64 dropped;
 };
 
 #endif /* CC01_MAPS_H */

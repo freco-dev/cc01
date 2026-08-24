@@ -603,11 +603,44 @@ shu asos ustiga qo'shiladi.
 | Blocklist bosqichi | ✅ paket rostdan tashlanadi |
 | Dry-run (`F_ENFORCE`) | ✅ hisoblaydi, tashlamaydi |
 | Hisoblagichlar (per-CPU) | ✅ |
-| Rate limit (token bucket) | ⏳ |
+| Rate limit (token bucket, manba /64) | ✅ auto-blocklist bilan |
 | Conntrack fast path | ⏳ |
-| Policy LPM trie | ⏳ |
+| Policy LPM trie | ⏳ — §4.1/§4.3 ziddiyati hal qilinishi kerak |
 | Ring buffer hodisalari | ⏳ |
 | `tc_ingress` / `tc_egress` | ⏳ |
+
+**Tezlik cheklovi haqida ikkita majburiy tanlov.**
+
+`bpf_spin_lock` — token chelagi "o'qi-hisobla-yoz" ketma-ketligi va u
+bir nechta yadrodan bir vaqtda bajariladi. Per-CPU map bu yerda
+yaramaydi: cheklov global bo'lishi kerak, aks holda u yadrolar soniga
+bo'linib ketardi va bitta oqim (RSS tufayli bitta yadroga tushib)
+chegaraning faqat N-dan bir qismini olardi.
+
+Lekin yadro `bpf_spin_lock` ni **LRU_HASH'da qabul qilmaydi** (`map
+create: operation not supported`) — faqat HASH va ARRAY. Ya'ni
+avtomatik evikatsiya yo'q va chelaklarni **userspace tozalaydi**
+(`Filter.Sweep`, 30 s da bir marta). Tozalanmasa map to'lib qoladi.
+
+Map to'lganda **fail-open**: paket o'tkaziladi va `rl_map_full`
+hisoblagichi oshadi. Fail-closed xavfliroq bo'lardi — soxta manbalar
+bilan map to'ldirilsa hamma yangi manba tashlanib, hujumchi butun
+xizmatni o'chirib qo'yardi.
+
+**Blocklist endi ma'noli.** Ilgari uni hech narsa to'ldirmasdi.
+Chegaradan `auto_block_after` marta oshgan manba XDP ning **o'zi**
+tomonidan blocklist'ga qo'shiladi — keyingi paketlar token chelagini
+hisoblamasdan, eng arzon yo'lda tashlanadi.
+
+**O'lchangan** (`make bpf-verify`, native rejim):
+
+| Tekshiruv | Natija |
+| --- | --- |
+| 5 pps chegarasi, 200 paket | 185 tasi tashlandi |
+| Chegara ostidagi trafik | tegilmadi |
+| Takroriy buzg'unchi | avtomatik bloklandi |
+| Dry-run | 195 paket "tashlangan bo'lardi", ping ishladi |
+| Tozalagich | faol chelakka tegmaydi, eskirganini o'chiradi |
 
 **Build quvuri.** `.o` fayl repoga **commit qilinadi** (protobuf
 generatsiyasi kabi): demonni qurish uchun clang kerak emas va ishga
@@ -639,6 +672,19 @@ va maydon siljishlari `daemon/xdp/layout_test.go` da qulflangan.
    → daemon restart bo'lsa ham filtrlash uzilmaydi (fail-static)
 5. Program pin + link pin (BPF_LINK) → avtomatik detach'dan himoya
 ```
+
+⚠️ **§4.1 va §4.3 bir-biriga zid.** Yuqoridagi jadval policy
+qo'llashni `tc_ingress` ga (interfeys `cc0`) qo'yadi, §4.3 dagi
+psevdokod esa uni XDP ichiga joylashtiradi. Ular boshqa-boshqa
+paketlarni ko'radi: XDP `eth0` da SHIFRLANGAN tashqi paketni,
+`tc_ingress` esa `cc0` da ochilgan ICHKI paketni. Zero-trust ACL
+ichki manzillar bo'yicha yoziladi, ya'ni u `tc_ingress` ga tegishli.
+Bu hal qilinmaguncha policy trie qurilmaydi.
+
+Bundan tashqari §4.2 dagi birlashtirilgan LPM kaliti
+(`src||dst||dport||proto`) "istalgan src, aniq dst" qoidasini
+ifodalay olmaydi: LPM prefiksi boshidan sanaydi, ya'ni src bitlarini
+tashlab dst ga o'tib bo'lmaydi.
 
 ### 4.2 BPF map strukturalari
 

@@ -402,3 +402,292 @@ func contains(haystack, needle string) bool {
 	}
 	return false
 }
+
+// floodFrom netns'dan tez ketma-ket paket yuboradi.
+//
+// `ping -f` (flood) root talab qiladi va imkon qadar tez yuboradi —
+// token chelagini bo'shatish uchun aynan shu kerak.
+func floodFrom(t *testing.T, count int) {
+	t.Helper()
+
+	_ = exec.Command("ip", "netns", "exec", testNS,
+		"ping", "-6", "-f", "-c", itoa(count), "-W", "1", localAddr).Run()
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var digits []byte
+	for n > 0 {
+		digits = append([]byte{byte('0' + n%10)}, digits...)
+		n /= 10
+	}
+	return string(digits)
+}
+
+// Tezlik cheklovi haqiqatan paket tashlashi kerak.
+//
+// Verifier spin lock'li dasturni qabul qilgani u to'g'ri ishlashini
+// bildirmaydi — buni faqat chelakni bo'shatib bilish mumkin.
+func TestXDP_RateLimitDropsFlood(t *testing.T) {
+	requireKernel(t)
+	iface := testNetwork(t)
+
+	// Juda past chegara: bir necha paketdan keyin chelak bo'shaydi.
+	filter, err := Load(Config{
+		Interface: iface,
+		Enforce:   true,
+		RatePPS:   5,
+		Burst:     5,
+		Logger:    quiet(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	if !pingWorks(t) {
+		t.Skip("boshlang'ich ping ishlamadi — muhit yaroqsiz")
+	}
+
+	floodFrom(t, 200)
+
+	stats, err := filter.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+
+	if stats[StatDropRateLimit] == 0 {
+		t.Fatalf("200 paket yuborildi, birortasi ham cheklovga tushmadi "+
+			"(jami=%d o'tkazilgan=%d)", stats[StatTotal], stats[StatPass])
+	}
+	t.Logf("cheklovga tushgan: %d / jami %d",
+		stats[StatDropRateLimit], stats[StatTotal])
+
+	// Chelak manba /64 bo'yicha hisoblanadi.
+	dropped, found, err := filter.RateLimited(netip.MustParseAddr(remoteAddr))
+	if err != nil {
+		t.Fatalf("RateLimited: %v", err)
+	}
+	if !found {
+		t.Fatal("chelak yozuvi topilmadi")
+	}
+	if dropped == 0 {
+		t.Error("chelak hisoblagichi nol")
+	}
+}
+
+// Chegara ostidagi trafik tegilmasligi kerak.
+func TestXDP_RateLimitAllowsNormalTraffic(t *testing.T) {
+	requireKernel(t)
+	iface := testNetwork(t)
+
+	filter, err := Load(Config{
+		Interface: iface,
+		Enforce:   true,
+		RatePPS:   1000,
+		Burst:     1000,
+		Logger:    quiet(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	if !pingWorks(t) {
+		t.Fatal("oddiy ping cheklovga tushdi")
+	}
+
+	stats, err := filter.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats[StatDropRateLimit] != 0 {
+		t.Errorf("chegara ostidagi trafik tashlandi: %d", stats[StatDropRateLimit])
+	}
+}
+
+// Cheklov o'chirilganda (RatePPS=0) chelak umuman ishlamasligi
+// kerak.
+func TestXDP_RateLimitDisabled(t *testing.T) {
+	requireKernel(t)
+	iface := testNetwork(t)
+
+	filter, err := Load(Config{Interface: iface, Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	floodFrom(t, 200)
+
+	stats, err := filter.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats[StatDropRateLimit] != 0 {
+		t.Errorf("cheklov o'chirilgan, lekin %d paket tashlandi",
+			stats[StatDropRateLimit])
+	}
+
+	if _, found, _ := filter.RateLimited(netip.MustParseAddr(remoteAddr)); found {
+		t.Error("cheklov o'chirilgan, lekin chelak yaratildi")
+	}
+}
+
+// Avtomatik blocklist: chegaradan ko'p marta oshgan manba
+// blocklist'ga tushishi kerak. Bu blocklist'ni MA'NOLI qiladi —
+// hozirgacha uni hech narsa to'ldirmasdi.
+func TestXDP_AutoBlocksRepeatOffender(t *testing.T) {
+	requireKernel(t)
+	iface := testNetwork(t)
+
+	filter, err := Load(Config{
+		Interface:      iface,
+		Enforce:        true,
+		RatePPS:        5,
+		Burst:          5,
+		AutoBlockAfter: 10,
+		AutoBlockFor:   time.Hour,
+		Logger:         quiet(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	remote := netip.MustParseAddr(remoteAddr)
+
+	if _, found, _ := filter.Hits(remote); found {
+		t.Fatal("blocklist oldindan to'ldirilgan")
+	}
+
+	floodFrom(t, 300)
+
+	_, found, err := filter.Hits(remote)
+	if err != nil {
+		t.Fatalf("Hits: %v", err)
+	}
+	if !found {
+		stats, _ := filter.Stats()
+		t.Fatalf("manba avtomatik bloklanmadi (cheklovga tushgan: %d)",
+			stats[StatDropRateLimit])
+	}
+
+	stats, _ := filter.Stats()
+	if stats[StatAutoBlocked] == 0 {
+		t.Error("avtomatik blok hisoblagichi to'ldirilmadi")
+	}
+	t.Logf("avtomatik bloklangan manbalar: %d", stats[StatAutoBlocked])
+}
+
+// Dry-run rejimida tezlik cheklovi ham tashlamasligi kerak.
+func TestXDP_RateLimitRespectsDryRun(t *testing.T) {
+	requireKernel(t)
+	iface := testNetwork(t)
+
+	filter, err := Load(Config{
+		Interface: iface,
+		Enforce:   false,
+		RatePPS:   5,
+		Burst:     5,
+		Logger:    quiet(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	floodFrom(t, 200)
+
+	stats, err := filter.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+
+	if stats[StatDropRateLimit] == 0 {
+		t.Skip("chelak bo'shamadi — muhit juda sekin")
+	}
+
+	// Dry-run: hisoblangan, lekin tashlanmagan — ya'ni hamma paket
+	// PASS bo'lgan.
+	if stats[StatPass] < stats[StatDropRateLimit] {
+		t.Errorf("dry-run rejimida paket tashlandi: o'tkazilgan=%d cheklovga tushgan=%d",
+			stats[StatPass], stats[StatDropRateLimit])
+	}
+	t.Logf("dry-run: %d paket cheklovga tushgan bo'lardi", stats[StatDropRateLimit])
+}
+
+// Tozalagich FAOL chelaklarga tegmasligi kerak.
+//
+// Tegib ketsa, manba to'la chelak bilan qaytardi va cheklov
+// ma'nosini yo'qotardi — hujumchi buni davriy pauza bilan
+// ishlatib chetlab o'tardi.
+func TestXDP_SweepKeepsActiveBuckets(t *testing.T) {
+	requireKernel(t)
+	iface := testNetwork(t)
+
+	filter, err := Load(Config{
+		Interface: iface, Enforce: true,
+		RatePPS: 1000, Burst: 1000, Logger: quiet(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	if !pingWorks(t) {
+		t.Skip("ping ishlamadi — muhit yaroqsiz")
+	}
+
+	if _, found, _ := filter.RateLimited(netip.MustParseAddr(remoteAddr)); !found {
+		t.Fatal("chelak yaratilmagan")
+	}
+
+	removed, err := filter.Sweep()
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if removed != 0 {
+		t.Errorf("faol chelak o'chirildi: %d ta", removed)
+	}
+
+	if _, found, _ := filter.RateLimited(netip.MustParseAddr(remoteAddr)); !found {
+		t.Error("chelak yo'qoldi")
+	}
+}
+
+// Eskirgan chelaklar o'chirilishi kerak: map to'lib qolsa yangi
+// manbalar cheklovsiz o'tib ketardi.
+func TestXDP_SweepRemovesStaleBuckets(t *testing.T) {
+	requireKernel(t)
+	iface := testNetwork(t)
+
+	filter, err := Load(Config{
+		Interface: iface, Enforce: true,
+		RatePPS: 1000, Burst: 1000, Logger: quiet(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	if !pingWorks(t) {
+		t.Skip("ping ishlamadi — muhit yaroqsiz")
+	}
+
+	// Muddatni nolga tushirib, hamma chelakni eskirgan qilamiz.
+	removed, err := filter.sweep(0)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if removed == 0 {
+		t.Fatal("birorta chelak o'chirilmadi")
+	}
+	t.Logf("o'chirilgan chelaklar: %d", removed)
+
+	if _, found, _ := filter.RateLimited(netip.MustParseAddr(remoteAddr)); found {
+		t.Error("chelak o'chirilmadi")
+	}
+}

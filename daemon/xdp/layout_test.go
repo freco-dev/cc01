@@ -14,16 +14,18 @@ import (
 //
 // `bpf/include/cc01_maps.h`:
 //
-//	struct cc01_config { __u32 flags; __u32 _pad; };        // 8
-//	struct cc01_block  { __u64 expires_ns; __u64 hits; };   // 16
+//	struct cc01_config   { __u32 ×4; __u64; };                    // 24
+//	struct cc01_block    { __u64 expires_ns; __u64 hits; };       // 16
+//	struct cc01_rl_value { spin_lock; __u64 ×3; };                // 32
 func TestLayout_MatchesKernelStructs(t *testing.T) {
 	cases := []struct {
 		name string
 		got  uintptr
 		want uintptr
 	}{
-		{"cc01_config", unsafe.Sizeof(configValue{}), 8},
+		{"cc01_config", unsafe.Sizeof(configValue{}), 24},
 		{"cc01_block", unsafe.Sizeof(blockValue{}), 16},
+		{"cc01_rl_value", unsafe.Sizeof(rateLimitValue{}), 32},
 	}
 
 	for _, tc := range cases {
@@ -58,14 +60,20 @@ func TestLayout_StatIndexes(t *testing.T) {
 		2: "CC01_STAT_DROP_BLOCKLIST",
 		3: "CC01_STAT_DROP_MALFORMED",
 		4: "CC01_STAT_NOT_IPV6",
+		5: "CC01_STAT_DROP_RATELIMIT",
+		6: "CC01_STAT_AUTO_BLOCKED",
+		7: "CC01_STAT_RL_MAP_FULL",
 	}
 
 	actual := map[int]string{
-		StatTotal:         "CC01_STAT_TOTAL",
-		StatPass:          "CC01_STAT_PASS",
-		StatDropBlocklist: "CC01_STAT_DROP_BLOCKLIST",
-		StatDropMalformed: "CC01_STAT_DROP_MALFORMED",
-		StatNotIPv6:       "CC01_STAT_NOT_IPV6",
+		StatTotal:            "CC01_STAT_TOTAL",
+		StatPass:             "CC01_STAT_PASS",
+		StatDropBlocklist:    "CC01_STAT_DROP_BLOCKLIST",
+		StatDropMalformed:    "CC01_STAT_DROP_MALFORMED",
+		StatNotIPv6:          "CC01_STAT_NOT_IPV6",
+		StatDropRateLimit:    "CC01_STAT_DROP_RATELIMIT",
+		StatAutoBlocked:      "CC01_STAT_AUTO_BLOCKED",
+		StatRateLimitMapFull: "CC01_STAT_RL_MAP_FULL",
 	}
 
 	for index, name := range expected {

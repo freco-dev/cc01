@@ -16,6 +16,7 @@
 package xdp
 
 import (
+	"context"
 	_ "embed"
 	"errors"
 	"fmt"
@@ -48,16 +49,22 @@ const (
 	StatDropBlocklist
 	StatDropMalformed
 	StatNotIPv6
+	StatDropRateLimit
+	StatAutoBlocked
+	StatRateLimitMapFull
 	statMax
 )
 
 // statNames — chiqarish uchun nomlar.
 var statNames = [statMax]string{
-	StatTotal:         "jami",
-	StatPass:          "o'tkazilgan",
-	StatDropBlocklist: "blocklist bo'yicha tashlangan",
-	StatDropMalformed: "buzuq sarlavha",
-	StatNotIPv6:       "IPv6 emas",
+	StatTotal:            "jami",
+	StatPass:             "o'tkazilgan",
+	StatDropBlocklist:    "blocklist bo'yicha tashlangan",
+	StatDropMalformed:    "buzuq sarlavha",
+	StatNotIPv6:          "IPv6 emas",
+	StatDropRateLimit:    "tezlik chegarasidan oshgan",
+	StatAutoBlocked:      "avtomatik bloklangan",
+	StatRateLimitMapFull: "chelaklar map'i to'lgan",
 }
 
 // FlagEnforce — hukmni qo'llash. O'chirilgan bo'lsa (dry-run) hamma
@@ -85,6 +92,7 @@ type Filter struct {
 	attachment link.Link
 	mode       Mode
 	iface      string
+	config     Config
 	log        *slog.Logger
 }
 
@@ -95,6 +103,21 @@ type Config struct {
 
 	// Enforce — hukmni qo'llash. false bo'lsa dry-run.
 	Enforce bool
+
+	// RatePPS — bitta manba /64 uchun soniyasiga ruxsat etilgan
+	// paketlar. 0 bo'lsa tezlik cheklanmaydi.
+	RatePPS uint32
+
+	// Burst — chelakning sig'imi. 0 bo'lsa RatePPS ishlatiladi
+	// (bir soniyalik zaxira).
+	Burst uint32
+
+	// AutoBlockAfter — nechta tashlangandan keyin manba
+	// blocklist'ga qo'shiladi. 0 = qo'shilmaydi.
+	AutoBlockAfter uint32
+
+	// AutoBlockFor — avtomatik blok qancha davom etadi.
+	AutoBlockFor time.Duration
 
 	Logger *slog.Logger
 }
@@ -151,7 +174,7 @@ func Load(cfg Config) (*Filter, error) {
 	// Aks holda dastur ishlay boshlagan, lekin config map bo'sh
 	// bo'lgan oyna ochilardi. U fail-open — ya'ni bir necha
 	// millisekund davomida filtr umuman ishlamasdi.
-	if err := filter.SetEnforce(cfg.Enforce); err != nil {
+	if err := filter.Configure(cfg); err != nil {
 		collection.Close()
 		return nil, err
 	}
@@ -207,26 +230,51 @@ func attach(program *ebpf.Program, index int) (link.Link, Mode, error) {
 // Mode — dastur qaysi rejimda ishlayapti.
 func (f *Filter) Mode() Mode { return f.mode }
 
-// SetEnforce hukmni qo'llashni yoqadi yoki o'chiradi.
+// Configure butun sozlamani yangilaydi.
 //
-// Dasturni qayta yuklash KERAK EMAS: rejim map orqali beriladi.
+// Dasturni qayta yuklash KERAK EMAS: sozlama map orqali beriladi.
 // Qayta yuklash paytida paketlar filtrsiz o'tib ketardi.
-func (f *Filter) SetEnforce(enforce bool) error {
+func (f *Filter) Configure(cfg Config) error {
 	configMap := f.collection.Maps["cc01_config_map"]
 	if configMap == nil {
 		return errors.New("xdp: config map topilmadi")
 	}
 
 	var flags uint32
-	if enforce {
+	if cfg.Enforce {
 		flags = FlagEnforce
 	}
 
-	config := configValue{Flags: flags}
-	if err := configMap.Put(uint32(0), config); err != nil {
+	// Burst berilmagan bo'lsa bir soniyalik zaxira: qisqa
+	// portlashlar cheklovga tushmasin, aks holda oddiy TCP oynasi
+	// ham kesilardi.
+	burst := cfg.Burst
+	if burst == 0 {
+		burst = cfg.RatePPS
+	}
+
+	value := configValue{
+		Flags:          flags,
+		RatePPS:        cfg.RatePPS,
+		Burst:          burst,
+		AutoBlockAfter: cfg.AutoBlockAfter,
+		AutoBlockNS:    uint64(cfg.AutoBlockFor.Nanoseconds()),
+	}
+
+	if err := configMap.Put(uint32(0), value); err != nil {
 		return fmt.Errorf("xdp: konfiguratsiyani yozish: %w", err)
 	}
+
+	f.config = cfg
 	return nil
+}
+
+// SetEnforce hukmni qo'llashni yoqadi yoki o'chiradi, qolgan
+// sozlamalarga tegmasdan.
+func (f *Filter) SetEnforce(enforce bool) error {
+	cfg := f.config
+	cfg.Enforce = enforce
+	return f.Configure(cfg)
 }
 
 // Block manzilni blocklist'ga qo'shadi.
@@ -356,11 +404,143 @@ func (f *Filter) Close() error {
 // O'lchamlar test bilan qulflangan.
 
 type configValue struct {
-	Flags uint32
-	_     uint32
+	Flags          uint32
+	RatePPS        uint32
+	Burst          uint32
+	AutoBlockAfter uint32
+	AutoBlockNS    uint64
 }
 
 type blockValue struct {
 	ExpiresNS uint64
 	Hits      uint64
+}
+
+// RateLimited manba /64 bo'yicha nechta paket tashlanganini
+// qaytaradi.
+func (f *Filter) RateLimited(addr netip.Addr) (uint64, bool, error) {
+	buckets := f.collection.Maps["cc01_ratelimit"]
+	if buckets == nil {
+		return 0, false, errors.New("xdp: ratelimit map topilmadi")
+	}
+
+	full := addr.As16()
+	var key [8]byte
+	copy(key[:], full[:8])
+
+	var value rateLimitValue
+
+	// BPF_F_LOCK: qiymat ichida spin lock bor va uni qulfsiz
+	// o'qish yarim yangilangan holatni ko'rsatishi mumkin.
+	if err := buckets.LookupWithFlags(key[:], &value, ebpf.LookupLock); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("xdp: chelakni o'qish: %w", err)
+	}
+
+	return value.Dropped, true, nil
+}
+
+// rateLimitValue — `struct cc01_rl_value` ning Go nusxasi.
+//
+// Birinchi maydon — yadro spin lock'i. Go tomonida u shunchaki
+// to'ldirish; unga tegilmaydi, lekin joyi bo'lishi shart.
+type rateLimitValue struct {
+	Lock        uint32
+	_           uint32
+	TokensMilli uint64
+	LastNS      uint64
+	Dropped     uint64
+}
+
+// SweepInterval — eskirgan chelaklarni tozalash davri.
+const SweepInterval = 30 * time.Second
+
+// bucketIdleTimeout — chelak qancha vaqt tegilmasa eskirgan
+// hisoblanadi.
+//
+// Cheklov oynasidan sezilarli uzoq: aks holda faol manbaning
+// chelagi tozalanib, u to'la chelak bilan qaytardi va cheklov
+// ma'nosini yo'qotardi.
+const bucketIdleTimeout = 5 * time.Minute
+
+// Sweep eskirgan chelaklarni o'chiradi va nechtasi olib
+// tashlanganini qaytaradi.
+//
+// Nega userspace tozalaydi: chelaklar map'i oddiy HASH, chunki yadro
+// `bpf_spin_lock` ni LRU_HASH'da qabul qilmaydi. Ya'ni avtomatik
+// evikatsiya yo'q — tozalanmasa map to'lib qoladi va yangi manbalar
+// cheklovsiz o'tib ketardi.
+func (f *Filter) Sweep() (int, error) { return f.sweep(bucketIdleTimeout) }
+
+// sweep — testlar muddatni boshqara olishi uchun ajratilgan.
+func (f *Filter) sweep(idleFor time.Duration) (int, error) {
+	buckets := f.collection.Maps["cc01_ratelimit"]
+	if buckets == nil {
+		return 0, errors.New("xdp: ratelimit map topilmadi")
+	}
+
+	now, err := kernelTime()
+	if err != nil {
+		return 0, err
+	}
+	cutoff := now - uint64(idleFor.Nanoseconds())
+
+	var (
+		key     [8]byte
+		value   rateLimitValue
+		stale   [][8]byte
+		removed int
+	)
+
+	// Avval yig'amiz, keyin o'chiramiz: iteratsiya davomida
+	// o'chirish yadro kursorini buzishi mumkin va ba'zi yozuvlar
+	// tashlab ketilardi.
+	iter := buckets.Iterate()
+	for iter.Next(&key, &value) {
+		if value.LastNS < cutoff {
+			stale = append(stale, key)
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return 0, fmt.Errorf("xdp: chelaklarni ko'rib chiqish: %w", err)
+	}
+
+	for _, item := range stale {
+		if err := buckets.Delete(item[:]); err != nil {
+			if errors.Is(err, ebpf.ErrKeyNotExist) {
+				continue // boshqa tomon allaqachon o'chirgan
+			}
+			return removed, fmt.Errorf("xdp: chelakni o'chirish: %w", err)
+		}
+		removed++
+	}
+
+	return removed, nil
+}
+
+// RunSweeper eskirgan chelaklarni davriy tozalab turadi.
+//
+// ctx bekor qilinganda qaytadi.
+func (f *Filter) RunSweeper(ctx context.Context) {
+	ticker := time.NewTicker(SweepInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+
+		case <-ticker.C:
+			removed, err := f.Sweep()
+			if err != nil {
+				f.log.Warn("chelaklarni tozalash", "err", err)
+				continue
+			}
+			if removed > 0 {
+				f.log.Debug("eskirgan chelaklar tozalandi", "count", removed)
+			}
+		}
+	}
 }
