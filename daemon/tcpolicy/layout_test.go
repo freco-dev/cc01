@@ -16,6 +16,7 @@ import (
 //	struct cc01_identity_key { __u32 prefixlen; __u8 addr[16]; };   // 20
 //	struct cc01_policy_key   { __u32; __u16; __u8; __u8; };         // 8
 //	struct cc01_policy_value { __u8; __u8[3]; __u32; __u64; };      // 16
+//	struct cc01_policy_cfg   { __u32 flags, policy_gen, event_sample; } // 12
 func TestLayout_MatchesKernelStructs(t *testing.T) {
 	cases := []struct {
 		name string
@@ -25,7 +26,7 @@ func TestLayout_MatchesKernelStructs(t *testing.T) {
 		{"cc01_identity_key", unsafe.Sizeof(identityKey{}), 20},
 		{"cc01_policy_key", unsafe.Sizeof(policyKey{}), 8},
 		{"cc01_policy_value", unsafe.Sizeof(policyValue{}), 16},
-		{"cc01_policy_cfg", unsafe.Sizeof(configValue{}), 8},
+		{"cc01_policy_cfg", unsafe.Sizeof(configValue{}), 12},
 		{"cc01_event", eventSize, 56},
 	}
 
@@ -77,6 +78,8 @@ func TestLayout_StatIndexes(t *testing.T) {
 		"CC01_PSTAT_NOT_IPV6",
 		"CC01_PSTAT_NO_RULE",
 		"CC01_PSTAT_EVENT_LOST",
+		"CC01_PSTAT_CT_HIT",
+		"CC01_PSTAT_CT_MISS",
 	}
 
 	actual := map[int]string{
@@ -87,6 +90,8 @@ func TestLayout_StatIndexes(t *testing.T) {
 		StatNotIPv6:       "CC01_PSTAT_NOT_IPV6",
 		StatNoRule:        "CC01_PSTAT_NO_RULE",
 		StatEventLost:     "CC01_PSTAT_EVENT_LOST",
+		StatCacheHit:      "CC01_PSTAT_CT_HIT",
+		StatCacheMiss:     "CC01_PSTAT_CT_MISS",
 	}
 
 	if statMax != len(expected) {

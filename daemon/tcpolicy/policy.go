@@ -33,6 +33,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"sync/atomic"
 
 	"github.com/cilium/ebpf"
 )
@@ -76,6 +77,8 @@ const (
 	StatNotIPv6
 	StatNoRule
 	StatEventLost
+	StatCacheHit
+	StatCacheMiss
 	statMax
 )
 
@@ -87,6 +90,8 @@ var statNames = [statMax]string{
 	StatNotIPv6:       "IPv6 emas",
 	StatNoRule:        "qoida topilmadi",
 	StatEventLost:     "yo'qolgan hodisalar",
+	StatCacheHit:      "keshdan topilgan",
+	StatCacheMiss:     "keshda yo'q",
 }
 
 // FlagEnforce — hukmni qo'llash. O'chirilgan bo'lsa (dry-run) hamma
@@ -150,6 +155,10 @@ type Filter struct {
 	iface      string
 	config     Config
 	log        *slog.Logger
+
+	// generation — qoidalar to'plamining avlodi. Har bir
+	// o'zgarishda oshadi va keshlangan hukmlarni eskirtiradi.
+	generation atomic.Uint32
 }
 
 // Load dasturni yuklaydi va interfeysga biriktiradi.
@@ -245,7 +254,11 @@ func (f *Filter) Configure(cfg Config) error {
 		flags = FlagEnforce
 	}
 
-	value := configValue{Flags: flags, EventSample: cfg.EventSample}
+	value := configValue{
+		Flags:       flags,
+		PolicyGen:   f.generation.Load(),
+		EventSample: cfg.EventSample,
+	}
 	if err := configMap.Put(uint32(0), value); err != nil {
 		return fmt.Errorf("tcpolicy: sozlamani yozish: %w", err)
 	}
@@ -253,6 +266,28 @@ func (f *Filter) Configure(cfg Config) error {
 	f.config = cfg
 	return nil
 }
+
+// invalidate hukm keshini eskirgan deb belgilaydi.
+//
+// Butun map tozalanmaydi — u O(N) va har bir qoida o'zgarishida uni
+// bajarib bo'lmaydi. Buning o'rniga AVLOD raqami oshiriladi va
+// yadro eski avloddagi yozuvlarni o'tkazib yuboradi.
+//
+// ⚠️ Bu HAR QANDAY qoida yoki identity o'zgarishidan keyin
+// chaqirilishi SHART. Aks holda keshlangan hukm qoida
+// o'chirilgandan keyin ham amal qilib qolardi: taqiqlangan oqim
+// ochiq qolardi va buni sezish deyarli imkonsiz bo'lardi.
+//
+// Shu sababdan u mutatsiya qiluvchi metodlarning ICHIDA chaqiriladi,
+// chaqiruvchiga qoldirilmaydi — unutish juda oson bo'lardi.
+func (f *Filter) invalidate() error {
+	f.generation.Add(1)
+	return f.Configure(f.config)
+}
+
+// Generation — qoidalar to'plamining joriy avlodi (diagnostika
+// uchun).
+func (f *Filter) Generation() uint32 { return f.generation.Load() }
 
 // SetEnforce hukmni qo'llashni yoqadi yoki o'chiradi, qolgan
 // sozlamalarga tegmasdan.
@@ -284,7 +319,7 @@ func (f *Filter) SetIdentity(prefix netip.Prefix, identity uint32) error {
 	if err := identities.Put(key, identity); err != nil {
 		return fmt.Errorf("tcpolicy: identity yozuvi (%v): %w", prefix, err)
 	}
-	return nil
+	return f.invalidate()
 }
 
 // RemoveIdentity prefiks bog'lanishini olib tashlaydi.
@@ -301,7 +336,7 @@ func (f *Filter) RemoveIdentity(prefix netip.Prefix) error {
 	if err := identities.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 		return fmt.Errorf("tcpolicy: identity yozuvini o'chirish (%v): %w", prefix, err)
 	}
-	return nil
+	return f.invalidate()
 }
 
 // AddRule qoida qo'shadi yoki mavjudini yangilaydi.
@@ -317,7 +352,7 @@ func (f *Filter) AddRule(rule Rule) error {
 	if err := rules.Put(key, value); err != nil {
 		return fmt.Errorf("tcpolicy: qoida yozish: %w", err)
 	}
-	return nil
+	return f.invalidate()
 }
 
 // RemoveRule qoidani olib tashlaydi.
@@ -331,7 +366,7 @@ func (f *Filter) RemoveRule(rule Rule) error {
 	if err := rules.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 		return fmt.Errorf("tcpolicy: qoidani o'chirish: %w", err)
 	}
-	return nil
+	return f.invalidate()
 }
 
 // Hits qoida bo'yicha nechta paket o'tganini qaytaradi.
@@ -412,6 +447,7 @@ func (f *Filter) Close() error {
 // uchun maydon qo'shish XDP tomonini jimgina buzgan edi.
 type configValue struct {
 	Flags       uint32
+	PolicyGen   uint32
 	EventSample uint32
 }
 

@@ -86,6 +86,20 @@ struct {
     __uint(max_entries, 256 * 1024);
 } cc01_events SEC(".maps");
 
+/* Hukm keshi.
+ *
+ * LRU_HASH: yozuvlar avtomatik siqib chiqariladi va bu yerda
+ * bpf_spin_lock kerak emas — hisoblagichlar atomik qo'shish bilan
+ * yangilanadi, `last_seen_ns` esa oddiy yozuv (oxirgi yozuvchi
+ * yutadi va bu zararsiz).
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __type(key, struct cc01_ct_key);
+    __type(value, struct cc01_ct_value);
+    __uint(max_entries, 262144);
+} cc01_conntrack SEC(".maps");
+
 static __always_inline void pstat_inc(__u32 index)
 {
     __u64 *counter = bpf_map_lookup_elem(&cc01_policy_stats, &index);
@@ -101,22 +115,22 @@ static __always_inline void pstat_inc(__u32 index)
  * "istalgan port" qoidalari mos keladi.
  */
 static __always_inline void l4_ports(const struct ipv6hdr *ip6, void *end,
-                                     __u8 *proto, __u16 *dport)
+                                     __u8 *proto, __u16 *sport, __u16 *dport)
 {
     *proto = ip6->nexthdr;
+    *sport = 0;
     *dport = 0;
 
-    if (*proto == IPPROTO_TCP) {
-        struct tcphdr { __u16 source, dest; } *tcp = (void *)(ip6 + 1);
-        if ((void *)(tcp + 1) <= end)
-            *dport = bpf_ntohs(tcp->dest);
-        return;
-    }
-
-    if (*proto == IPPROTO_UDP) {
-        struct udphdr { __u16 source, dest; } *udp = (void *)(ip6 + 1);
-        if ((void *)(udp + 1) <= end)
-            *dport = bpf_ntohs(udp->dest);
+    /* TCP va UDP sarlavhalarining birinchi to'rt bayti bir xil:
+     * manba porti, keyin maqsad porti. Ikkalasi uchun bitta o'qish
+     * yetarli.
+     */
+    if (*proto == IPPROTO_TCP || *proto == IPPROTO_UDP) {
+        struct l4hdr { __u16 source, dest; } *l4 = (void *)(ip6 + 1);
+        if ((void *)(l4 + 1) <= end) {
+            *sport = bpf_ntohs(l4->source);
+            *dport = bpf_ntohs(l4->dest);
+        }
     }
 }
 
@@ -210,6 +224,19 @@ static __always_inline void emit_event(const struct ipv6hdr *ip6,
     bpf_ringbuf_submit(event, 0);
 }
 
+/* ct_build kesh kalitini yig'adi. */
+static __always_inline void ct_build(struct cc01_ct_key *key,
+                                     const struct ipv6hdr *ip6,
+                                     __u16 sport, __u16 dport, __u8 proto)
+{
+    __builtin_memset(key, 0, sizeof(*key));
+    __builtin_memcpy(key->src, &ip6->saddr, sizeof(key->src));
+    __builtin_memcpy(key->dst, &ip6->daddr, sizeof(key->dst));
+    key->sport = sport;
+    key->dport = dport;
+    key->proto = proto;
+}
+
 SEC("tc")
 int cc01_tc_policy(struct __sk_buff *skb)
 {
@@ -243,6 +270,39 @@ int cc01_tc_policy(struct __sk_buff *skb)
         return TC_ACT_OK;
     }
 
+    __u8 proto;
+    __u16 sport, dport;
+    l4_ports(ip6, end, &proto, &sport, &dport);
+
+    /* ── Tez yo'l: hukm keshi ─────────────────────────────── */
+    struct cc01_ct_key ckey;
+    ct_build(&ckey, ip6, sport, dport, proto);
+
+    struct cc01_ct_value *cached = bpf_map_lookup_elem(&cc01_conntrack, &ckey);
+
+    /* Avlod mos kelmasa yozuv ESKIRGAN: qoidalar o'zgargan va
+     * keshlangan hukm endi noto'g'ri bo'lishi mumkin.
+     */
+    if (cached && cached->policy_gen == cfg->policy_gen) {
+        cached->last_seen_ns = bpf_ktime_get_ns();
+        __sync_fetch_and_add(&cached->packets, 1);
+        pstat_inc(CC01_PSTAT_CT_HIT);
+
+        if (cached->verdict == CC01_VERDICT_ALLOW) {
+            pstat_inc(CC01_PSTAT_ALLOW);
+            return TC_ACT_OK;
+        }
+
+        pstat_inc(CC01_PSTAT_DROP);
+        if (!(cfg->flags & CC01_F_ENFORCE))
+            return TC_ACT_OK;
+        return TC_ACT_SHOT;
+    }
+
+    pstat_inc(CC01_PSTAT_CT_MISS);
+
+    /* ── Sekin yo'l: to'liq policy qidiruvi ───────────────── */
+
     /* 1-bosqich: manba prefiksidan identity. */
     struct cc01_identity_key ikey = {.prefixlen = 128};
     __builtin_memcpy(ikey.addr, &ip6->saddr, sizeof(ikey.addr));
@@ -253,10 +313,6 @@ int cc01_tc_policy(struct __sk_buff *skb)
         identity = *found;
 
     /* 2-bosqich: hukm. */
-    __u8 proto;
-    __u16 dport;
-    l4_ports(ip6, end, &proto, &dport);
-
     struct cc01_policy_value *rule = lookup_verdict(identity, dport, proto);
 
     __u8 verdict = CC01_VERDICT_DROP;   /* deny-by-default */
@@ -269,6 +325,22 @@ int cc01_tc_policy(struct __sk_buff *skb)
     } else {
         pstat_inc(CC01_PSTAT_NO_RULE);
     }
+
+    /* Hukmni keshlaymiz — keyingi paketlar bitta qidiruv bilan
+     * cheklanadi.
+     *
+     * Taqiqlar ham keshlanadi: hujum paytida ular eng ko'p
+     * uchraydigan holat va ularni har safar qayta hisoblash eng
+     * qimmat yo'l bo'lardi. LRU yozuvlarni o'zi siqib chiqaradi.
+     */
+    struct cc01_ct_value entry = {
+        .last_seen_ns = bpf_ktime_get_ns(),
+        .packets = 1,
+        .rule_id = rule_id,
+        .policy_gen = cfg->policy_gen,
+        .verdict = verdict,
+    };
+    bpf_map_update_elem(&cc01_conntrack, &ckey, &entry, BPF_ANY);
 
     if (verdict == CC01_VERDICT_ALLOW) {
         pstat_inc(CC01_PSTAT_ALLOW);

@@ -80,6 +80,19 @@ struct cc01_config {
 struct cc01_policy_cfg {
     __u32 flags;
 
+    /* policy_gen — qoidalar to'plamining AVLODI.
+     *
+     * Har bir qoida o'zgarishida userspace uni oshiradi. Conntrack
+     * yozuvi qaysi avlodda yaratilganini eslab qoladi va avlodlar
+     * mos kelmasa u eskirgan deb hisoblanadi.
+     *
+     * Busiz keshlangan hukm qoida o'chirilgandan keyin ham amal
+     * qilib qolardi: taqiqlangan oqim ochiq qolardi va buni sezish
+     * deyarli imkonsiz bo'lardi. Butun map'ni tozalash esa O(N) va
+     * har bir o'zgarishda uni bajarib bo'lmaydi.
+     */
+    __u32 policy_gen;
+
     /* event_sample — har nechta tashlashdan bittasi hodisa sifatida
      * yuboriladi. 0 = hodisalar o'chirilgan, 1 = har biri.
      *
@@ -218,6 +231,8 @@ enum cc01_policy_stat {
     CC01_PSTAT_NOT_IPV6,
     CC01_PSTAT_NO_RULE,       /* qoida topilmadi — deny-by-default */
     CC01_PSTAT_EVENT_LOST,    /* ring buffer to'lgan — hodisa yo'qoldi */
+    CC01_PSTAT_CT_HIT,        /* keshdan topildi — policy qidiruvi tejaldi */
+    CC01_PSTAT_CT_MISS,       /* keshda yo'q yoki eskirgan */
     CC01_PSTAT__MAX,
 };
 
@@ -249,6 +264,45 @@ struct cc01_event {
     /* dry_run — hukm qo'llandimi yoki faqat hisoblandimi. */
     __u8  dry_run;
     __u8  _pad[3];
+};
+
+/* ─────────────────── Conntrack (hukm keshi) ───────────────────
+ *
+ * Bu HUKM KESHI, holat kuzatuvchisi EMAS.
+ *
+ * Hujjatning §4.2 dagi eskizida `state` maydoni bor (NEW /
+ * ESTABLISHED / CLOSING). Haqiqiy TCP holat mashinasini yadroda
+ * to'g'ri qurish qiyin va uni yarim qurish xavfli: "ESTABLISHED"
+ * deb belgilangan, lekin aslida tekshirilmagan oqim filtrni
+ * chetlab o'tish yo'liga aylanardi.
+ *
+ * Shuning uchun bu yerda faqat hukm keshlanadi: birinchi paket
+ * to'liq policy qidiruvidan o'tadi, keyingilari bitta hash
+ * qidiruvi bilan cheklanadi.
+ */
+struct cc01_ct_key {
+    __u8  src[16];
+    __u8  dst[16];
+    __u16 sport;
+    __u16 dport;
+    __u8  proto;
+    __u8  _pad[3];
+};
+
+struct cc01_ct_value {
+    __u64 last_seen_ns;
+    __u64 packets;
+
+    /* rule_id — qaysi qoida shu hukmni bergan (audit uchun). */
+    __u32 rule_id;
+
+    /* policy_gen — yozuv qaysi avlodda yaratilgan. Sozlamadagi
+     * avloddan farq qilsa yozuv eskirgan.
+     */
+    __u32 policy_gen;
+
+    __u8  verdict;
+    __u8  _pad[7];
 };
 
 #endif /* CC01_MAPS_H */

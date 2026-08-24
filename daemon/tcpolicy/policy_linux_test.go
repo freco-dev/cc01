@@ -603,3 +603,195 @@ func contains(haystack, needle string) bool {
 	}
 	return false
 }
+
+// Kesh ikkinchi paketdan boshlab ishlashi kerak: birinchisi to'liq
+// qidiruvdan o'tadi, keyingilari bitta hash qidiruvi bilan.
+func TestXDPPolicy_CachesVerdict(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	const identity = 11
+	if err := filter.SetIdentity(netip.MustParsePrefix(peerAddr+"/128"), identity); err != nil {
+		t.Fatalf("SetIdentity: %v", err)
+	}
+	if err := filter.AddRule(Rule{Identity: identity, Verdict: Allow, RuleID: 1}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	// Bir xil oqim: bir xil 5-tuple bo'lishi uchun ICMPv6 ishlatamiz
+	// (unda port yo'q, ya'ni kalit har safar bir xil).
+	for seq := range 5 {
+		inject(t, device, echoRequest(t, 20+seq))
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	stats, err := filter.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+
+	if stats[StatCacheMiss] == 0 {
+		t.Error("birinchi paket keshdan o'tdi — bu mumkin emas")
+	}
+	if stats[StatCacheHit] == 0 {
+		t.Fatalf("kesh ishlamadi (o'tkazib yuborilgan=%d topilgan=%d)",
+			stats[StatCacheMiss], stats[StatCacheHit])
+	}
+	t.Logf("kesh: %d topildi, %d o'tkazib yuborildi",
+		stats[StatCacheHit], stats[StatCacheMiss])
+
+	// Keshdan topilganlar ko'proq bo'lishi kerak: 5 paketdan
+	// faqat birinchisi to'liq qidiruvdan o'tadi.
+	if stats[StatCacheHit] <= stats[StatCacheMiss] {
+		t.Errorf("kesh samarasiz: %d topildi, %d o'tkazib yuborildi",
+			stats[StatCacheHit], stats[StatCacheMiss])
+	}
+}
+
+// ENG MUHIM TEKSHIRUV: qoida o'zgargandan keyin keshlangan hukm
+// AMAL QILMASLIGI kerak.
+//
+// Busiz taqiqlangan oqim ochiq qolardi va buni sezish deyarli
+// imkonsiz bo'lardi — filtr ishlayotgandek ko'rinadi.
+func TestXDPPolicy_RuleChangeInvalidatesCache(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	const identity = 12
+	if err := filter.SetIdentity(netip.MustParsePrefix(peerAddr+"/128"), identity); err != nil {
+		t.Fatalf("SetIdentity: %v", err)
+	}
+
+	allow := Rule{Identity: identity, Verdict: Allow, RuleID: 1}
+	if err := filter.AddRule(allow); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	// Oqimni keshga tushiramiz.
+	for seq := range 3 {
+		inject(t, device, echoRequest(t, 30+seq))
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	before, _ := filter.Stats()
+	if before[StatAllow] == 0 {
+		t.Fatal("ruxsat berilgan oqim o'tmadi")
+	}
+
+	generation := filter.Generation()
+
+	// Qoidani OLIB TASHLAYMIZ — endi deny-by-default amal qilishi
+	// kerak.
+	if err := filter.RemoveRule(allow); err != nil {
+		t.Fatalf("RemoveRule: %v", err)
+	}
+
+	if filter.Generation() == generation {
+		t.Error("qoida o'zgardi, lekin avlod oshmadi")
+	}
+
+	allowedBefore := before[StatAllow]
+
+	for seq := range 3 {
+		inject(t, device, echoRequest(t, 40+seq))
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	after, _ := filter.Stats()
+
+	if after[StatAllow] > allowedBefore {
+		t.Fatalf("ESKIRGAN HUKM AMAL QILDI: qoida o'chirilgandan keyin "+
+			"%d ta paket o'tkazildi", after[StatAllow]-allowedBefore)
+	}
+	if after[StatDrop] == 0 {
+		t.Error("qoida o'chirilgandan keyin ham paket tashlanmadi")
+	}
+}
+
+// Identity o'zgarishi ham keshni eskirtirishi kerak — u ham
+// hukmga ta'sir qiladi.
+func TestXDPPolicy_IdentityChangeInvalidatesCache(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	prefix := netip.MustParsePrefix(peerAddr + "/128")
+
+	if err := filter.SetIdentity(prefix, 20); err != nil {
+		t.Fatalf("SetIdentity: %v", err)
+	}
+	if err := filter.AddRule(Rule{Identity: 20, Verdict: Allow, RuleID: 1}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	for seq := range 3 {
+		inject(t, device, echoRequest(t, 50+seq))
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	before, _ := filter.Stats()
+	allowedBefore := before[StatAllow]
+	if allowedBefore == 0 {
+		t.Fatal("oqim o'tmadi")
+	}
+
+	// Manbani BOSHQA guruhga ko'chiramiz — unga qoida yo'q.
+	if err := filter.SetIdentity(prefix, 21); err != nil {
+		t.Fatalf("SetIdentity(21): %v", err)
+	}
+
+	for seq := range 3 {
+		inject(t, device, echoRequest(t, 60+seq))
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	after, _ := filter.Stats()
+	if after[StatAllow] > allowedBefore {
+		t.Errorf("identity o'zgardi, lekin eskirgan hukm amal qildi: "+
+			"%d ta paket o'tkazildi", after[StatAllow]-allowedBefore)
+	}
+}
+
+// Taqiqlar ham keshlanishi kerak: hujum paytida ular eng ko'p
+// uchraydigan holat va ularni har safar qayta hisoblash eng qimmat
+// yo'l bo'lardi.
+func TestXDPPolicy_CachesDrops(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	// Qoida yo'q — hamma paket tashlanadi.
+	for seq := range 5 {
+		inject(t, device, echoRequest(t, 70+seq))
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	stats, _ := filter.Stats()
+	if stats[StatCacheHit] == 0 {
+		t.Errorf("taqiqlar keshlanmadi (o'tkazib yuborilgan=%d)", stats[StatCacheMiss])
+	}
+	t.Logf("taqiq keshi: %d topildi, %d o'tkazib yuborildi",
+		stats[StatCacheHit], stats[StatCacheMiss])
+}

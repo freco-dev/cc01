@@ -604,7 +604,7 @@ shu asos ustiga qo'shiladi.
 | Dry-run (`F_ENFORCE`) | ✅ hisoblaydi, tashlamaydi |
 | Hisoblagichlar (per-CPU) | ✅ |
 | Rate limit (token bucket, manba /64) | ✅ auto-blocklist bilan |
-| Conntrack fast path | ⏳ |
+| Conntrack (hukm keshi) | ✅ avlod raqami bilan |
 | Policy (zero-trust ACL) | ✅ `daemon/tcpolicy` — `tc_ingress`, deny-by-default |
 | Ring buffer hodisalari | ✅ policy uchun; XDP ⏳ |
 | `tc_ingress` | ✅ policy uchun |
@@ -733,6 +733,47 @@ aniqroqdan umumiyroqqa: `(id, port, proto)` → `(id, 0, proto)` →
 | Dry-run | hisoblaydi, tashlamaydi |
 | L2 interfeysga biriktirish | rad etiladi |
 | Hodisa | manba, maqsad, port, protokol, qoida ID va sabab |
+
+#### Hukm keshi — va uni eskirtirish
+
+Birinchi paket to'liq qidiruvdan o'tadi (LPM + 3 tagacha hash),
+keyingilari bitta hash qidiruvi bilan cheklanadi. O'lchangan: bir
+oqimning 5 paketidan **4 tasi keshdan**.
+
+⚠️ **Bu hukm keshi, holat kuzatuvchisi EMAS.** §4.2 dagi eskizda
+`state` maydoni bor (NEW / ESTABLISHED / CLOSING). Haqiqiy TCP holat
+mashinasini yadroda to'g'ri qurish qiyin va uni **yarim qurish
+xavfli**: "ESTABLISHED" deb belgilangan, lekin aslida tekshirilmagan
+oqim filtrni chetlab o'tish yo'liga aylanardi. Shuning uchun bu yerda
+faqat hukm keshlanadi.
+
+**Eskirtirish — avlod raqami orqali.** Keshlangan hukm qoida
+o'zgargandan keyin ham amal qilib qolsa, taqiqlangan oqim ochiq
+qolardi va buni sezish deyarli imkonsiz: filtr ishlayotgandek
+ko'rinadi.
+
+Butun map'ni tozalash O(N) va uni har bir qoida o'zgarishida bajarib
+bo'lmaydi. Buning o'rniga sozlamada **avlod** raqami turadi; har bir
+yozuv o'zi yaratilgan avlodni eslab qoladi va avlodlar mos kelmasa
+yadro yozuvni o'tkazib yuboradi.
+
+Avlod **avtomatik** oshadi — `AddRule`, `RemoveRule`, `SetIdentity`
+va `RemoveIdentity` ning ichida. Chaqiruvchiga qoldirilsa uni unutish
+juda oson bo'lardi, va unutilgan holat aynan yuqoridagi jimgina
+teshikni ochardi.
+
+**Taqiqlar ham keshlanadi.** Hujum paytida ular eng ko'p uchraydigan
+holat va ularni har safar qayta hisoblash eng qimmat yo'l bo'lardi.
+LRU yozuvlarni o'zi siqib chiqaradi, ya'ni bu yerda userspace
+tozalagichi kerak emas (tezlik cheklovidan farqli — u yerda
+`bpf_spin_lock` LRU'ni taqiqlaydi).
+
+| Tekshiruv | Natija |
+| --- | --- |
+| Bir oqimning 5 paketi | 4 tasi keshdan |
+| Qoida olib tashlandi | eskirgan hukm **amal qilmaydi** |
+| Identity o'zgardi | eskirgan hukm **amal qilmaydi** |
+| Taqiqlar | ular ham keshlanadi |
 
 #### Hodisalar: nima uchun tashlandi
 
