@@ -9,7 +9,8 @@
 # kerak bo'lmaydi.
 set -eu
 
-OUT=${OUT:-../xdp/xdp_filter.o}
+XDP_OUT=${XDP_OUT:-../xdp/xdp_filter.o}
+TC_OUT=${TC_OUT:-../tcpolicy/tc_policy.o}
 
 ARCH=$(uname -m)
 case "$ARCH" in
@@ -22,14 +23,22 @@ esac
 #      (juda ko'p instruksiya, isbotlab bo'lmaydigan tarmoqlanish).
 # -g:  BTF ma'lumoti — CO-RE relokatsiyasi uchun shart.
 # -target bpf: BPF bytecode chiqarish.
-clang -O2 -g -Wall -Werror \
-    -target bpf \
-    -D__TARGET_ARCH_${TARGET_ARCH} \
-    -I/usr/include/${ARCH}-linux-gnu \
-    -Iinclude \
-    -c xdp_filter.c -o "$OUT"
+compile() {
+    src=$1; out=$2
+    clang -O2 -g -Wall -Werror \
+        -target bpf \
+        -D__TARGET_ARCH_${TARGET_ARCH} \
+        -I/usr/include/${ARCH}-linux-gnu \
+        -Iinclude \
+        -c "$src" -o "$out"
+    echo "✔ $out ($(stat -c%s "$out") bayt)"
+}
 
-echo "✔ $OUT ($(stat -c%s "$OUT") bayt)"
+mkdir -p "$(dirname "$TC_OUT")"
+compile xdp_filter.c "$XDP_OUT"
+compile tc_policy.c "$TC_OUT"
+
+OUT=$XDP_OUT
 
 # Verifier'ga borishdan oldin bytecode'ning o'zi to'g'riligini
 # tekshiramiz: bo'limlar joyidami va BTF bormi.
@@ -37,3 +46,8 @@ llvm-objdump -h "$OUT" | grep -qE '\.BTF' \
     || { echo "✘ BTF yo'q — CO-RE ishlamaydi" >&2; exit 1; }
 llvm-objdump -h "$OUT" | grep -qE 'xdp' \
     || { echo "✘ xdp bo'limi yo'q" >&2; exit 1; }
+
+llvm-objdump -h "$TC_OUT" | grep -qE '\.BTF' \
+    || { echo "✘ tc: BTF yo'q" >&2; exit 1; }
+llvm-objdump -h "$TC_OUT" | grep -qE '^ *[0-9]+ tc' \
+    || { echo "✘ tc bo'limi yo'q" >&2; exit 1; }

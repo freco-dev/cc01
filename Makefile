@@ -145,17 +145,26 @@ bpf-verify: check-docker ## Dasturni haqiqiy yadro verifier'iga yuklab ko'radi
 	@# Natija SKIP bo'lsa test o'tgandek ko'rinardi, lekin verifier
 	@# umuman ishlamagan bo'lardi. Shuning uchun kamida bitta test
 	@# HAQIQATAN bajarilganini tekshiramiz.
+	@# `| tee` chiqish kodini YASHIRADI — u tee'niki bo'lib qoladi.
+	@# Shuning uchun natijani logdan o'qiymiz va ikki narsani
+	@# tekshiramiz: yiqilgan test yo'qmi, va kalit testlar HAQIQATAN
+	@# bajarildimi (o'tkazib yuborilgan test o'tgan testga o'xshaydi).
 	@$(DOCKER) run --rm --privileged -v "$(CURDIR)":/src -w /src/daemon \
 	  -e GOWORK=off -e GOCACHE=/tmp/gocache -e GOMODCACHE=/tmp/gomod \
 	  golang:1.25 sh -c 'apt-get update -qq >/dev/null 2>&1 && \
 	    apt-get install -y -qq iproute2 iputils-ping >/dev/null 2>&1 && \
-	    go test -count=1 -run TestXDP -v ./xdp/...' 2>&1 | tee /tmp/cc01-bpf-verify.log
-	@if ! grep -q '^--- PASS: TestXDP_LoadsAndAttaches' /tmp/cc01-bpf-verify.log; then \
-	  echo; echo "✘ Verifier testi BAJARILMADI (o'tkazib yuborilgan yoki yiqilgan)."; \
-	  echo "  O'tkazib yuborilgan test o'tgan testga o'xshaydi — buni qabul qilmaymiz."; \
-	  exit 1; \
+	    go test -count=1 -run TestXDP -v ./xdp/... ./tcpolicy/...' 2>&1 \
+	  | tee /tmp/cc01-bpf-verify.log || true
+	@if grep -qE '^(--- FAIL|FAIL|# )' /tmp/cc01-bpf-verify.log; then \
+	  echo; echo "✘ Testlar yiqildi."; exit 1; \
 	fi
-	@echo "✔ dastur haqiqiy yadro verifier'idan o'tdi"
+	@for probe in TestXDP_LoadsAndAttaches TestXDPPolicy_LoadsAndAttaches; do \
+	  grep -q "^--- PASS: $$probe" /tmp/cc01-bpf-verify.log || { \
+	    echo; echo "✘ $$probe BAJARILMADI (o'tkazib yuborilgan)."; \
+	    echo "  O'tkazib yuborilgan test o'tgan testga o'xshaydi."; \
+	    exit 1; }; \
+	done
+	@echo "✔ ikkala dastur ham haqiqiy yadro verifier'idan o'tdi"
 
 # ── Paketlar (deb/rpm) ────────────────────────────────────────────────────
 # Binarlar konteynerda quriladi: host macOS bo'lishi mumkin, paketga

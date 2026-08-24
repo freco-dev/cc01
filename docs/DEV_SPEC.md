@@ -605,9 +605,10 @@ shu asos ustiga qo'shiladi.
 | Hisoblagichlar (per-CPU) | ✅ |
 | Rate limit (token bucket, manba /64) | ✅ auto-blocklist bilan |
 | Conntrack fast path | ⏳ |
-| Policy LPM trie | ⏳ — §4.1/§4.3 ziddiyati hal qilinishi kerak |
+| Policy (zero-trust ACL) | ✅ `daemon/tcpolicy` — `tc_ingress`, deny-by-default |
 | Ring buffer hodisalari | ⏳ |
-| `tc_ingress` / `tc_egress` | ⏳ |
+| `tc_ingress` | ✅ policy uchun |
+| `tc_egress` | ⏳ |
 
 **Tezlik cheklovi haqida ikkita majburiy tanlov.**
 
@@ -673,18 +674,59 @@ va maydon siljishlari `daemon/xdp/layout_test.go` da qulflangan.
 5. Program pin + link pin (BPF_LINK) → avtomatik detach'dan himoya
 ```
 
-⚠️ **§4.1 va §4.3 bir-biriga zid.** Yuqoridagi jadval policy
-qo'llashni `tc_ingress` ga (interfeys `cc0`) qo'yadi, §4.3 dagi
-psevdokod esa uni XDP ichiga joylashtiradi. Ular boshqa-boshqa
-paketlarni ko'radi: XDP `eth0` da SHIFRLANGAN tashqi paketni,
-`tc_ingress` esa `cc0` da ochilgan ICHKI paketni. Zero-trust ACL
-ichki manzillar bo'yicha yoziladi, ya'ni u `tc_ingress` ga tegishli.
-Bu hal qilinmaguncha policy trie qurilmaydi.
+#### Policy qayerda qo'llanadi — hal qilingan
 
-Bundan tashqari §4.2 dagi birlashtirilgan LPM kaliti
-(`src||dst||dport||proto`) "istalgan src, aniq dst" qoidasini
-ifodalay olmaydi: LPM prefiksi boshidan sanaydi, ya'ni src bitlarini
-tashlab dst ga o'tib bo'lmaydi.
+§4.1 policy qo'llashni `tc_ingress` ga (`cc0`) qo'yardi, §4.3 dagi
+psevdokod esa XDP ichiga. **To'g'risi — `tc_ingress`**, va sabab
+paketlarning o'zida:
+
+| Hook | Nimani ko'radi |
+| --- | --- |
+| XDP (`eth0`) | SHIFRLANGAN tashqi paket; ichi ko'rinmaydi |
+| `tc_ingress` (`cc0`) | cc01d deshifrlab yozgan ICHKI paket |
+
+Zero-trust ACL ichki overlay manzillari bo'yicha yoziladi ("node A
+node B ning 443-portiga kira oladi"), ya'ni u faqat `cc0` da
+ma'noga ega. §4.3 psevdokodidagi policy bosqichi shu sababdan
+qurilmadi.
+
+⚠️ **`cc0` — TUN, ya'ni L2 sarlavhasi YO'Q.** Dastur paketni
+to'g'ridan-to'g'ri IPv6 sarlavhasidan o'qiydi va biriktirishda
+interfeys turi tekshiriladi (`ARPHRD_NONE`). L2 qurilmada u
+Ethernet baytlarini IPv6 sarlavhasi deb talqin qilib, **jimgina
+noto'g'ri hukm** chiqarardi.
+
+Go'ning `net.Interface.HardwareAddr` maydoni bu tekshiruv uchun
+yetarli emas: `lo` uchun u bo'sh qaytadi. Yadroning o'z qiymati
+o'qiladi — `/sys/class/net/<nom>/type`.
+
+#### Kalit sxemasi — ikki bosqich
+
+§4.2 dagi birlashtirilgan LPM kaliti (`src||dst||dport||proto`)
+ishlamaydi: LPM prefiksi kalitning **boshidan** sanaydi, ya'ni src
+bitlarini tashlab dst ga o'tib bo'lmaydi — "istalgan src, aniq dst"
+qoidasini ifodalab bo'lmaydi.
+
+Buning o'rniga:
+
+    1. LPM trie:  manba prefiksi         → identity (u32)
+    2. Hash:      (identity, port, proto) → hukm
+
+Bu N ta prefiks va M ta port qoidasi uchun **N+M** yozuv beradi,
+birlashtirilgan kalitdagi N×M o'rniga. Hukm qidiruvi uch bosqichda,
+aniqroqdan umumiyroqqa: `(id, port, proto)` → `(id, 0, proto)` →
+`(id, 0, 0)`.
+
+**O'lchangan** (`make bpf-verify`, haqiqiy TUN qurilmasi):
+
+| Tekshiruv | Natija |
+| --- | --- |
+| Qoidasiz paket | tashlanadi (deny-by-default) |
+| Mos qoida | o'tkaziladi, hisoblagich to'ladi |
+| Uzunroq prefiks | ustunlik qiladi (`/128` > `/64`) |
+| Aniqroq qoida | ustunlik qiladi (proto > any) |
+| Dry-run | hisoblaydi, tashlamaydi |
+| L2 interfeysga biriktirish | rad etiladi |
 
 ### 4.2 BPF map strukturalari
 

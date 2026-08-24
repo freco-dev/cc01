@@ -135,4 +135,72 @@ struct cc01_rl_value {
     __u64 dropped;
 };
 
+/* ─────────────── Policy (zero-trust ACL, tc_ingress) ───────────────
+ *
+ * Ikki bosqichli qidiruv, birlashtirilgan LPM kaliti EMAS.
+ *
+ * Hujjatning §4.2 dagi eskizi src, dst, port va protokolni bitta LPM
+ * kalitiga birlashtiradi. Bu ishlamaydi: LPM prefiksi kalitning
+ * BOSHIDAN sanaydi, ya'ni src bitlarini tashlab dst ga o'tib
+ * bo'lmaydi — "istalgan src, aniq dst" qoidasini ifodalab bo'lmaydi.
+ *
+ * Buning o'rniga:
+ *
+ *   1. LPM trie:  src prefiksi  → identity (u32)
+ *   2. Hash:      (identity, dport, proto) → hukm
+ *
+ * Bu N ta prefiks va M ta port qoidasi uchun N+M yozuv beradi,
+ * birlashtirilgan kalitdagi N×M o'rniga.
+ */
+
+struct cc01_identity_key {
+    /* prefixlen — LPM uchun: nechta bit ahamiyatli (0..128). */
+    __u32 prefixlen;
+    __u8  addr[16];
+};
+
+struct cc01_policy_key {
+    __u32 identity;
+
+    /* dport — 0 = istalgan port. */
+    __u16 dport;
+
+    /* proto — 0 = istalgan protokol. */
+    __u8  proto;
+    __u8  _pad;
+};
+
+struct cc01_policy_value {
+    /* verdict — CC01_VERDICT_*. */
+    __u8  verdict;
+    __u8  _pad[3];
+
+    /* rule_id — CP dagi qoida identifikatori (audit uchun). */
+    __u32 rule_id;
+
+    /* hits — atomik oshiriladi. */
+    __u64 hits;
+};
+
+#define CC01_VERDICT_DROP  0
+#define CC01_VERDICT_ALLOW 1
+
+/* Identity qidiruvida hech narsa topilmasa ishlatiladi.
+ *
+ * Nol identity "noma'lum manba" degani va unga ham qoida yozish
+ * mumkin — masalan hamma noma'lum manbaga ICMPv6 ga ruxsat berish.
+ */
+#define CC01_IDENTITY_UNKNOWN 0
+
+/* Policy hisoblagichlari (tc dasturi uchun alohida). */
+enum cc01_policy_stat {
+    CC01_PSTAT_TOTAL = 0,
+    CC01_PSTAT_ALLOW,
+    CC01_PSTAT_DROP,
+    CC01_PSTAT_DROP_MALFORMED,
+    CC01_PSTAT_NOT_IPV6,
+    CC01_PSTAT_NO_RULE,       /* qoida topilmadi — deny-by-default */
+    CC01_PSTAT__MAX,
+};
+
 #endif /* CC01_MAPS_H */
