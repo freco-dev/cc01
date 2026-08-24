@@ -25,7 +25,8 @@ func TestLayout_MatchesKernelStructs(t *testing.T) {
 		{"cc01_identity_key", unsafe.Sizeof(identityKey{}), 20},
 		{"cc01_policy_key", unsafe.Sizeof(policyKey{}), 8},
 		{"cc01_policy_value", unsafe.Sizeof(policyValue{}), 16},
-		{"cc01_config", unsafe.Sizeof(configValue{}), 24},
+		{"cc01_policy_cfg", unsafe.Sizeof(configValue{}), 8},
+		{"cc01_event", eventSize, 56},
 	}
 
 	for _, tc := range cases {
@@ -75,6 +76,7 @@ func TestLayout_StatIndexes(t *testing.T) {
 		"CC01_PSTAT_DROP_MALFORMED",
 		"CC01_PSTAT_NOT_IPV6",
 		"CC01_PSTAT_NO_RULE",
+		"CC01_PSTAT_EVENT_LOST",
 	}
 
 	actual := map[int]string{
@@ -84,6 +86,7 @@ func TestLayout_StatIndexes(t *testing.T) {
 		StatDropMalformed: "CC01_PSTAT_DROP_MALFORMED",
 		StatNotIPv6:       "CC01_PSTAT_NOT_IPV6",
 		StatNoRule:        "CC01_PSTAT_NO_RULE",
+		StatEventLost:     "CC01_PSTAT_EVENT_LOST",
 	}
 
 	if statMax != len(expected) {

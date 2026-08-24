@@ -35,13 +35,16 @@ enum cc01_stat {
  * o'zgartirish uchun dasturni qayta yuklash kerak bo'lmasin. Qayta
  * yuklash paytida esa paketlar filtrsiz o'tib ketardi.
  */
-/* `packed` ATAYLAB ishlatilmaydi.
+/* XDP filtrining sozlamasi.
  *
- * Maydonlar shundoq ham to'ldirishsiz joylashadi (ikkita 4 baytlik),
- * ya'ni packed hech narsa o'zgartirmaydi. Lekin u maydonlarni
- * "moslashtirilmagan" deb belgilaydi va bu atomik amallarni buzadi
- * — clang buni xato bilan to'xtatadi. `_pad` esa oshkora: Go
- * tomonidagi nusxa bilan solishtirish oson bo'lsin.
+ * ⚠️ tc dasturining sozlamasi ALOHIDA tuzilma (cc01_policy_cfg).
+ * Ilgari ular bittasini ulashardi va tc uchun maydon qo'shilganda
+ * XDP tomonidagi Go nusxasi jimgina mos kelmay qoldi. Ikki dastur
+ * mustaqil rivojlanadi — sozlamalari ham mustaqil bo'lsin.
+ *
+ * `packed` ATAYLAB ishlatilmaydi: maydonlar shundoq ham
+ * to'ldirishsiz joylashadi, lekin packed ularni "moslashtirilmagan"
+ * deb belgilab, atomik amallarni buzadi.
  */
 struct cc01_config {
     __u32 flags;
@@ -71,6 +74,20 @@ struct cc01_config {
 
     /* auto_block_ns — avtomatik blok qancha davom etadi. */
     __u64 auto_block_ns;
+};
+
+/* tc policy dasturining sozlamasi. */
+struct cc01_policy_cfg {
+    __u32 flags;
+
+    /* event_sample — har nechta tashlashdan bittasi hodisa sifatida
+     * yuboriladi. 0 = hodisalar o'chirilgan, 1 = har biri.
+     *
+     * Deny-by-default siyosatida qoidalar to'liq yozilmagan bo'lsa
+     * hamma paket tashlanadi va har biri uchun hodisa yuborish
+     * kuzatuv vositasini xizmatni o'chirish vositasiga aylantirardi.
+     */
+    __u32 event_sample;
 };
 
 /* F_ENFORCE — hukmni qo'llash. O'chirilgan bo'lsa (dry-run) hamma
@@ -200,7 +217,38 @@ enum cc01_policy_stat {
     CC01_PSTAT_DROP_MALFORMED,
     CC01_PSTAT_NOT_IPV6,
     CC01_PSTAT_NO_RULE,       /* qoida topilmadi — deny-by-default */
+    CC01_PSTAT_EVENT_LOST,    /* ring buffer to'lgan — hodisa yo'qoldi */
     CC01_PSTAT__MAX,
+};
+
+/* Hodisa: nima uchun paket tashlandi.
+ *
+ * Hisoblagichlar "nechta" ni aytadi, hodisa esa "qaysi manzil, qaysi
+ * qoida, qaysi port" ni. Nosozlikni tekshirishda aynan shu kerak:
+ * "deny-by-default hamma narsani tashlayapti" xabari foydasiz, "node
+ * X 5432-portga urinyapti va unga qoida yo'q" esa harakatga
+ * chorlaydi.
+ */
+struct cc01_event {
+    __u64 timestamp_ns;
+
+    __u8  src[16];
+    __u8  dst[16];
+
+    __u16 dport;
+    __u8  proto;
+
+    /* verdict — CC01_VERDICT_*. Dry-run rejimida ham TASHLASH
+     * yoziladi: hodisa "nima bo'lardi" ni ko'rsatadi.
+     */
+    __u8  verdict;
+
+    __u32 identity;
+    __u32 rule_id;
+
+    /* dry_run — hukm qo'llandimi yoki faqat hisoblandimi. */
+    __u8  dry_run;
+    __u8  _pad[3];
 };
 
 #endif /* CC01_MAPS_H */

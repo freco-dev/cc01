@@ -606,7 +606,7 @@ shu asos ustiga qo'shiladi.
 | Rate limit (token bucket, manba /64) | ✅ auto-blocklist bilan |
 | Conntrack fast path | ⏳ |
 | Policy (zero-trust ACL) | ✅ `daemon/tcpolicy` — `tc_ingress`, deny-by-default |
-| Ring buffer hodisalari | ⏳ |
+| Ring buffer hodisalari | ✅ policy uchun; XDP ⏳ |
 | `tc_ingress` | ✅ policy uchun |
 | `tc_egress` | ⏳ |
 
@@ -655,6 +655,11 @@ kiradi.
 Muhit yaroqsiz bo'lsa Go testlari `SKIP` bo'ladi va bu o'tgan testga
 o'xshaydi — ya'ni verifier umuman ishlamagan bo'lsa ham ko'k rang
 ko'rinardi.
+
+⚠️ **Ikki dasturning sozlamasi ALOHIDA tuzilma.** Ilgari ular
+bittasini ulashardi va tc uchun maydon qo'shilganda XDP tomonidagi
+Go nusxasi jimgina mos kelmay qoldi. Dasturlar mustaqil
+rivojlanadi — sozlamalari ham mustaqil.
 
 **Tuzilmalar ikki tomonda takrorlanadi.** C va Go nusxalari bayt-bayt
 mos kelishi shart; mos kelmasa yadro xato bermaydi, u baytlarni
@@ -727,6 +732,37 @@ aniqroqdan umumiyroqqa: `(id, port, proto)` → `(id, 0, proto)` →
 | Aniqroq qoida | ustunlik qiladi (proto > any) |
 | Dry-run | hisoblaydi, tashlamaydi |
 | L2 interfeysga biriktirish | rad etiladi |
+| Hodisa | manba, maqsad, port, protokol, qoida ID va sabab |
+
+#### Hodisalar: nima uchun tashlandi
+
+Hisoblagichlar "nechta" ni aytadi, hodisa esa "qaysi manzil, qaysi
+qoida, qaysi port" ni. Nosozlikni tekshirishda aynan shu kerak:
+*"deny-by-default hamma narsani tashlayapti"* foydasiz, *"node X
+5432-portga urinyapti va unga qoida yo'q"* esa harakatga chorlaydi.
+
+Namuna chiqish:
+
+    fd00:cc01:7c01::2 → fd00:cc01:7c01::1 port=0 proto=58
+      identity=0: tashlandi (qoida yo'q)
+
+⚠️ **Har bir tashlash uchun hodisa yuborilmaydi.** Deny-by-default
+siyosatida qoidalar to'liq yozilmagan bo'lsa **hamma** paket
+tashlanadi — har biri uchun hodisa yuborish ring bufferni to'ldirib,
+CPU ni yeb qo'yardi, ya'ni kuzatuv vositasi xizmatni o'chirish
+vositasiga aylanardi. Standart holatda har 16 tashlashdan bittasi
+yuboriladi (`EventSample`).
+
+Namuna olish hisoblagichi sifatida **per-CPU tashlash hisoblagichi**
+ishlatiladi — alohida map kerak emas va u shundoq ham oshirilgan.
+
+Ring buffer to'lsa hodisa **yo'qoladi** va `event_lost` hisoblagichi
+oshadi. Filtrlash to'xtamaydi: kuzatuv hech qachon himoyadan
+muhimroq emas (§4.5).
+
+Userspace tomonda ham xuddi shunday: iste'molchi ulgurmasa hodisa
+tashlanadi. Bloklansak, ring buffer to'lib **yadro tomonda yana
+ko'proq** hodisa yo'qolardi.
 
 ### 4.2 BPF map strukturalari
 

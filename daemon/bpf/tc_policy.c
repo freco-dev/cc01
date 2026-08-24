@@ -46,16 +46,13 @@ struct {
     __uint(max_entries, CC01_PSTAT__MAX);
 } cc01_policy_stats SEC(".maps");
 
-/* Sozlama: XDP dagi bilan bir xil tuzilma, alohida nusxa.
- *
- * Ikkala dastur bir xil map'ni ULASHMAYDI: ular alohida
- * biriktiriladi va biri o'chirilganda ikkinchisi ishlashda davom
- * etishi kerak.
+/* Sozlama. XDP dagidan ALOHIDA tuzilma va alohida map: ikki dastur
+ * mustaqil biriktiriladi va mustaqil rivojlanadi.
  */
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __type(key, __u32);
-    __type(value, struct cc01_config);
+    __type(value, struct cc01_policy_cfg);
     __uint(max_entries, 1);
 } cc01_policy_config SEC(".maps");
 
@@ -76,6 +73,18 @@ struct {
     __uint(max_entries, 65536);
     __uint(map_flags, BPF_F_NO_PREALLOC);
 } cc01_policy SEC(".maps");
+
+/* Hodisalar halqasi.
+ *
+ * 256 KB: bir necha ming hodisani ushlaydi va userspace ularni
+ * o'qib ulguradi. Kattaroq bufer xotira sarflaydi va hech narsa
+ * qo'shmaydi — hodisalar to'planib qolsa, muammo o'qish tezligida,
+ * bufer o'lchamida emas.
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 256 * 1024);
+} cc01_events SEC(".maps");
 
 static __always_inline void pstat_inc(__u32 index)
 {
@@ -142,6 +151,65 @@ lookup_verdict(__u32 identity, __u16 dport, __u8 proto)
     return bpf_map_lookup_elem(&cc01_policy, &key);
 }
 
+/* pstat_read hisoblagich qiymatini qaytaradi (namuna olish uchun). */
+static __always_inline __u64 pstat_read(__u32 index)
+{
+    __u64 *counter = bpf_map_lookup_elem(&cc01_policy_stats, &index);
+    return counter ? *counter : 0;
+}
+
+/* emit_event tashlangan paket haqida hodisa yuboradi.
+ *
+ * # Namuna olish
+ *
+ * Deny-by-default siyosatida qoidalar to'liq yozilmagan bo'lsa
+ * HAMMA paket tashlanadi. Har biri uchun hodisa yuborish ring
+ * bufferni to'ldirib, CPU ni yeb qo'yardi — ya'ni kuzatuv vositasi
+ * xizmatni o'chirish vositasiga aylanardi.
+ *
+ * Shuning uchun har `sample` tashlashdan bittasi yuboriladi.
+ * Hisoblagich sifatida PER-CPU drop hisoblagichi ishlatiladi:
+ * alohida map kerak emas va u shundoq ham oshirilgan.
+ */
+static __always_inline void emit_event(const struct ipv6hdr *ip6,
+                                       __u16 dport, __u8 proto,
+                                       __u32 identity, __u32 rule_id,
+                                       __u8 dry_run,
+                                       const struct cc01_policy_cfg *cfg)
+{
+    __u32 sample = cfg->event_sample;
+    if (sample == 0)
+        return;   /* hodisalar o'chirilgan */
+
+    if (sample > 1 && (pstat_read(CC01_PSTAT_DROP) % sample) != 0)
+        return;
+
+    struct cc01_event *event = bpf_ringbuf_reserve(&cc01_events, sizeof(*event), 0);
+    if (!event) {
+        /* Bufer to'lgan. Hodisa yo'qoladi, lekin FILTRLASH
+         * TO'XTAMAYDI — kuzatuv hech qachon himoyadan muhimroq
+         * emas (DEV_SPEC §4.5).
+         */
+        pstat_inc(CC01_PSTAT_EVENT_LOST);
+        return;
+    }
+
+    event->timestamp_ns = bpf_ktime_get_ns();
+    __builtin_memcpy(event->src, &ip6->saddr, sizeof(event->src));
+    __builtin_memcpy(event->dst, &ip6->daddr, sizeof(event->dst));
+    event->dport = dport;
+    event->proto = proto;
+    event->verdict = CC01_VERDICT_DROP;
+    event->identity = identity;
+    event->rule_id = rule_id;
+    event->dry_run = dry_run;
+    event->_pad[0] = 0;
+    event->_pad[1] = 0;
+    event->_pad[2] = 0;
+
+    bpf_ringbuf_submit(event, 0);
+}
+
 SEC("tc")
 int cc01_tc_policy(struct __sk_buff *skb)
 {
@@ -165,7 +233,7 @@ int cc01_tc_policy(struct __sk_buff *skb)
     }
 
     __u32 zero = 0;
-    struct cc01_config *cfg = bpf_map_lookup_elem(&cc01_policy_config, &zero);
+    struct cc01_policy_cfg *cfg = bpf_map_lookup_elem(&cc01_policy_config, &zero);
     if (!cfg) {
         /* Sozlama yo'q — fail-open (DEV_SPEC §4.4). Userspace hali
          * yozib ulgurmagan bo'lishi mumkin va bunda butun overlay'ni
@@ -192,8 +260,11 @@ int cc01_tc_policy(struct __sk_buff *skb)
     struct cc01_policy_value *rule = lookup_verdict(identity, dport, proto);
 
     __u8 verdict = CC01_VERDICT_DROP;   /* deny-by-default */
+    __u32 rule_id = 0;
+
     if (rule) {
         verdict = rule->verdict;
+        rule_id = rule->rule_id;
         __sync_fetch_and_add(&rule->hits, 1);
     } else {
         pstat_inc(CC01_PSTAT_NO_RULE);
@@ -212,7 +283,11 @@ int cc01_tc_policy(struct __sk_buff *skb)
      * yozilmagan bo'lsa, enforce rejimi butun trafikni kesib
      * qo'yardi.
      */
-    if (!(cfg->flags & CC01_F_ENFORCE))
+    __u8 dry_run = (cfg->flags & CC01_F_ENFORCE) ? 0 : 1;
+
+    emit_event(ip6, dport, proto, identity, rule_id, dry_run, cfg);
+
+    if (dry_run)
         return TC_ACT_OK;
 
     return TC_ACT_SHOT;

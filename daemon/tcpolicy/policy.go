@@ -75,6 +75,7 @@ const (
 	StatDropMalformed
 	StatNotIPv6
 	StatNoRule
+	StatEventLost
 	statMax
 )
 
@@ -85,6 +86,7 @@ var statNames = [statMax]string{
 	StatDropMalformed: "buzuq sarlavha",
 	StatNotIPv6:       "IPv6 emas",
 	StatNoRule:        "qoida topilmadi",
+	StatEventLost:     "yo'qolgan hodisalar",
 }
 
 // FlagEnforce — hukmni qo'llash. O'chirilgan bo'lsa (dry-run) hamma
@@ -124,14 +126,29 @@ type Config struct {
 	// Enforce — hukmni qo'llash. false bo'lsa dry-run.
 	Enforce bool
 
+	// EventSample — har nechta tashlashdan bittasi hodisa
+	// sifatida yuboriladi. 0 = hodisalar o'chirilgan.
+	//
+	// Bo'sh qoldirilsa DefaultEventSample ishlatiladi.
+	EventSample uint32
+
 	Logger *slog.Logger
 }
+
+// DefaultEventSample — standart namuna olish qadami.
+//
+// Har bir tashlash uchun hodisa yubormaymiz: deny-by-default
+// siyosatida qoidalar to'liq yozilmagan bo'lsa hamma paket
+// tashlanadi va hodisalar oqimi kuzatuv vositasini xizmatni
+// o'chirish vositasiga aylantirardi.
+const DefaultEventSample uint32 = 16
 
 // Filter — yuklangan va biriktirilgan tc dasturi.
 type Filter struct {
 	collection *ebpf.Collection
 	detach     func() error
 	iface      string
+	config     Config
 	log        *slog.Logger
 }
 
@@ -193,7 +210,12 @@ func Load(cfg Config) (*Filter, error) {
 
 	// Sozlama biriktirishdan OLDIN: aks holda dastur ishlay
 	// boshlagan, lekin sozlama bo'sh bo'lgan oyna ochilardi.
-	if err := filter.SetEnforce(cfg.Enforce); err != nil {
+	if cfg.EventSample == 0 {
+		cfg.EventSample = DefaultEventSample
+	}
+	filter.config = cfg
+
+	if err := filter.Configure(cfg); err != nil {
 		collection.Close()
 		return nil, err
 	}
@@ -211,22 +233,33 @@ func Load(cfg Config) (*Filter, error) {
 	return filter, nil
 }
 
-// SetEnforce hukmni qo'llashni yoqadi yoki o'chiradi.
-func (f *Filter) SetEnforce(enforce bool) error {
+// Configure sozlamani yangilaydi.
+func (f *Filter) Configure(cfg Config) error {
 	configMap := f.collection.Maps["cc01_policy_config"]
 	if configMap == nil {
 		return errors.New("tcpolicy: config map topilmadi")
 	}
 
 	var flags uint32
-	if enforce {
+	if cfg.Enforce {
 		flags = FlagEnforce
 	}
 
-	if err := configMap.Put(uint32(0), configValue{Flags: flags}); err != nil {
+	value := configValue{Flags: flags, EventSample: cfg.EventSample}
+	if err := configMap.Put(uint32(0), value); err != nil {
 		return fmt.Errorf("tcpolicy: sozlamani yozish: %w", err)
 	}
+
+	f.config = cfg
 	return nil
+}
+
+// SetEnforce hukmni qo'llashni yoqadi yoki o'chiradi, qolgan
+// sozlamalarga tegmasdan.
+func (f *Filter) SetEnforce(enforce bool) error {
+	cfg := f.config
+	cfg.Enforce = enforce
+	return f.Configure(cfg)
 }
 
 // SetIdentity manba prefiksini guruhga bog'laydi.
@@ -373,12 +406,13 @@ func (f *Filter) Close() error {
 // shart. Mos kelmasa yadro xato bermaydi — u baytlarni boshqacha
 // talqin qiladi va policy jimgina noto'g'ri ishlaydi.
 
+// configValue — `struct cc01_policy_cfg` ning Go nusxasi.
+//
+// XDP dagi sozlamadan ALOHIDA: ular bir tuzilmani ulashganda, tc
+// uchun maydon qo'shish XDP tomonini jimgina buzgan edi.
 type configValue struct {
-	Flags          uint32
-	RatePPS        uint32
-	Burst          uint32
-	AutoBlockAfter uint32
-	AutoBlockNS    uint64
+	Flags       uint32
+	EventSample uint32
 }
 
 type identityKey struct {
