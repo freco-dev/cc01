@@ -19,6 +19,7 @@ TOKEN=demo-shared-secret-0123456789
 
 cleanup() {
   $DOCKER rm -f cc01-cp1 cc01-cp2 cc01-cp3 cc01-rn1 cc01-rn2 >/dev/null 2>&1 || true
+  $DOCKER volume rm cc01-raft-node >/dev/null 2>&1 || true
   $DOCKER network rm $NET >/dev/null 2>&1 || true
 }
 if [ -z "${KEEP:-}" ]; then
@@ -85,10 +86,16 @@ echo "═══ node liderga ulanib manzil oladi ═══"
 # yangi liderga ulanamiz.
 NODE_KEY=$($DOCKER run --rm --entrypoint cc01d $IMAGE -genkey 2>/dev/null)
 
+# Node holati (sertifikat) VOLUME da: failover'dan keyin AYNAN o'sha
+# node qayta ulanadi. Yangi konteyner yangi sertifikat yasasa, CP uni
+# haqli ravishda rad etardi — node_id boshqa sertifikatga bog'langan.
+$DOCKER volume create cc01-raft-node >/dev/null
+
 $DOCKER run -d --name cc01-rn1 --network $NET --ip 172.37.0.21 \
   --cap-add NET_ADMIN --device /dev/net/tun \
+  -v cc01-raft-node:/var/lib/cc01 \
   --entrypoint cc01d $IMAGE \
-  -key "$NODE_KEY" \
+  -key "$NODE_KEY" -state-dir /var/lib/cc01 \
   -cp "$LEADER_IP:8443" -cp-token "$TOKEN" -cp-pin "$PIN" \
   -hostname node-1 -listen 51820 >/dev/null
 sleep 5
@@ -136,17 +143,23 @@ echo "═══ ijara saqlanib qoldimi ═══"
 # saqlaydi. Boshqa kalit bilan ulanish ham dalil emas: tasodifiy
 # taqsimlashda ikkita node baribir turli manzil olardi.
 #
-# Haqiqiy tekshiruv: AYNAN O'SHA KALIT bilan yangi liderga ulanamiz.
-# Taqsimlash egasi bo'yicha idempotent, ya'ni lider ijarani bilsa
-# O'SHA manzilni qaytaradi. Jurnal yo'qolgan bo'lsa — yangisini
-# beradi.
+# Haqiqiy tekshiruv: AYNAN O'SHA NODE (o'sha kalit VA o'sha
+# sertifikat) yangi liderga qayta ulanadi. Taqsimlash egasi bo'yicha
+# idempotent, ya'ni lider ijarani bilsa O'SHA manzilni qaytaradi.
+# Jurnal yo'qolgan bo'lsa — yangisini beradi.
+#
+# ⚠️ Node holati volume'da saqlanadi. Yangi sertifikat bilan
+# ulanish CP tomonidan RAD ETILADI va bu to'g'ri: node_id bir marta
+# sertifikatga bog'lanadi.
+$DOCKER rm -f cc01-rn1 >/dev/null
 NEW_IP="172.37.0.1$NEW"
 NEW_PIN=$($DOCKER logs "cc01-cp$NEW" 2>&1 | grep -o 'sha256/[A-Za-z0-9+/=]*' | head -1)
 
-$DOCKER run -d --name cc01-rn2 --network $NET --ip 172.37.0.22 \
+$DOCKER run -d --name cc01-rn2 --network $NET --ip 172.37.0.21 \
   --cap-add NET_ADMIN --device /dev/net/tun \
+  -v cc01-raft-node:/var/lib/cc01 \
   --entrypoint cc01d $IMAGE \
-  -key "$NODE_KEY" \
+  -key "$NODE_KEY" -state-dir /var/lib/cc01 \
   -cp "$NEW_IP:8443" -cp-token "$TOKEN" -cp-pin "$NEW_PIN" \
   -hostname node-1 -listen 51820 >/dev/null
 sleep 5

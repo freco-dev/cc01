@@ -169,9 +169,11 @@ func (s *Session) build(ctx context.Context) (*active, error) {
 
 	relay := newRelayLink(s.cfg.Identity, bind, s.log)
 
-	// Marshrut rekonsilyatori TUN yaratilgandan keyin tug'iladi, lekin
-	// unga turtki beruvchi NetworkMap oqimi undan oldin ulanadi.
+	// Marshrut rekonsilyatori va policy filtri TUN yaratilgandan
+	// keyin tug'iladi, lekin ularga murojaat qiladigan NetworkMap
+	// oqimi undan oldin ulanadi.
 	var routes routeHandle
+	var policyHandle policyHandle
 
 	client, err := control.Dial(control.Config{
 		Address:      s.cfg.ControlAddr,
@@ -182,6 +184,7 @@ func (s *Session) build(ctx context.Context) (*active, error) {
 		AuthToken:    s.cfg.AuthToken,
 		OnRelays:     relay.update,
 		OnNetworkMap: routes.poke,
+		Policy:       &policyHandle,
 		Pins:         s.cfg.Pins,
 		Insecure:     s.cfg.Insecure,
 		ClientCert:   s.cfg.ClientCert,
@@ -260,6 +263,7 @@ func (s *Session) build(ctx context.Context) (*active, error) {
 			policy = nil
 		}
 	}
+	policyHandle.set(policy)
 
 	built := &active{
 		device:       device,
@@ -449,4 +453,62 @@ func (s *Session) Policy() *tcpolicy.Filter {
 		return nil
 	}
 	return s.active.policy
+}
+
+// policyHandle — filtr hali yaratilmagan paytda kelgan CP
+// qoidalarini yutib yuboradigan indirection.
+//
+// Halqa: CP klienti qoidalarni olib keladi, lekin u filtrdan OLDIN
+// tug'iladi (filtrga TUN kerak, TUN'ga esa ro'yxatdan o'tish).
+//
+// Filtr yo'q bo'lsa qoidalar jimgina tashlanadi: CP keyingi
+// yangilanishda ularni qayta yuboradi, chunki node policy
+// versiyasini eslab qolmaydi.
+type policyHandle struct {
+	mu    sync.Mutex
+	inner *tcpolicy.Filter
+}
+
+func (h *policyHandle) set(filter *tcpolicy.Filter) {
+	h.mu.Lock()
+	h.inner = filter
+	h.mu.Unlock()
+}
+
+func (h *policyHandle) current() *tcpolicy.Filter {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.inner
+}
+
+func (h *policyHandle) IdentityFor(prefix netip.Prefix) (uint32, error) {
+	filter := h.current()
+	if filter == nil {
+		return 0, control.ErrNoPolicyFilter
+	}
+	return filter.IdentityFor(prefix)
+}
+
+func (h *policyHandle) AddRule(rule tcpolicy.Rule) error {
+	filter := h.current()
+	if filter == nil {
+		return control.ErrNoPolicyFilter
+	}
+	return filter.AddRule(rule)
+}
+
+func (h *policyHandle) RemoveRule(rule tcpolicy.Rule) error {
+	filter := h.current()
+	if filter == nil {
+		return control.ErrNoPolicyFilter
+	}
+	return filter.RemoveRule(rule)
+}
+
+func (h *policyHandle) Rules() ([]tcpolicy.RuleStatus, error) {
+	filter := h.current()
+	if filter == nil {
+		return nil, control.ErrNoPolicyFilter
+	}
+	return filter.Rules()
 }

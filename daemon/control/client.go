@@ -50,6 +50,10 @@ type Config struct {
 	// ro'yxat yuqoriga uzatiladi.
 	OnRelays func([]RelayInfo)
 
+	// Policy — CP qoidalarini qo'llaydigan filtr. nil bo'lsa
+	// qoidalar e'tiborsiz qoldiriladi.
+	Policy PolicyApplier
+
 	// OnNetworkMap har bir qo'llangan NetworkMap dan KEYIN chaqiriladi.
 	//
 	// Peerlar o'zgardi degani marshrutlar ham o'zgargan bo'lishi
@@ -94,6 +98,9 @@ type Client struct {
 
 	nodeID  string
 	address netip.Prefix
+
+	// policy — CP qoidalarining oxirgi qo'llangan versiyasi.
+	policy policyState
 }
 
 // Registration — ro'yxatdan o'tish natijasi.

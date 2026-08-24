@@ -121,6 +121,49 @@ message WatchNetworkMapResponse {
   // Har bir javobda to'liq ro'yxat yuboriladi — u kichik va kamdan-kam
   // o'zgaradi, ya'ni delta hisoblashning ma'nosi yo'q.
   repeated Relay relays = 8;
+
+  // Policy — CP kompilyatsiya qilgan zero-trust qoidalar
+  // (ARCHITECTURE.md §3.1.5).
+  //
+  // Relaylar kabi HAR BIR javobda to'liq ro'yxat yuboriladi.
+  // Delta hisoblash mumkin edi, lekin u node tomonida qoidalarni
+  // qismlab qo'llashni talab qilardi — va yarim qo'llangan policy
+  // butun trafikni kesib qo'yishi mumkin. To'liq ro'yxat esa
+  // node'ga bir zarbada moslashish imkonini beradi.
+  repeated PolicyRule policy = 9;
+
+  // PolicyVersion — qoidalar to'plamining versiyasi.
+  //
+  // Node buni eslab qoladi va o'zgarmagan bo'lsa qoidalarga
+  // TEGMAYDI: har bir NetworkMap yangilanishida policy map'ini
+  // qayta yozish hukm keshini behuda eskirtirardi.
+  uint64 policy_version = 10;
+}
+
+// PolicyRule — nodega yuboriladigan bitta qoida.
+//
+// CP dagi deklarativ ACL (tag, guruh, xizmat nomlari) shu yerga
+// KELGUNCHA hal qilinadi: node hech qachon tagni o'zi yechmaydi
+// (ARCHITECTURE.md §3.1.5). Bu yerda faqat aniq prefiks, port va
+// protokol qoladi.
+message PolicyRule {
+  // Direction — 0 = kirish, 1 = chiqish.
+  uint32 direction = 1;
+
+  // Prefix — manba (kirishda) yoki maqsad (chiqishda) prefiksi.
+  string prefix = 2;
+
+  // Port — 0 = istalgan.
+  uint32 port = 3;
+
+  // Proto — IP protokol raqami; 0 = istalgan.
+  uint32 proto = 4;
+
+  // Verdict — 0 = taqiq, 1 = ruxsat.
+  uint32 verdict = 5;
+
+  // RuleId — CP dagi identifikator (audit uchun).
+  uint32 rule_id = 6;
 }
 
 // Relay — P2P imkonsiz bo'lganda trafikni uzatuvchi tugun

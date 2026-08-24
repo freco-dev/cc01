@@ -27,6 +27,7 @@ func (c *Client) apply(netmap *cc01v1.WatchNetworkMapResponse) {
 	}
 
 	c.applyRelays(netmap.GetRelays())
+	c.applyPolicy(netmap)
 
 	c.log.Debug("NetworkMap qo'llandi",
 		"version", netmap.GetVersion(), "full", netmap.GetFull(),

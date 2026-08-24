@@ -29,8 +29,10 @@ $DOCKER network create --subnet 172.32.88.0/24 $NET >/dev/null
 
 echo "── Control Plane ──"
 $DOCKER run -d --name cc01-cp --network $NET --ip 172.32.88.5 \
+  -v "$PWD/daemon/testdata/policy.json":/policy.json:ro \
   --entrypoint cc01-cp $IMAGE \
-  -listen :8443 -tenant-net 'fd00:cc01:c0de::/64' -auth-token "$TOKEN" -tls-hosts 172.32.88.5 >/dev/null
+  -listen :8443 -tenant-net 'fd00:cc01:c0de::/64' -auth-token "$TOKEN" \
+  -tls-hosts 172.32.88.5 -policy /policy.json >/dev/null
 sleep 2
 
 # CP vaqtinchalik sertifikat yaratdi va pinini chiqardi. Nodelar
@@ -144,19 +146,22 @@ echo
 echo "═══ cc01 firewall (node-1) ═══"
 A2_ADDR=$($DOCKER exec cc01-n2 cc01 status | awk '/manzil/ {print $2}' | cut -d/ -f1)
 
-echo "── boshlang'ich holat (dry-run, qoidasiz) ──"
+echo "── CP dan kelgan qoidalar ──"
 $DOCKER exec cc01-n1 cc01 firewall list
 
-echo "── node-2 ga ICMPv6 ruxsati ──"
-$DOCKER exec cc01-n1 cc01 firewall add --allow --src "$A2_ADDR/128" --proto icmpv6
-
-echo "── qoida ishlaydimi (test) ──"
+echo "── mesh ichidagi ICMPv6 (CP ruxsat bergan) ──"
 $DOCKER exec cc01-n1 cc01 firewall test --src "$A2_ADDR" --proto icmpv6
 
-echo "── boshqa manzil ──"
-$DOCKER exec cc01-n1 cc01 firewall test --src fd00:cc01:c0de::99 --proto icmpv6
+echo "── SSH (CP taqiqlagan) ──"
+$DOCKER exec cc01-n1 cc01 firewall test --src "$A2_ADDR" --proto tcp --port 22
 
-echo "── ro'yxat ──"
+echo "── mesh tashqarisi (qoida yo'q) ──"
+$DOCKER exec cc01-n1 cc01 firewall test --src 2a0e:dead::1 --proto icmpv6
+
+# Lokal qoidalar CP diapazonidan (1000000+) PASTDA yashaydi va CP
+# yangilanishida o'chirilmaydi.
+echo "── lokal qoida CP qoidalari bilan yonma-yon ──"
+$DOCKER exec cc01-n1 cc01 firewall add --allow --src 2a0e:dead::1/128 --proto icmpv6 >/dev/null
 $DOCKER exec cc01-n1 cc01 firewall list
 
 echo

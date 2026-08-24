@@ -1,0 +1,13 @@
+{
+  "groups": {
+    "mesh": ["fd00:cc01:c0de::/64"]
+  },
+  "rules": [
+    { "action": "allow", "src": "mesh", "proto": "icmpv6",
+      "comment": "mesh ichida ping" },
+    { "action": "allow", "dst": "mesh", "proto": "icmpv6",
+      "comment": "chiqishga ham ruxsat" },
+    { "action": "deny", "src": "mesh", "proto": "tcp", "port": 22,
+      "comment": "SSH taqiqlangan" }
+  ]
+}

@@ -718,9 +718,57 @@ chalg'ituvchi holat.
 **`flush` `--force` talab qiladi**: deny-by-default siyosatida
 tozalash butun overlay trafigini kesadi.
 
-Qoidalar **yadroda** yashaydi va demon qayta ishga tushganda
-yo'qoladi. Doimiy saqlash Control Plane vazifasi — u qoidalarni
-tarqatadi va node ularni qayta qo'llaydi. Bu hali qurilmagan.
+#### CP dan tarqatish
+
+Qoidalar manbai — CP ga beriladigan **ACL fayli** (`-policy`).
+`SIGHUP` bilan qayta o'qiladi.
+
+Fayl kuzatuvchisi (inotify) ATAYLAB ishlatilmadi: tahrirlash paytida
+fayl bir necha marta yozilishi mumkin va yarim yozilgan ACL ni
+qo'llash butun trafikni kesib qo'yardi. `SIGHUP` esa operator
+"tayyor" deganini bildiradi.
+
+Ishga tushishda yaroqsiz ACL — **halokatli xato**. Qayta yuklashda
+esa emas: eski qoidalar amalda qoladi, chunki yaroqsiz fayl tufayli
+ishlab turgan policy'ni yo'qotish xavfliroq.
+
+**Kompilyatsiya CP da.** Node hech qachon tag yoki guruhni o'zi
+yechmaydi. Sabab xavfsizlik emas, **izchillik**: har bir node tagni
+mustaqil yechsa, ular turli paytda turli natijaga kelardi va policy
+tarmoq bo'ylab bir xil bo'lmasdi — buni tashxislash deyarli imkonsiz.
+
+**Versiya mazmundan hisoblanadi**, hisoblagich emas. Bir xil hujjat
+qayta yuklansa versiya o'zgarmaydi va nodelar qoidalarga tegmaydi.
+Hisoblagich bo'lsa har `SIGHUP` da nodelar policy map'ini behuda
+qayta yozib, hukm keshini eskirtirardi. Buning sharti —
+kompilyatsiya deterministik bo'lishi; test buni qo'riqlaydi.
+
+⚠️ **Policy o'zgarishi NetworkMap oqimida alohida tekshiriladi.**
+`netmap.Empty()` faqat peerlar o'zgarganini biladi. Faqat unga
+qarasak, policy o'zgargan-u peerlar o'zgarmagan holatda node yangi
+qoidalarni **hech qachon olmasdi** — va buni sezish juda qiyin
+bo'lardi, chunki mesh o'zi ishlab turaveradi.
+
+**Qoidalar Raft'da EMAS.** Ular manbai fayl, ya'ni har bir CP
+replikasida mustaqil va bir xil hisoblanadi. Jurnal orqali tarqatish
+bir xil ma'lumotni ikki marta ko'chirish bo'lardi.
+
+**Lokal va CP qoidalari yonma-yon yashaydi**, identifikator
+diapazoni bilan ajratilgan: CP qoidalari `1 000 000` dan boshlanadi.
+CP yangilanishida faqat o'z diapazoni almashtiriladi — aks holda
+operator qo'lda qo'ygan qoida "o'z-o'zidan yo'qolardi".
+
+Almashtirishda avval qo'shiladi, keyin ortiqchasi o'chiriladi:
+teskari tartibda ruxsat berilgan trafik uchun qoidasiz oyna
+ochilardi va deny-by-default uni kesardi.
+
+**O'lchangan** (`make cp-demo`):
+
+    rejim: dry-run   avlod: 4
+    ID       YO'L  HUKM   PREFIKS              PORT  PROTO   URISH
+    1000001  in    deny   fd00:cc01:c0de::/64  22    tcp     0
+    1000002  in    allow  fd00:cc01:c0de::/64  any   icmpv6  2
+    1000003  out   allow  fd00:cc01:c0de::/64  any   icmpv6  2
 
 ⚠️ **eBPF uchun `CAP_BPF` va `CAP_PERFMON` kerak**, `CAP_NET_ADMIN`
 yetarli emas. Bundan tashqari `bpf` sistemaviy chaqiruvi

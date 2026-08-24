@@ -16,6 +16,7 @@ import (
 
 	"github.com/freco-dev/cc01/control/cluster"
 	"github.com/freco-dev/cc01/control/ipam"
+	"github.com/freco-dev/cc01/control/policy"
 	"github.com/freco-dev/cc01/control/registry"
 	cc01v1 "github.com/freco-dev/cc01/proto/gen/cc01/v1"
 	"google.golang.org/grpc/codes"
@@ -41,6 +42,10 @@ type Config struct {
 	// xotiradagi ombor ishlatiladi.
 	Identities cluster.IdentityStore
 
+	// Policies — zero-trust qoidalar. nil bo'lsa policy
+	// tarqatilmaydi.
+	Policies *policy.Store
+
 	Logger *slog.Logger
 }
 
@@ -51,6 +56,7 @@ type Service struct {
 	registry   *registry.Registry
 	allocator  *ipam.Allocator
 	identities cluster.IdentityStore
+	policies   *policy.Store
 	tenantNet  netip.Prefix
 	authToken  string
 	log        *slog.Logger
@@ -88,6 +94,7 @@ func New(cfg Config) (*Service, error) {
 		registry:   cfg.Registry,
 		allocator:  cfg.Allocator,
 		identities: identities,
+		policies:   cfg.Policies,
 		tenantNet:  cfg.TenantPrefix.Masked(),
 		authToken:  cfg.AuthToken,
 		log:        logger.With("component", "cp"),
@@ -245,7 +252,17 @@ func (s *Service) WatchNetworkMap(
 	updates := s.registry.Watch(ctx, node.Tenant)
 
 	since := req.GetSince()
-	if err := s.sendMap(stream, node.ID, &since); err != nil {
+
+	// Policy versiyasi oqim bo'ylab kuzatiladi. Nol — "hali
+	// yuborilmagan": birinchi javob har doim qoidalarni olib
+	// keladi, hatto ular bo'sh bo'lsa ham.
+	//
+	// Boshlang'ich qiymat ataylab imkonsiz raqam: shunda birinchi
+	// solishtirish har doim "o'zgargan" beradi va node qoidalarni
+	// oladi.
+	policyVersion := ^uint64(0)
+
+	if err := s.sendMap(stream, node.ID, &since, &policyVersion); err != nil {
 		return err
 	}
 
@@ -260,7 +277,7 @@ func (s *Service) WatchNetworkMap(
 			if !open {
 				return nil
 			}
-			if err := s.sendMap(stream, node.ID, &since); err != nil {
+			if err := s.sendMap(stream, node.ID, &since, &policyVersion); err != nil {
 				return err
 			}
 		}
@@ -272,6 +289,7 @@ func (s *Service) sendMap(
 	stream cc01v1.ControlService_WatchNetworkMapServer,
 	nodeID string,
 	since *uint64,
+	policyVersion *uint64,
 ) error {
 	netmap, err := s.registry.NetworkMapFor(nodeID, *since)
 	if err != nil {
@@ -281,19 +299,41 @@ func (s *Service) sendMap(
 		return status.Errorf(codes.Internal, "netmap: %v", err)
 	}
 
-	// Bo'sh delta yuborishning ma'nosi yo'q — tarmoqni behuda
-	// band qilmaymiz.
-	if netmap.Empty() {
+	rules, version := s.policyProto()
+
+	// ⚠️ Policy o'zgarishi ALOHIDA tekshiriladi.
+	//
+	// `netmap.Empty()` faqat peerlar o'zgarganini biladi. Faqat
+	// unga qarasak, policy o'zgargan-u peerlar o'zgarmagan holatda
+	// node yangi qoidalarni HECH QACHON olmasdi — va buni sezish
+	// juda qiyin bo'lardi, chunki mesh o'zi ishlab turaveradi.
+	policyChanged := version != *policyVersion
+
+	if netmap.Empty() && !policyChanged {
 		*since = netmap.Version
 		return nil
 	}
 
-	if err := stream.Send(toProtoMap(netmap)); err != nil {
+	message := toProtoMap(netmap)
+	message.Policy = rules
+	message.PolicyVersion = version
+
+	if err := stream.Send(message); err != nil {
 		return err
 	}
 
 	*since = netmap.Version
+	*policyVersion = version
 	return nil
+}
+
+// policyProto joriy qoidalarni simda yuboriladigan ko'rinishda
+// qaytaradi.
+func (s *Service) policyProto() ([]*cc01v1.PolicyRule, uint64) {
+	if s.policies == nil {
+		return nil, 0
+	}
+	return s.policies.Proto()
 }
 
 func parseEndpoints(raw []string) ([]netip.AddrPort, error) {

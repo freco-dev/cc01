@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/freco-dev/cc01/control/ipam"
+	"github.com/freco-dev/cc01/control/policy"
 	"github.com/freco-dev/cc01/control/registry"
 	"github.com/freco-dev/cc01/control/server"
 	"github.com/freco-dev/cc01/control/stunserver"
@@ -47,7 +48,9 @@ func main() {
 		raftDir       = flag.String("raft-dir", os.Getenv("CC01_RAFT_DIR"), "jurnal va snapshot papkasi")
 		raftPeers     = flag.String("raft-peers", os.Getenv("CC01_RAFT_PEERS"), "boshlang'ich a'zolar: id=host:port,id=host:port")
 		raftBootstrap = flag.Bool("raft-bootstrap", false, "klasterni SHU node bilan boshlash (faqat bittasida!)")
-		verbose       = flag.Bool("v", false, "batafsil log")
+
+		policyFile = flag.String("policy", os.Getenv("CC01_POLICY_FILE"), "zero-trust ACL fayli (JSON); SIGHUP bilan qayta o'qiladi")
+		verbose    = flag.Bool("v", false, "batafsil log")
 	)
 	flag.Parse()
 
@@ -65,6 +68,7 @@ func main() {
 		tlsHosts: splitHosts(*tlsHosts), insecure: *noTLS,
 		raftID: *raftID, raftBind: *raftBind, raftAdvertise: *raftAdvertise,
 		raftDir: *raftDir, raftPeers: *raftPeers, raftBootstrap: *raftBootstrap,
+		policyFile: *policyFile,
 	}, logger); err != nil {
 		fmt.Fprintf(os.Stderr, "cc01-cp: %v\n", err)
 		os.Exit(1)
@@ -91,6 +95,8 @@ type runConfig struct {
 	raftDir       string
 	raftPeers     string
 	raftBootstrap bool
+
+	policyFile string
 }
 
 // splitHosts vergul bilan ajratilgan ro'yxatni bo'ladi.
@@ -149,12 +155,24 @@ func run(cfg runConfig, logger *slog.Logger) error {
 		return err
 	}
 
+	policies := policy.NewStore()
+	if cfg.policyFile != "" {
+		if err := reloadPolicy(policies, cfg.policyFile, logger); err != nil {
+			// Ishga tushishda yaroqsiz ACL — halokatli xato.
+			// Uni e'tiborsiz qoldirish "policy bor" degan
+			// yolg'on taassurot berardi.
+			return err
+		}
+		go watchPolicyReloads(policies, cfg.policyFile, logger)
+	}
+
 	service, err := server.New(server.Config{
 		Registry:     nodes,
 		Allocator:    allocator,
 		TenantPrefix: prefix,
 		AuthToken:    authToken,
 		Identities:   identities,
+		Policies:     policies,
 		Logger:       logger,
 	})
 	if err != nil {

@@ -303,7 +303,22 @@ type WatchNetworkMapResponse struct {
 	//
 	// Har bir javobda to'liq ro'yxat yuboriladi — u kichik va kamdan-kam
 	// o'zgaradi, ya'ni delta hisoblashning ma'nosi yo'q.
-	Relays        []*Relay `protobuf:"bytes,8,rep,name=relays,proto3" json:"relays,omitempty"`
+	Relays []*Relay `protobuf:"bytes,8,rep,name=relays,proto3" json:"relays,omitempty"`
+	// Policy — CP kompilyatsiya qilgan zero-trust qoidalar
+	// (ARCHITECTURE.md §3.1.5).
+	//
+	// Relaylar kabi HAR BIR javobda to'liq ro'yxat yuboriladi.
+	// Delta hisoblash mumkin edi, lekin u node tomonida qoidalarni
+	// qismlab qo'llashni talab qilardi — va yarim qo'llangan policy
+	// butun trafikni kesib qo'yishi mumkin. To'liq ro'yxat esa
+	// node'ga bir zarbada moslashish imkonini beradi.
+	Policy []*PolicyRule `protobuf:"bytes,9,rep,name=policy,proto3" json:"policy,omitempty"`
+	// PolicyVersion — qoidalar to'plamining versiyasi.
+	//
+	// Node buni eslab qoladi va o'zgarmagan bo'lsa qoidalarga
+	// TEGMAYDI: har bir NetworkMap yangilanishida policy map'ini
+	// qayta yozish hukm keshini behuda eskirtirardi.
+	PolicyVersion uint64 `protobuf:"varint,10,opt,name=policy_version,json=policyVersion,proto3" json:"policy_version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -394,6 +409,116 @@ func (x *WatchNetworkMapResponse) GetRelays() []*Relay {
 	return nil
 }
 
+func (x *WatchNetworkMapResponse) GetPolicy() []*PolicyRule {
+	if x != nil {
+		return x.Policy
+	}
+	return nil
+}
+
+func (x *WatchNetworkMapResponse) GetPolicyVersion() uint64 {
+	if x != nil {
+		return x.PolicyVersion
+	}
+	return 0
+}
+
+// PolicyRule — nodega yuboriladigan bitta qoida.
+//
+// CP dagi deklarativ ACL (tag, guruh, xizmat nomlari) shu yerga
+// KELGUNCHA hal qilinadi: node hech qachon tagni o'zi yechmaydi
+// (ARCHITECTURE.md §3.1.5). Bu yerda faqat aniq prefiks, port va
+// protokol qoladi.
+type PolicyRule struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Direction — 0 = kirish, 1 = chiqish.
+	Direction uint32 `protobuf:"varint,1,opt,name=direction,proto3" json:"direction,omitempty"`
+	// Prefix — manba (kirishda) yoki maqsad (chiqishda) prefiksi.
+	Prefix string `protobuf:"bytes,2,opt,name=prefix,proto3" json:"prefix,omitempty"`
+	// Port — 0 = istalgan.
+	Port uint32 `protobuf:"varint,3,opt,name=port,proto3" json:"port,omitempty"`
+	// Proto — IP protokol raqami; 0 = istalgan.
+	Proto uint32 `protobuf:"varint,4,opt,name=proto,proto3" json:"proto,omitempty"`
+	// Verdict — 0 = taqiq, 1 = ruxsat.
+	Verdict uint32 `protobuf:"varint,5,opt,name=verdict,proto3" json:"verdict,omitempty"`
+	// RuleId — CP dagi identifikator (audit uchun).
+	RuleId        uint32 `protobuf:"varint,6,opt,name=rule_id,json=ruleId,proto3" json:"rule_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PolicyRule) Reset() {
+	*x = PolicyRule{}
+	mi := &file_cc01_v1_control_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PolicyRule) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PolicyRule) ProtoMessage() {}
+
+func (x *PolicyRule) ProtoReflect() protoreflect.Message {
+	mi := &file_cc01_v1_control_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PolicyRule.ProtoReflect.Descriptor instead.
+func (*PolicyRule) Descriptor() ([]byte, []int) {
+	return file_cc01_v1_control_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *PolicyRule) GetDirection() uint32 {
+	if x != nil {
+		return x.Direction
+	}
+	return 0
+}
+
+func (x *PolicyRule) GetPrefix() string {
+	if x != nil {
+		return x.Prefix
+	}
+	return ""
+}
+
+func (x *PolicyRule) GetPort() uint32 {
+	if x != nil {
+		return x.Port
+	}
+	return 0
+}
+
+func (x *PolicyRule) GetProto() uint32 {
+	if x != nil {
+		return x.Proto
+	}
+	return 0
+}
+
+func (x *PolicyRule) GetVerdict() uint32 {
+	if x != nil {
+		return x.Verdict
+	}
+	return 0
+}
+
+func (x *PolicyRule) GetRuleId() uint32 {
+	if x != nil {
+		return x.RuleId
+	}
+	return 0
+}
+
 // Relay — P2P imkonsiz bo'lganda trafikni uzatuvchi tugun
 // (ARCHITECTURE.md §3.3.2).
 type Relay struct {
@@ -415,7 +540,7 @@ type Relay struct {
 
 func (x *Relay) Reset() {
 	*x = Relay{}
-	mi := &file_cc01_v1_control_proto_msgTypes[4]
+	mi := &file_cc01_v1_control_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -427,7 +552,7 @@ func (x *Relay) String() string {
 func (*Relay) ProtoMessage() {}
 
 func (x *Relay) ProtoReflect() protoreflect.Message {
-	mi := &file_cc01_v1_control_proto_msgTypes[4]
+	mi := &file_cc01_v1_control_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -440,7 +565,7 @@ func (x *Relay) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Relay.ProtoReflect.Descriptor instead.
 func (*Relay) Descriptor() ([]byte, []int) {
-	return file_cc01_v1_control_proto_rawDescGZIP(), []int{4}
+	return file_cc01_v1_control_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Relay) GetId() string {
@@ -498,7 +623,7 @@ type Node struct {
 
 func (x *Node) Reset() {
 	*x = Node{}
-	mi := &file_cc01_v1_control_proto_msgTypes[5]
+	mi := &file_cc01_v1_control_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -510,7 +635,7 @@ func (x *Node) String() string {
 func (*Node) ProtoMessage() {}
 
 func (x *Node) ProtoReflect() protoreflect.Message {
-	mi := &file_cc01_v1_control_proto_msgTypes[5]
+	mi := &file_cc01_v1_control_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -523,7 +648,7 @@ func (x *Node) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Node.ProtoReflect.Descriptor instead.
 func (*Node) Descriptor() ([]byte, []int) {
-	return file_cc01_v1_control_proto_rawDescGZIP(), []int{5}
+	return file_cc01_v1_control_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Node) GetNodeId() string {
@@ -601,7 +726,7 @@ type HeartbeatRequest struct {
 
 func (x *HeartbeatRequest) Reset() {
 	*x = HeartbeatRequest{}
-	mi := &file_cc01_v1_control_proto_msgTypes[6]
+	mi := &file_cc01_v1_control_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -613,7 +738,7 @@ func (x *HeartbeatRequest) String() string {
 func (*HeartbeatRequest) ProtoMessage() {}
 
 func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cc01_v1_control_proto_msgTypes[6]
+	mi := &file_cc01_v1_control_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -626,7 +751,7 @@ func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatRequest.ProtoReflect.Descriptor instead.
 func (*HeartbeatRequest) Descriptor() ([]byte, []int) {
-	return file_cc01_v1_control_proto_rawDescGZIP(), []int{6}
+	return file_cc01_v1_control_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *HeartbeatRequest) GetNodeId() string {
@@ -662,7 +787,7 @@ type HeartbeatResponse struct {
 
 func (x *HeartbeatResponse) Reset() {
 	*x = HeartbeatResponse{}
-	mi := &file_cc01_v1_control_proto_msgTypes[7]
+	mi := &file_cc01_v1_control_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -674,7 +799,7 @@ func (x *HeartbeatResponse) String() string {
 func (*HeartbeatResponse) ProtoMessage() {}
 
 func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cc01_v1_control_proto_msgTypes[7]
+	mi := &file_cc01_v1_control_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -687,7 +812,7 @@ func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatResponse.ProtoReflect.Descriptor instead.
 func (*HeartbeatResponse) Descriptor() ([]byte, []int) {
-	return file_cc01_v1_control_proto_rawDescGZIP(), []int{7}
+	return file_cc01_v1_control_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *HeartbeatResponse) GetLeaseExpiresAt() int64 {
@@ -732,7 +857,7 @@ const file_cc01_v1_control_proto_rawDesc = "" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x14\n" +
 	"\x05since\x18\x02 \x01(\x04R\x05since\x12\x1d\n" +
 	"\n" +
-	"auth_token\x18\x03 \x01(\tR\tauthToken\"\x8c\x02\n" +
+	"auth_token\x18\x03 \x01(\tR\tauthToken\"\xe0\x02\n" +
 	"\x17WatchNetworkMapResponse\x12\x16\n" +
 	"\x06tenant\x18\x01 \x01(\tR\x06tenant\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\x04R\aversion\x12!\n" +
@@ -741,7 +866,18 @@ const file_cc01_v1_control_proto_rawDesc = "" +
 	"\aremoved\x18\x05 \x03(\tR\aremoved\x12\x12\n" +
 	"\x04full\x18\x06 \x01(\bR\x04full\x12!\n" +
 	"\fgenerated_at\x18\a \x01(\x03R\vgeneratedAt\x12&\n" +
-	"\x06relays\x18\b \x03(\v2\x0e.cc01.v1.RelayR\x06relays\"\x86\x01\n" +
+	"\x06relays\x18\b \x03(\v2\x0e.cc01.v1.RelayR\x06relays\x12+\n" +
+	"\x06policy\x18\t \x03(\v2\x13.cc01.v1.PolicyRuleR\x06policy\x12%\n" +
+	"\x0epolicy_version\x18\n" +
+	" \x01(\x04R\rpolicyVersion\"\x9f\x01\n" +
+	"\n" +
+	"PolicyRule\x12\x1c\n" +
+	"\tdirection\x18\x01 \x01(\rR\tdirection\x12\x16\n" +
+	"\x06prefix\x18\x02 \x01(\tR\x06prefix\x12\x12\n" +
+	"\x04port\x18\x03 \x01(\rR\x04port\x12\x14\n" +
+	"\x05proto\x18\x04 \x01(\rR\x05proto\x12\x18\n" +
+	"\averdict\x18\x05 \x01(\rR\averdict\x12\x17\n" +
+	"\arule_id\x18\x06 \x01(\rR\x06ruleId\"\x86\x01\n" +
 	"\x05Relay\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
 	"\n" +
@@ -788,32 +924,34 @@ func file_cc01_v1_control_proto_rawDescGZIP() []byte {
 	return file_cc01_v1_control_proto_rawDescData
 }
 
-var file_cc01_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_cc01_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_cc01_v1_control_proto_goTypes = []any{
 	(*RegisterRequest)(nil),         // 0: cc01.v1.RegisterRequest
 	(*RegisterResponse)(nil),        // 1: cc01.v1.RegisterResponse
 	(*WatchNetworkMapRequest)(nil),  // 2: cc01.v1.WatchNetworkMapRequest
 	(*WatchNetworkMapResponse)(nil), // 3: cc01.v1.WatchNetworkMapResponse
-	(*Relay)(nil),                   // 4: cc01.v1.Relay
-	(*Node)(nil),                    // 5: cc01.v1.Node
-	(*HeartbeatRequest)(nil),        // 6: cc01.v1.HeartbeatRequest
-	(*HeartbeatResponse)(nil),       // 7: cc01.v1.HeartbeatResponse
+	(*PolicyRule)(nil),              // 4: cc01.v1.PolicyRule
+	(*Relay)(nil),                   // 5: cc01.v1.Relay
+	(*Node)(nil),                    // 6: cc01.v1.Node
+	(*HeartbeatRequest)(nil),        // 7: cc01.v1.HeartbeatRequest
+	(*HeartbeatResponse)(nil),       // 8: cc01.v1.HeartbeatResponse
 }
 var file_cc01_v1_control_proto_depIdxs = []int32{
-	5, // 0: cc01.v1.WatchNetworkMapResponse.self:type_name -> cc01.v1.Node
-	5, // 1: cc01.v1.WatchNetworkMapResponse.peers:type_name -> cc01.v1.Node
-	4, // 2: cc01.v1.WatchNetworkMapResponse.relays:type_name -> cc01.v1.Relay
-	0, // 3: cc01.v1.ControlService.Register:input_type -> cc01.v1.RegisterRequest
-	2, // 4: cc01.v1.ControlService.WatchNetworkMap:input_type -> cc01.v1.WatchNetworkMapRequest
-	6, // 5: cc01.v1.ControlService.Heartbeat:input_type -> cc01.v1.HeartbeatRequest
-	1, // 6: cc01.v1.ControlService.Register:output_type -> cc01.v1.RegisterResponse
-	3, // 7: cc01.v1.ControlService.WatchNetworkMap:output_type -> cc01.v1.WatchNetworkMapResponse
-	7, // 8: cc01.v1.ControlService.Heartbeat:output_type -> cc01.v1.HeartbeatResponse
-	6, // [6:9] is the sub-list for method output_type
-	3, // [3:6] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	6, // 0: cc01.v1.WatchNetworkMapResponse.self:type_name -> cc01.v1.Node
+	6, // 1: cc01.v1.WatchNetworkMapResponse.peers:type_name -> cc01.v1.Node
+	5, // 2: cc01.v1.WatchNetworkMapResponse.relays:type_name -> cc01.v1.Relay
+	4, // 3: cc01.v1.WatchNetworkMapResponse.policy:type_name -> cc01.v1.PolicyRule
+	0, // 4: cc01.v1.ControlService.Register:input_type -> cc01.v1.RegisterRequest
+	2, // 5: cc01.v1.ControlService.WatchNetworkMap:input_type -> cc01.v1.WatchNetworkMapRequest
+	7, // 6: cc01.v1.ControlService.Heartbeat:input_type -> cc01.v1.HeartbeatRequest
+	1, // 7: cc01.v1.ControlService.Register:output_type -> cc01.v1.RegisterResponse
+	3, // 8: cc01.v1.ControlService.WatchNetworkMap:output_type -> cc01.v1.WatchNetworkMapResponse
+	8, // 9: cc01.v1.ControlService.Heartbeat:output_type -> cc01.v1.HeartbeatResponse
+	7, // [7:10] is the sub-list for method output_type
+	4, // [4:7] is the sub-list for method input_type
+	4, // [4:4] is the sub-list for extension type_name
+	4, // [4:4] is the sub-list for extension extendee
+	0, // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_cc01_v1_control_proto_init() }
@@ -827,7 +965,7 @@ func file_cc01_v1_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cc01_v1_control_proto_rawDesc), len(file_cc01_v1_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   8,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
