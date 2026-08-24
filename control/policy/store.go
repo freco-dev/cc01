@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"net/netip"
 	"os"
 	"sync"
 
@@ -22,8 +23,15 @@ import (
 // aynan shunday va uni test qo'riqlaydi.
 type Store struct {
 	mu      sync.RWMutex
+	doc     Document
 	rules   []Rule
 	version uint64
+
+	// tagVersion — qoidalar qaysi registry holatidan
+	// hisoblangani. Tag'lar nodelar bilan o'zgaradi, ya'ni ACL
+	// o'zgarmasa ham qoidalar o'zgarishi mumkin.
+	tagVersion uint64
+	compiled   bool
 }
 
 func NewStore() *Store { return &Store{} }
@@ -95,21 +103,64 @@ func versionOf(rules []Rule) uint64 {
 	return version
 }
 
-// LoadFile ACL faylini o'qiydi va kompilyatsiya qiladi.
-func LoadFile(path string) ([]Rule, error) {
+// LoadFile ACL faylini o'qiydi.
+func LoadFile(path string) (Document, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("policy: faylni o'qish (%s): %w", path, err)
+		return Document{}, fmt.Errorf("policy: faylni o'qish (%s): %w", path, err)
 	}
 
 	var doc Document
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil, fmt.Errorf("policy: faylni o'qish (%s): %w", path, err)
+		return Document{}, fmt.Errorf("policy: faylni o'qish (%s): %w", path, err)
 	}
 
-	rules, err := Compile(doc)
-	if err != nil {
-		return nil, fmt.Errorf("policy: %s: %w", path, err)
+	// Hujjatni DARHOL tekshiramiz: yaroqsiz ACL ni saqlab qo'yib,
+	// keyin har kompilyatsiyada xato berish nosozlikni
+	// manbasidan uzoqlashtirardi.
+	if _, err := Compile(doc, nil); err != nil {
+		return Document{}, fmt.Errorf("policy: %s: %w", path, err)
 	}
-	return rules, nil
+
+	return doc, nil
+}
+
+// SetDocument ACL ni almashtiradi va qayta kompilyatsiya qiladi.
+func (s *Store) SetDocument(doc Document) {
+	s.mu.Lock()
+	s.doc = doc
+	s.mu.Unlock()
+}
+
+// Refresh tag holati o'zgarganda qoidalarni qayta hisoblaydi.
+//
+// `tagVersion` — registry versiyasi. O'zgarmagan bo'lsa qayta
+// kompilyatsiya qilinmaydi: u har bir NetworkMap uchun bajarilsa
+// CP ni behuda yuklardi.
+func (s *Store) Refresh(tags map[string][]netip.Prefix, tagVersion uint64) {
+	s.mu.Lock()
+	unchanged := s.compiled && s.tagVersion == tagVersion
+	doc := s.doc
+	s.mu.Unlock()
+
+	if unchanged {
+		return
+	}
+
+	rules, err := Compile(doc, tags)
+	if err != nil {
+		// Hujjat yuklashda tekshirilgan, ya'ni bu yerga xato
+		// kelishi kutilmagan holat. Eski qoidalarni saqlab
+		// qolamiz.
+		return
+	}
+
+	version := versionOf(rules)
+
+	s.mu.Lock()
+	s.rules = rules
+	s.version = version
+	s.tagVersion = tagVersion
+	s.compiled = true
+	s.mu.Unlock()
 }

@@ -299,7 +299,7 @@ func (s *Service) sendMap(
 		return status.Errorf(codes.Internal, "netmap: %v", err)
 	}
 
-	rules, version := s.policyProto()
+	rules, version := s.policyProto(netmap.Tenant)
 
 	// ⚠️ Policy o'zgarishi ALOHIDA tekshiriladi.
 	//
@@ -329,10 +329,19 @@ func (s *Service) sendMap(
 
 // policyProto joriy qoidalarni simda yuboriladigan ko'rinishda
 // qaytaradi.
-func (s *Service) policyProto() ([]*cc01v1.PolicyRule, uint64) {
+//
+// Avval tag holati yangilanadi: ACL da `tag:web` yozilgan bo'lsa, u
+// SHU PAYTDA o'sha tag'ga ega nodelarning manzillariga aylanadi.
+// Node qo'shilganda yoki ketganda qoidalar o'zi o'zgaradi.
+func (s *Service) policyProto(tenant string) ([]*cc01v1.PolicyRule, uint64) {
 	if s.policies == nil {
 		return nil, 0
 	}
+
+	// Registry versiyasi o'zgarmagan bo'lsa qayta kompilyatsiya
+	// qilinmaydi — bu tekshiruv Store ichida.
+	s.policies.Refresh(s.registry.TagIndex(tenant), s.registry.Version())
+
 	return s.policies.Proto()
 }
 

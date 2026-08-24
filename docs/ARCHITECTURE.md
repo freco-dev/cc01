@@ -127,6 +127,7 @@ Bu hujjat **maqsadli** arxitekturani tasvirlaydi. Repozitoriyda hozir mavjud kod
 | eBPF/XDP pipeline | `daemon/xdp` — blocklist, tezlik cheklovi, avtomatik blok, hodisalar, AF_XDP redirect | ✅ SYN cookie ❌ (mustaqil ishlamaydi) |
 | Zero-trust policy (eBPF) | `daemon/tcpolicy` — ingress+egress, hukm keshi, MSS clamp, DSCP | ✅ |
 | Policy boshqaruvi | `cc01 firewall` + CP dan tarqatish (`control/policy`) | ✅ AP dan boshqarish ⏳ |
+| Mikrosegmentatsiya (tag) | `tag:web` → node manzillari; registry versiyasiga bog'langan | ✅ lateral movement bloklanadi |
 | Public IPv6 / BGP / TasIX PoP | — | Butunlay yo'q |
 
 **Xulosa:** tokenli, egalik qilingan subdomain bilan HTTP tunnel uchidan uchiga ishlaydi — bu §3.3 (Edge), §3.4 (Account Plane) va §4.4 (Tunneling) ning ibtidoiy, lekin **butun** kesimi. Mesh va eBPF qatlamlari (§3.2, §5) hali boshlanmagan. Amaliy ketma-ketlik `DEV_SPEC.md` §8 (Roadmap) da.

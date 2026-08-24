@@ -351,3 +351,43 @@ func (r *Registry) tenantMembersLocked(tenant string) []string {
 	}
 	return slices.Sorted(maps.Keys(members))
 }
+
+// TagIndex tenant ichidagi tag → manzillar xaritasini qaytaradi.
+//
+// Policy kompilyatori uchun: ACL da `tag:web` yozilganda u shu
+// tag'ga ega nodelarning MANZILLARIGA aylanadi.
+//
+// Manzillar tag bilan birga o'zgaradi — node qo'shilganda,
+// ketganda yoki tag'i almashganda. Shuning uchun kompilyatsiya
+// registry versiyasiga bog'lanadi.
+func (r *Registry) TagIndex(tenant string) map[string][]netipPrefix {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	index := make(map[string][]netipPrefix)
+
+	for _, nodeID := range r.tenantMembersLocked(tenant) {
+		node, ok := r.nodes[nodeID]
+		if !ok {
+			continue
+		}
+		for _, tag := range node.Tags {
+			index[tag] = append(index[tag], node.Addresses...)
+		}
+	}
+
+	// Barqaror tartib: kompilyatsiya deterministik bo'lishi kerak,
+	// aks holda bir xil holat har safar boshqa versiya berardi va
+	// nodelar qoidalarni behuda qayta qo'llardi.
+	for tag := range index {
+		slices.SortFunc(index[tag], func(a, b netipPrefix) int {
+			if c := a.Addr().Compare(b.Addr()); c != 0 {
+				return c
+			}
+			return a.Bits() - b.Bits()
+		})
+		index[tag] = slices.Compact(index[tag])
+	}
+
+	return index
+}

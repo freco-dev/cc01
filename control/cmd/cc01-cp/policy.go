@@ -11,13 +11,13 @@ import (
 
 // reloadPolicy ACL faylini qayta o'qiydi va qo'llaydi.
 func reloadPolicy(store *policy.Store, path string, logger *slog.Logger) error {
-	rules, err := policy.LoadFile(path)
+	doc, err := policy.LoadFile(path)
 	if err != nil {
 		return err
 	}
 
-	version := store.Set(rules)
-	logger.Info("policy yuklandi", "file", path, "rules", len(rules), "version", version)
+	store.SetDocument(doc)
+	logger.Info("policy yuklandi", "file", path, "rules", len(doc.Rules))
 	return nil
 }
 

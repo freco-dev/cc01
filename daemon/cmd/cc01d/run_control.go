@@ -43,6 +43,9 @@ type controlConfig struct {
 	// stateDir — node sertifikati saqlanadigan papka.
 	stateDir string
 
+	// tags — mikrosegmentatsiya tag'lari.
+	tags []string
+
 	// firewall — overlay interfeysida eBPF policy filtrini yoqish.
 	firewall bool
 
@@ -95,6 +98,7 @@ func runWithControlPlane(cfg controlConfig, logger *slog.Logger) error {
 		Pins:            cfg.cpPins,
 		Insecure:        cfg.cpInsecure,
 		ClientCert:      clientCert,
+		Tags:            cfg.tags,
 		Firewall:        cfg.firewall,
 		FirewallEnforce: cfg.firewallEnforce,
 		Logger:          logger,

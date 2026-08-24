@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -59,6 +60,10 @@ type Config struct {
 
 	// ClientCert — nodening TLS klient sertifikati.
 	ClientCert *tls.Certificate
+
+	// Tags — mikrosegmentatsiya tag'lari. CP ularni ACL da
+	// `tag:<nom>` sifatida yechadi.
+	Tags []string
 
 	// Firewall — overlay interfeysida eBPF policy filtrini yoqish.
 	//
@@ -180,6 +185,7 @@ func (s *Session) build(ctx context.Context) (*active, error) {
 		Identity:     s.cfg.Identity,
 		Tenant:       s.cfg.Tenant,
 		Hostname:     s.cfg.Hostname,
+		Tags:         taggedNames(s.cfg.Tags),
 		Endpoints:    endpoints,
 		AuthToken:    s.cfg.AuthToken,
 		OnRelays:     relay.update,
@@ -511,4 +517,28 @@ func (h *policyHandle) Rules() ([]tcpolicy.RuleStatus, error) {
 		return nil, control.ErrNoPolicyFilter
 	}
 	return filter.Rules()
+}
+
+// taggedNames tag nomlariga `tag:` prefiksini qo'shadi.
+//
+// Operator `--tags web,prod` deb yozadi, ACL da esa `tag:web`
+// ko'rinadi. Prefiksni saqlashda qo'shamiz, shunda ACL va registry
+// bir xil kalitni ishlatadi va ular ajralib ketmaydi.
+func taggedNames(tags []string) []string {
+	if len(tags) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		if !strings.HasPrefix(tag, "tag:") {
+			tag = "tag:" + tag
+		}
+		out = append(out, tag)
+	}
+	return out
 }

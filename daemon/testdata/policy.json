@@ -1,13 +1,10 @@
 {
-  "groups": {
-    "mesh": ["fd00:cc01:c0de::/64"]
-  },
   "rules": [
-    { "action": "allow", "src": "mesh", "proto": "icmpv6",
-      "comment": "mesh ichida ping" },
-    { "action": "allow", "dst": "mesh", "proto": "icmpv6",
-      "comment": "chiqishga ham ruxsat" },
-    { "action": "deny", "src": "mesh", "proto": "tcp", "port": 22,
-      "comment": "SSH taqiqlangan" }
+    { "action": "allow", "src": "tag:web", "proto": "icmpv6",
+      "comment": "web guruhidan ping" },
+    { "action": "allow", "dst": "tag:web", "proto": "icmpv6",
+      "comment": "web guruhiga ping" },
+    { "action": "deny", "src": "tag:web", "proto": "tcp", "port": 22,
+      "comment": "SSH taqiqlangan — lateral movement" }
   ]
 }

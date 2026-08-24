@@ -91,13 +91,23 @@ type Rule struct {
 // ErrInvalidDocument — ACL yaroqsiz.
 var ErrInvalidDocument = errors.New("policy: ACL yaroqsiz")
 
+// TagPrefix — ACL da tag'ga murojaat qilish uchun.
+//
+// Guruh nomlaridan ajratilgan: guruh statik ro'yxat, tag esa
+// nodelarning JORIY holatidan kelib chiqadi va node qo'shilganda
+// o'zgaradi.
+const TagPrefix = "tag:"
+
 // Compile ACL ni qoidalar ro'yxatiga aylantiradi.
 //
-// Natija DETERMINISTIK tartibda qaytadi: bir xil hujjat har doim
-// bir xil ro'yxat va bir xil identifikatorlar beradi. Aks holda har
-// kompilyatsiyada versiya o'zgarib, nodelar qoidalarni behuda qayta
-// qo'llardi.
-func Compile(doc Document) ([]Rule, error) {
+// `tags` — tag → manzillar xaritasi (registry'dan). Bo'sh bo'lsa
+// ACL da tag ishlatib bo'lmaydi.
+//
+// Natija DETERMINISTIK tartibda qaytadi: bir xil hujjat va bir xil
+// tag holati har doim bir xil ro'yxat va bir xil identifikatorlar
+// beradi. Aks holda har kompilyatsiyada versiya o'zgarib, nodelar
+// qoidalarni behuda qayta qo'llardi.
+func Compile(doc Document, tags map[string][]netip.Prefix) ([]Rule, error) {
 	groups, err := resolveGroups(doc.Groups)
 	if err != nil {
 		return nil, err
@@ -121,7 +131,7 @@ func Compile(doc Document) ([]Rule, error) {
 			return nil, fmt.Errorf("%w: qoida %d: %v", ErrInvalidDocument, index+1, err)
 		}
 
-		prefixes, err := expand(target, groups)
+		prefixes, err := expand(target, groups, tags)
 		if err != nil {
 			return nil, fmt.Errorf("%w: qoida %d: %v", ErrInvalidDocument, index+1, err)
 		}
@@ -194,15 +204,31 @@ func resolveGroups(groups map[string][]string) (map[string][]netip.Prefix, error
 	return out, nil
 }
 
-// expand nom yoki CIDR ni prefikslarga aylantiradi.
-func expand(target string, groups map[string][]netip.Prefix) ([]netip.Prefix, error) {
+// expand tag, guruh nomi yoki CIDR ni prefikslarga aylantiradi.
+func expand(
+	target string,
+	groups map[string][]netip.Prefix,
+	tags map[string][]netip.Prefix,
+) ([]netip.Prefix, error) {
+	// Tag — nodelarning JORIY holatidan.
+	//
+	// Bo'sh natija xato EMAS: tag'ga ega node hali ulanmagan
+	// bo'lishi mumkin va bu normal holat. Xato qaytarsak, birinchi
+	// node ulanmaguncha butun ACL yaroqsiz bo'lardi.
+	if name, ok := strings.CutPrefix(target, TagPrefix); ok {
+		if name == "" {
+			return nil, errors.New("tag nomi bo'sh")
+		}
+		return tags[target], nil
+	}
+
 	if prefixes, ok := groups[target]; ok {
 		return prefixes, nil
 	}
 
 	prefix, err := parsePrefix(target)
 	if err != nil {
-		return nil, fmt.Errorf("%q — na guruh nomi, na CIDR: %v", target, err)
+		return nil, fmt.Errorf("%q — na tag, na guruh nomi, na CIDR: %v", target, err)
 	}
 	return []netip.Prefix{prefix}, nil
 }

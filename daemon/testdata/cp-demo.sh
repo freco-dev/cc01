@@ -56,6 +56,7 @@ for i in 1 2 3; do
     -key "$KEY" \
     -cp 172.32.88.5:8443 -cp-token "$TOKEN" -cp-pin "$PIN" \
     -state-dir /var/lib/cc01 -firewall \
+    -tags "$([ "$i" = 3 ] && echo db || echo web)" \
     -hostname "node-$i" -listen 51820 >/dev/null
 done
 
@@ -146,7 +147,10 @@ echo
 echo "═══ cc01 firewall (node-1) ═══"
 A2_ADDR=$($DOCKER exec cc01-n2 cc01 status | awk '/manzil/ {print $2}' | cut -d/ -f1)
 
-echo "── CP dan kelgan qoidalar ──"
+# node-1 va node-2 da `web` tag'i, node-3 da `db`. ACL faqat `web`
+# ga ruxsat beradi — ya'ni qoidalar node MANZILLARIDAN emas,
+# TAG'laridan kelib chiqadi.
+echo "── CP dan kelgan qoidalar (tag'lardan yechilgan) ──"
 $DOCKER exec cc01-n1 cc01 firewall list
 
 echo "── mesh ichidagi ICMPv6 (CP ruxsat bergan) ──"
@@ -155,14 +159,44 @@ $DOCKER exec cc01-n1 cc01 firewall test --src "$A2_ADDR" --proto icmpv6
 echo "── SSH (CP taqiqlagan) ──"
 $DOCKER exec cc01-n1 cc01 firewall test --src "$A2_ADDR" --proto tcp --port 22
 
-echo "── mesh tashqarisi (qoida yo'q) ──"
-$DOCKER exec cc01-n1 cc01 firewall test --src 2a0e:dead::1 --proto icmpv6
+A3_ADDR=$($DOCKER exec cc01-n3 cc01 status | awk '/manzil/ {print $2}' | cut -d/ -f1)
+echo "── node-3 (db tag'i, ACL da yo'q) ──"
+$DOCKER exec cc01-n1 cc01 firewall test --src "$A3_ADDR" --proto icmpv6
 
 # Lokal qoidalar CP diapazonidan (1000000+) PASTDA yashaydi va CP
 # yangilanishida o'chirilmaydi.
 echo "── lokal qoida CP qoidalari bilan yonma-yon ──"
 $DOCKER exec cc01-n1 cc01 firewall add --allow --src 2a0e:dead::1/128 --proto icmpv6 >/dev/null
 $DOCKER exec cc01-n1 cc01 firewall list
+
+# Faza 2 DoD: "lateral movement testi bloklanadi".
+#
+# node-1 da `web` tag'idan ICMPv6 ga ruxsat bor, `db` dan yo'q.
+# Enforce rejimida node-2 (web) o'tishi, node-3 (db) esa
+# TO'XTATILISHI kerak.
+echo
+echo "═══ mikrosegmentatsiya: enforce rejimi ═══"
+$DOCKER exec cc01-n1 cc01 firewall mode enforce
+
+echo "── node-2 (web tag'i) → node-1 ──"
+if $DOCKER exec cc01-n2 ping -6 -c 2 -W 3 "$A1" >/dev/null 2>&1; then
+  echo "  ✔ o'tdi — qoida ruxsat berdi"
+else
+  echo "  ✘ TO'XTATILDI — ruxsat berilgan trafik kesildi"
+fi
+
+echo "── node-3 (db tag'i) → node-1 ──"
+if $DOCKER exec cc01-n3 ping -6 -c 2 -W 3 "$A1" >/dev/null 2>&1; then
+  echo "  ✘ O'TDI — lateral movement bloklanmadi"
+else
+  echo "  ✔ to'xtatildi — deny-by-default ishladi"
+fi
+
+echo "── node-1 dagi hisoblagichlar ──"
+$DOCKER exec cc01-n1 cc01 firewall list --json 2>/dev/null \
+  | grep -E '"hits"|"ruleId"' | paste - - | head -6 || true
+
+$DOCKER exec cc01-n1 cc01 firewall mode dry-run >/dev/null
 
 echo
 echo "═══ marshrut jadvali 51820 (node-1) ═══"

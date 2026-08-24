@@ -9,7 +9,7 @@ import (
 func mustCompile(t *testing.T, doc Document) []Rule {
 	t.Helper()
 
-	rules, err := Compile(doc)
+	rules, err := Compile(doc, nil)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestCompile_RejectsBothDirections(t *testing.T) {
 		Rules: []DocumentRule{
 			{Action: "allow", Src: "2a0e:1::/64", Dst: "2a0e:2::/64"},
 		},
-	})
+	}, nil)
 	if !errors.Is(err, ErrInvalidDocument) {
 		t.Fatalf("ErrInvalidDocument kutilgan edi: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestCompile_RejectsMalformed(t *testing.T) {
 	}
 
 	for name, doc := range cases {
-		if _, err := Compile(doc); err == nil {
+		if _, err := Compile(doc, nil); err == nil {
 			t.Errorf("%s: xato kutilgan edi", name)
 		}
 	}
@@ -196,11 +196,118 @@ func TestCompile_DirectionFromTarget(t *testing.T) {
 
 // Bo'sh hujjat xato emas: policy hali yozilmagan holat normal.
 func TestCompile_EmptyDocument(t *testing.T) {
-	rules, err := Compile(Document{})
+	rules, err := Compile(Document{}, nil)
 	if err != nil {
 		t.Fatalf("bo'sh hujjat xato berdi: %v", err)
 	}
 	if len(rules) != 0 {
 		t.Errorf("%d ta qoida", len(rules))
+	}
+}
+
+// Tag nodelarning JORIY manzillariga aylanishi kerak.
+//
+// Bu mikrosegmentatsiyaning yuragi: operator "tag:web" deb
+// yozadi, manzillarni esa IPAM beradi va ular o'zgaradi.
+func TestCompile_ResolvesTags(t *testing.T) {
+	tags := map[string][]netip.Prefix{
+		"tag:web": {
+			netip.MustParsePrefix("2a0e:1::1/128"),
+			netip.MustParsePrefix("2a0e:1::2/128"),
+		},
+	}
+
+	rules, err := Compile(Document{
+		Rules: []DocumentRule{
+			{Action: "allow", Src: "tag:web", Proto: "tcp", Port: 443},
+		},
+	}, tags)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	if len(rules) != 2 {
+		t.Fatalf("%d ta qoida, 2 kutilgan edi", len(rules))
+	}
+	for _, rule := range rules {
+		if !tags["tag:web"][0].Contains(rule.Prefix.Addr()) &&
+			!tags["tag:web"][1].Contains(rule.Prefix.Addr()) {
+			t.Errorf("kutilmagan prefiks: %v", rule.Prefix)
+		}
+	}
+}
+
+// Bo'sh tag XATO EMAS: tag'ga ega node hali ulanmagan bo'lishi
+// mumkin.
+//
+// Xato qaytarsak, birinchi node ulanmaguncha butun ACL yaroqsiz
+// bo'lardi va bu tarmoqni butunlay kesib qo'yardi.
+func TestCompile_EmptyTagIsNotAnError(t *testing.T) {
+	rules, err := Compile(Document{
+		Rules: []DocumentRule{
+			{Action: "allow", Src: "tag:hali-yoq", Proto: "tcp"},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("bo'sh tag xato berdi: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Errorf("%d ta qoida, 0 kutilgan edi", len(rules))
+	}
+}
+
+// Tag nomi bo'sh bo'lsa xato: bu yozuv xatosi.
+func TestCompile_RejectsEmptyTagName(t *testing.T) {
+	if _, err := Compile(Document{
+		Rules: []DocumentRule{{Action: "allow", Src: "tag:"}},
+	}, nil); err == nil {
+		t.Fatal("bo'sh tag nomi qabul qilindi")
+	}
+}
+
+// Tag o'zgarganda qoidalar ham o'zgarishi kerak.
+func TestCompile_TagChangesAffectRules(t *testing.T) {
+	doc := Document{
+		Rules: []DocumentRule{{Action: "allow", Src: "tag:db", Proto: "tcp", Port: 5432}},
+	}
+
+	before, err := Compile(doc, map[string][]netip.Prefix{
+		"tag:db": {netip.MustParsePrefix("2a0e:1::1/128")},
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	after, err := Compile(doc, map[string][]netip.Prefix{
+		"tag:db": {
+			netip.MustParsePrefix("2a0e:1::1/128"),
+			netip.MustParsePrefix("2a0e:1::9/128"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	if len(before) != 1 || len(after) != 2 {
+		t.Fatalf("qoidalar soni: %d → %d, 1 → 2 kutilgan edi", len(before), len(after))
+	}
+}
+
+// Tag guruh nomidan ustun bo'lishi kerak: `tag:` prefiksi
+// niyatni oshkora bildiradi.
+func TestCompile_TagBeatsGroupName(t *testing.T) {
+	rules, err := Compile(Document{
+		Groups: map[string][]string{"tag:web": {"2a0e:9::/64"}},
+		Rules:  []DocumentRule{{Action: "allow", Src: "tag:web"}},
+	}, map[string][]netip.Prefix{
+		"tag:web": {netip.MustParsePrefix("2a0e:1::1/128")},
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	want := netip.MustParsePrefix("2a0e:1::1/128")
+	if len(rules) != 1 || rules[0].Prefix != want {
+		t.Errorf("tag guruhdan ustun bo'lmadi: %+v", rules)
 	}
 }

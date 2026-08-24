@@ -737,6 +737,40 @@ yechmaydi. Sabab xavfsizlik emas, **izchillik**: har bir node tagni
 mustaqil yechsa, ular turli paytda turli natijaga kelardi va policy
 tarmoq bo'ylab bir xil bo'lmasdi — buni tashxislash deyarli imkonsiz.
 
+#### Tag asosidagi mikrosegmentatsiya
+
+ACL da `tag:web` yozilganda u **shu paytda** o'sha tag'ga ega
+nodelarning manzillariga aylanadi. Manzillarni IPAM beradi va ular
+o'zgaradi — operator ularni bilishi shart emas.
+
+    cc01d -tags web,prod        node o'z tag'larini e'lon qiladi
+    { "src": "tag:web", ... }   ACL tag bilan murojaat qiladi
+
+Tag'lar `tag:` prefiksi bilan saqlanadi. Prefiks nodeda qo'shiladi,
+shunda ACL va registry **bir xil kalitni** ishlatadi va ular ajralib
+ketmaydi.
+
+⚠️ **Bo'sh tag xato EMAS.** Tag'ga ega node hali ulanmagan bo'lishi
+mumkin. Xato qaytarsak, birinchi node ulanmaguncha butun ACL yaroqsiz
+bo'lardi va bu tarmoqni butunlay kesib qo'yardi.
+
+**Qoidalar node a'zoligi bilan o'zgaradi.** Kompilyatsiya registry
+versiyasiga bog'langan: node qo'shilganda yoki ketganda qoidalar
+qayta hisoblanadi va yangi versiya nodelarga tarqaladi. Versiya
+o'zgarmasa qayta kompilyatsiya qilinmaydi — u har bir NetworkMap
+uchun bajarilsa CP ni behuda yuklardi.
+
+**O'lchangan** (`make cp-demo`) — Faza 2 ning "lateral movement
+bloklanadi" mezoni:
+
+| Manba | Tag | node-1 ga ICMPv6 |
+| --- | --- | --- |
+| node-2 | `web` | **o'tdi** — ACL ruxsat berdi |
+| node-3 | `db` | **to'xtatildi** — deny-by-default |
+
+ACL da uchta qoida bor edi, ular ikkita `web` nodega yechilib olti
+qoidaga aylandi.
+
 **Versiya mazmundan hisoblanadi**, hisoblagich emas. Bir xil hujjat
 qayta yuklansa versiya o'zgarmaydi va nodelar qoidalarga tegmaydi.
 Hisoblagich bo'lsa har `SIGHUP` da nodelar policy map'ini behuda

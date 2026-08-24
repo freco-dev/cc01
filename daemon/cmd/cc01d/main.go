@@ -48,6 +48,7 @@ func main() {
 		cpPin        = flag.String("cp-pin", os.Getenv("CC01_CP_PIN"), "CP sertifikatining SPKI pini (sha256/…); bir nechtasi vergul bilan")
 		cpInsecure   = flag.Bool("cp-insecure", false, "CP kanalini shifrlamaslik (FAQAT lokal sinov)")
 		stateDir     = flag.String("state-dir", stateDirDefault(), "node sertifikati saqlanadigan papka")
+		tags         = flag.String("tags", os.Getenv("CC01_TAGS"), "mikrosegmentatsiya tag'lari, vergul bilan (masalan: web,prod)")
 		firewall     = flag.Bool("firewall", false, "overlay interfeysida eBPF policy filtrini yoqish")
 		fwEnforce    = flag.Bool("firewall-enforce", false, "policy hukmini qo'llash (aks holda dry-run)")
 		advertise    = flag.String("advertise", "", "e'lon qilinadigan underlay manzil host:port")
@@ -119,6 +120,7 @@ func main() {
 			cpPins:          splitList(*cpPin),
 			cpInsecure:      *cpInsecure,
 			stateDir:        *stateDir,
+			tags:            splitList(*tags),
 			firewall:        *firewall,
 			firewallEnforce: *fwEnforce,
 		}, logger); err != nil {

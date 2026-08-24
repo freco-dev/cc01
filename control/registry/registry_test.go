@@ -577,3 +577,100 @@ func BenchmarkNetworkMap_Full(b *testing.B) {
 		}
 	}
 }
+
+// TagIndex tag → manzillar xaritasini berishi kerak: policy
+// kompilyatori aynan shunga tayanadi.
+func TestTagIndex_GroupsByTag(t *testing.T) {
+	reg := New(Options{})
+
+	for i, spec := range []struct {
+		host string
+		tags []string
+	}{
+		{"web-1", []string{"tag:web", "tag:prod"}},
+		{"web-2", []string{"tag:web"}},
+		{"db-1", []string{"tag:db"}},
+	} {
+		var key PublicKey
+		key[0] = byte(i + 1)
+
+		if _, err := reg.Register(Registration{
+			PublicKey: key,
+			Tenant:    "t1",
+			Hostname:  spec.host,
+			Tags:      spec.tags,
+			Addresses: []netipPrefix{netip.MustParsePrefix(
+				"2a0e:1::" + string(rune('1'+i)) + "/128")},
+		}); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+	}
+
+	index := reg.TagIndex("t1")
+
+	if got := len(index["tag:web"]); got != 2 {
+		t.Errorf("tag:web da %d ta manzil, 2 kutilgan edi", got)
+	}
+	if got := len(index["tag:db"]); got != 1 {
+		t.Errorf("tag:db da %d ta manzil, 1 kutilgan edi", got)
+	}
+	if got := len(index["tag:prod"]); got != 1 {
+		t.Errorf("tag:prod da %d ta manzil, 1 kutilgan edi", got)
+	}
+}
+
+// Tenant izolyatsiyasi tag'larga ham tegishli bo'lishi kerak.
+func TestTagIndex_IsolatesTenants(t *testing.T) {
+	reg := New(Options{})
+
+	for i, tenant := range []string{"t1", "t2"} {
+		var key PublicKey
+		key[0] = byte(i + 1)
+
+		if _, err := reg.Register(Registration{
+			PublicKey: key,
+			Tenant:    tenant,
+			Tags:      []string{"tag:web"},
+			Addresses: []netipPrefix{netip.MustParsePrefix(
+				"2a0e:1::" + string(rune('1'+i)) + "/128")},
+		}); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+	}
+
+	if got := len(reg.TagIndex("t1")["tag:web"]); got != 1 {
+		t.Errorf("t1 da %d ta manzil ko'rindi, 1 kutilgan edi", got)
+	}
+}
+
+// Tartib barqaror bo'lishi kerak: kompilyatsiya deterministik
+// bo'lmasa, bir xil holat har safar boshqa versiya berardi va
+// nodelar qoidalarni behuda qayta qo'llardi.
+func TestTagIndex_StableOrder(t *testing.T) {
+	reg := New(Options{})
+
+	for i := range 5 {
+		var key PublicKey
+		key[0] = byte(i + 1)
+
+		if _, err := reg.Register(Registration{
+			PublicKey: key,
+			Tenant:    "t1",
+			Tags:      []string{"tag:web"},
+			Addresses: []netipPrefix{netip.MustParsePrefix(
+				"2a0e:1::" + string(rune('1'+i)) + "/128")},
+		}); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+	}
+
+	first := reg.TagIndex("t1")["tag:web"]
+	for range 5 {
+		next := reg.TagIndex("t1")["tag:web"]
+		for i := range first {
+			if first[i] != next[i] {
+				t.Fatalf("tartib o'zgardi: %v va %v", first, next)
+			}
+		}
+	}
+}
