@@ -3,6 +3,7 @@
 package xdp
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -689,5 +690,220 @@ func TestXDP_SweepRemovesStaleBuckets(t *testing.T) {
 
 	if _, found, _ := filter.RateLimited(netip.MustParseAddr(remoteAddr)); found {
 		t.Error("chelak o'chirilmadi")
+	}
+}
+
+// XDP hodisasi tashlangan paket haqida xabar berishi kerak.
+func TestXDP_EmitsDropEvent(t *testing.T) {
+	requireKernel(t)
+	iface := testNetwork(t)
+
+	filter, err := Load(Config{
+		Interface: iface, Enforce: true,
+		EventSample: 1, Logger: quiet(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	if !pingWorks(t) {
+		t.Skip("boshlang'ich ping ishlamadi — muhit yaroqsiz")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	events, err := filter.Events(ctx)
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+
+	remote := netip.MustParseAddr(remoteAddr)
+	if err := filter.Block(remote, time.Hour); err != nil {
+		t.Fatalf("Block: %v", err)
+	}
+
+	go func() { _ = pingWorks(t) }()
+
+	select {
+	case event := <-events:
+		if event.Src != remote {
+			t.Errorf("manba %v, %v kutilgan edi", event.Src, remote)
+		}
+		if event.Stage != StageBlocklist {
+			t.Errorf("bosqich %v, blocklist kutilgan edi", event.Stage)
+		}
+		if event.DryRun {
+			t.Error("enforce rejimida dry_run belgilangan")
+		}
+		t.Logf("hodisa: %s", event)
+
+	case <-time.After(5 * time.Second):
+		stats, _ := filter.Stats()
+		t.Fatalf("hodisa kelmadi (tashlangan=%d yo'qolgan=%d)",
+			stats[StatDropBlocklist], stats[StatEventLost])
+	}
+}
+
+// Tezlik cheklovi hodisasi ham o'z bosqichini ko'rsatishi kerak.
+func TestXDP_EventReportsRateLimitStage(t *testing.T) {
+	requireKernel(t)
+	iface := testNetwork(t)
+
+	filter, err := Load(Config{
+		Interface: iface, Enforce: true,
+		RatePPS: 5, Burst: 5, EventSample: 1, Logger: quiet(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	if !pingWorks(t) {
+		t.Skip("boshlang'ich ping ishlamadi")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	events, err := filter.Events(ctx)
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+
+	go floodFrom(t, 200)
+
+	deadline := time.After(8 * time.Second)
+	for {
+		select {
+		case event := <-events:
+			if event.Stage == StageRateLimit {
+				t.Logf("hodisa: %s", event)
+				return
+			}
+		case <-deadline:
+			stats, _ := filter.Stats()
+			t.Fatalf("tezlik cheklovi hodisasi kelmadi (cheklovga tushgan=%d)",
+				stats[StatDropRateLimit])
+		}
+	}
+}
+
+// Amplifikatsiya filtri ATAYLAB o'chirilgan holatda kelishi kerak.
+//
+// Bu portlardan kelgan paket odatiy node uchun haqiqiy javob
+// bo'lishi mumkin — masalan DNS javobi. Standart holatda uni
+// tashlash node'ning nom yechishini butunlay buzardi.
+func TestXDP_AmplificationFilterIsOptIn(t *testing.T) {
+	requireKernel(t)
+	iface := testNetwork(t)
+
+	filter, err := Load(Config{Interface: iface, Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	sendUDPFrom(t, 53)
+	time.Sleep(300 * time.Millisecond)
+
+	stats, err := filter.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats[StatDropAmplify] != 0 {
+		t.Errorf("amplifikatsiya filtri standart holatda ishladi: %d ta paket",
+			stats[StatDropAmplify])
+	}
+}
+
+// Yoqilganda esa u haqiqatan tashlashi kerak.
+func TestXDP_DropsAmplificationSource(t *testing.T) {
+	requireKernel(t)
+	iface := testNetwork(t)
+
+	filter, err := Load(Config{
+		Interface: iface, Enforce: true,
+		DropAmplification: true, Logger: quiet(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	sendUDPFrom(t, 53)
+	time.Sleep(300 * time.Millisecond)
+
+	stats, err := filter.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats[StatDropAmplify] == 0 {
+		t.Fatalf("amplifikatsiya paketi tashlanmadi (jami=%d)", stats[StatTotal])
+	}
+	t.Logf("tashlangan: %d", stats[StatDropAmplify])
+}
+
+// Overlay porti sozlangan bo'lsa paket yo'naltirish yo'liga
+// tushishi kerak.
+//
+// AF_XDP soketi ulanmagan, ya'ni fallback XDP_PASS ishlaydi va
+// paket odatdagi yadro steki orqali ketadi — bu yo'lni yoqish
+// XAVFSIZ ekanini shu tekshiradi.
+func TestXDP_RedirectFallsBackToStack(t *testing.T) {
+	requireKernel(t)
+	iface := testNetwork(t)
+
+	const overlayPort = 51820
+
+	filter, err := Load(Config{
+		Interface: iface, Enforce: true,
+		OverlayPort: overlayPort, Logger: quiet(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	// Overlay portiga UDP yuboramiz.
+	sendUDPTo(t, overlayPort)
+	time.Sleep(300 * time.Millisecond)
+
+	stats, err := filter.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats[StatRedirect] == 0 {
+		t.Fatalf("overlay porti yo'naltirish yo'liga tushmadi (jami=%d)",
+			stats[StatTotal])
+	}
+	t.Logf("yo'naltirilgan: %d (AF_XDP yo'q — stackka o'tdi)", stats[StatRedirect])
+
+	// Ping hali ham ishlashi kerak: yo'naltirish boshqa trafikka
+	// tegmasligi kerak.
+	if !pingWorks(t) {
+		t.Error("yo'naltirish yoqilgach oddiy trafik buzildi")
+	}
+}
+
+// attachPeerXDP netns tomonidagi uchga ham XDP dasturi biriktiradi.
+//
+// ⚠️ Bu XDP_TX uchun SHART. veth drayveri paketni qarama-qarshi
+// uchga faqat o'sha uchda NATIVE XDP dasturi bo'lsa uzatadi
+// (`veth_xdp_xmit` qabul qiluvchining `_xdp_prog` ini tekshiradi).
+// Bo'lmasa paket jimgina tashlanadi — biz aynan shu holatga tushib,
+// SYN-ACK klientga yetib bormaganini ko'rgan edik.
+//
+// Haqiqiy NIC'da bunday cheklov yo'q; bu faqat sinov muhitining
+// xususiyati.
+func attachPeerXDP(t *testing.T) {
+	t.Helper()
+
+	out, err := exec.Command("ip", "netns", "exec", testNS,
+		"ip", "link", "set", "dev", testPeer,
+		"xdp", "obj", "/src/daemon/xdp/xdp_filter.o", "sec", "xdp").CombinedOutput()
+	if err != nil {
+		t.Skipf("peer'ga XDP biriktirilmadi: %v (%s)", err, out)
 	}
 }

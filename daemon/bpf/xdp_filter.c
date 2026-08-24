@@ -22,6 +22,7 @@
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
 #include <linux/ipv6.h>
+#include <linux/in.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
@@ -78,6 +79,27 @@ struct {
     __type(value, struct cc01_rl_value);
     __uint(max_entries, 65536);
 } cc01_ratelimit SEC(".maps");
+
+/* Hodisalar halqasi. */
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 256 * 1024);
+} cc01_xdp_events SEC(".maps");
+
+/* AF_XDP soketlari: cc01 datapath'ini userspace'ga zero-copy
+ * yetkazish uchun (DEV_SPEC §4.3, Stage 4).
+ *
+ * Map BO'SH bo'lsa `bpf_redirect_map` fallback qiymatini qaytaradi
+ * va biz XDP_PASS beramiz — ya'ni paket odatdagi yadro steki orqali
+ * cc01d ning UDP soketiga boradi. Shu sababdan bu yo'lni yoqish
+ * xavfsiz: AF_XDP soketi ulanmagan bo'lsa hech narsa o'zgarmaydi.
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_XSKMAP);
+    __type(key, __u32);
+    __type(value, __u32);
+    __uint(max_entries, 64);
+} cc01_xsks SEC(".maps");
 
 static __always_inline void stat_inc(__u32 index)
 {
@@ -189,6 +211,58 @@ static __always_inline int rate_limit_ok(const struct in6_addr *src,
     return allowed;
 }
 
+/* emit_xdp_event tashlangan paket haqida hodisa yuboradi.
+ *
+ * Namuna olish tc dagidek: hujum paytida har bir tashlash uchun
+ * hodisa yuborish kuzatuv vositasini xizmatni o'chirish vositasiga
+ * aylantirardi.
+ */
+static __always_inline void emit_xdp_event(const struct in6_addr *src,
+                                           __u8 stage, __u8 dry_run,
+                                           const struct cc01_config *cfg,
+                                           __u32 drop_counter)
+{
+    __u32 sample = cfg->event_sample;
+    if (sample == 0)
+        return;
+
+    if (sample > 1) {
+        __u64 *counter = bpf_map_lookup_elem(&cc01_stats, &drop_counter);
+        if (counter && (*counter % sample) != 0)
+            return;
+    }
+
+    struct cc01_xdp_event *event =
+        bpf_ringbuf_reserve(&cc01_xdp_events, sizeof(*event), 0);
+    if (!event) {
+        stat_inc(CC01_STAT_EVENT_LOST);
+        return;
+    }
+
+    event->timestamp_ns = bpf_ktime_get_ns();
+    __builtin_memcpy(event->src, src, sizeof(event->src));
+    event->stage = stage;
+    event->dry_run = dry_run;
+    __builtin_memset(event->_pad, 0, sizeof(event->_pad));
+
+    bpf_ringbuf_submit(event, 0);
+}
+
+/* is_amplification_port — kuchaytirilgan hujumlarda ishlatiladigan
+ * manba portlari (DEV_SPEC §4.3).
+ *
+ * Bu portlardan kelgan paket soxta manzil bilan yuborilgan so'rovga
+ * JAVOB bo'lishi mumkin: hujumchi bizning manzilimizni ko'rsatib
+ * so'ragan va javob bizga kelyapti.
+ */
+static __always_inline int is_amplification_port(__u16 port)
+{
+    return port == 53      /* DNS */
+        || port == 123     /* NTP */
+        || port == 1900    /* SSDP */
+        || port == 11211;  /* memcached */
+}
+
 SEC("xdp")
 int cc01_xdp_filter(struct xdp_md *ctx)
 {
@@ -233,6 +307,8 @@ int cc01_xdp_filter(struct xdp_md *ctx)
         return XDP_PASS;
     }
 
+    __u8 dry_run = (cfg->flags & CC01_F_ENFORCE) ? 0 : 1;
+
     /* ── Bosqich 1: blocklist ─────────────────────────────── */
     struct cc01_block *blocked = bpf_map_lookup_elem(&cc01_blocklist, &ip6->saddr);
     if (blocked) {
@@ -244,9 +320,11 @@ int cc01_xdp_filter(struct xdp_md *ctx)
              */
             __sync_fetch_and_add(&blocked->hits, 1);
             stat_inc(CC01_STAT_DROP_BLOCKLIST);
+            emit_xdp_event(&ip6->saddr, CC01_STAGE_BLOCKLIST, dry_run, cfg,
+                           CC01_STAT_DROP_BLOCKLIST);
 
             /* Dry-run: hisoblaymiz, lekin tashlamaymiz. */
-            if (!(cfg->flags & CC01_F_ENFORCE)) {
+            if (dry_run) {
                 stat_inc(CC01_STAT_PASS);
                 return XDP_PASS;
             }
@@ -257,13 +335,54 @@ int cc01_xdp_filter(struct xdp_md *ctx)
     /* ── Bosqich 2: tezlik cheklovi ───────────────────────── */
     if (!rate_limit_ok(&ip6->saddr, cfg, bpf_ktime_get_ns())) {
         stat_inc(CC01_STAT_DROP_RATELIMIT);
+        emit_xdp_event(&ip6->saddr, CC01_STAGE_RATELIMIT, dry_run, cfg,
+                       CC01_STAT_DROP_RATELIMIT);
 
         /* Dry-run: hisoblaymiz, lekin tashlamaymiz. */
-        if (!(cfg->flags & CC01_F_ENFORCE)) {
+        if (dry_run) {
             stat_inc(CC01_STAT_PASS);
             return XDP_PASS;
         }
         return XDP_DROP;
+    }
+
+    /* ── Bosqich 3: UDP ko'rish ───────────────────────────── */
+    if (ip6->nexthdr == IPPROTO_UDP) {
+        struct udphdr { __u16 source, dest, len, check; } *udp = (void *)(ip6 + 1);
+        if ((void *)(udp + 1) > end) {
+            stat_inc(CC01_STAT_DROP_MALFORMED);
+            return XDP_DROP;
+        }
+
+        __u16 sport = bpf_ntohs(udp->source);
+        __u16 dport = bpf_ntohs(udp->dest);
+
+        /* Kuchaytirilgan hujum: bu portlardan kelgan paket soxta
+         * manzil bilan yuborilgan so'rovga javob bo'lishi mumkin.
+         */
+        if ((cfg->flags & CC01_F_DROP_AMPLIFY) && is_amplification_port(sport)) {
+            stat_inc(CC01_STAT_DROP_AMPLIFY);
+            emit_xdp_event(&ip6->saddr, CC01_STAGE_AMPLIFY, dry_run, cfg,
+                           CC01_STAT_DROP_AMPLIFY);
+
+            if (dry_run) {
+                stat_inc(CC01_STAT_PASS);
+                return XDP_PASS;
+            }
+            return XDP_DROP;
+        }
+
+        /* ── Bosqich 4: cc01 datapath'i ───────────────────── */
+        if (cfg->overlay_port != 0 && dport == cfg->overlay_port) {
+            stat_inc(CC01_STAT_REDIRECT);
+
+            /* AF_XDP soketi ulanmagan bo'lsa fallback XDP_PASS:
+             * paket odatdagi yadro steki orqali cc01d ning UDP
+             * soketiga boradi. Shu sababdan bu yo'lni yoqish
+             * xavfsiz.
+             */
+            return bpf_redirect_map(&cc01_xsks, ctx->rx_queue_index, XDP_PASS);
+        }
     }
 
     stat_inc(CC01_STAT_PASS);

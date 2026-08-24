@@ -606,7 +606,10 @@ shu asos ustiga qo'shiladi.
 | Rate limit (token bucket, manba /64) | ✅ auto-blocklist bilan |
 | Conntrack (hukm keshi) | ✅ avlod raqami bilan |
 | Policy (zero-trust ACL) | ✅ `daemon/tcpolicy` — `tc_ingress`, deny-by-default |
-| Ring buffer hodisalari | ✅ policy uchun; XDP ⏳ |
+| Ring buffer hodisalari | ✅ ikkala dastur uchun |
+| Amplifikatsiya portlari | ✅ opt-in |
+| AF_XDP yo'naltirish | ✅ map + redirect; AF_XDP soketi ⏳ |
+| SYN cookie | ❌ **mustaqil ishlamaydi** — quyiga qarang |
 | `tc_ingress` | ✅ policy |
 | `tc_egress` | ✅ policy + MSS clamp + DSCP |
 
@@ -733,6 +736,53 @@ aniqroqdan umumiyroqqa: `(id, port, proto)` → `(id, 0, proto)` →
 | Dry-run | hisoblaydi, tashlamaydi |
 | L2 interfeysga biriktirish | rad etiladi |
 | Hodisa | manba, maqsad, port, protokol, qoida ID va sabab |
+
+#### SYN cookie — nima uchun qurilmadi
+
+§4.3 dagi psevdokod `xdp_syn_cookie_reply` ni ko'rsatadi. U **qurildi
+va sinaldi**, keyin **olib tashlandi**. Nima aniqlangani:
+
+| Bosqich | Natija |
+| --- | --- |
+| Verifier | qabul qildi (paketni 60 baytga kengaytirgandan keyin) |
+| SYN-ACK yasash | ishladi, `bpf_tcp_raw_gen_syncookie_ipv6` bilan |
+| Klient qabul qildimi | **ha** — checksum xatosi yo'q, RST yo'q, ACK yubordi |
+| Qo'l siqish tugadimi | **yo'q** — yadro ACK ga RST javob berdi |
+
+Sabab yadroda. `cookie_v6_check` ishlashdan oldin
+`tcp_synq_no_recent_overflow(sk)` tekshiruvidan o'tadi: yadro
+cookie'ni faqat **o'zi** cookie rejimiga o'tgan bo'lsa qabul qiladi.
+Bizning SYN yadroga umuman yetib bormagani uchun o'sha bayroq hech
+qachon qo'yilmaydi. Natijada `SyncookiesRecv` va `SyncookiesFailed`
+hisoblagichlarining **ikkalasi ham nol** bo'lib qoladi — ya'ni
+tekshiruv umuman boshlanmaydi.
+
+Yadroning o'z selftest'i (`xdp_synproxy`) ham buni mustaqil
+ishlatmaydi: u netfilter SYNPROXY bilan juftlanadi va qo'l siqishni
+o'sha tugatadi.
+
+⚠️ **Ishlamaydigan himoyani yoqib qo'yish himoyasizlikdan yomonroq**:
+operator o'zini himoyalangan deb hisoblardi, TCP esa butunlay ishlamay
+qolardi. Shuning uchun kod saqlanmadi. Uni qaytarish uchun netfilter
+SYNPROXY integratsiyasi kerak — bu alohida ish.
+
+#### XDP ning qolgan bosqichlari
+
+**Amplifikatsiya portlari** (53/123/1900/11211) — ataylab
+**o'chirilgan** holatda keladi. Bu portlardan kelgan paket odatiy node
+uchun haqiqiy javob bo'lishi mumkin (masalan DNS javobi) va uni
+tashlash node'ning nom yechishini butunlay buzardi. Bayroq faqat
+edge/PoP mashinalari uchun.
+
+**AF_XDP yo'naltirish** — `XSKMAP` va `bpf_redirect_map` qurildi.
+Map bo'sh bo'lsa fallback `XDP_PASS` ishlaydi va paket odatdagi yadro
+steki orqali cc01d ning UDP soketiga boradi. Shu sababdan bu yo'lni
+yoqish **xavfsiz**: AF_XDP soketi ulanmagan bo'lsa hech narsa
+o'zgarmaydi. Userspace tomonidagi AF_XDP soketi — keyingi ish.
+
+**XDP hodisalari** — tc dagidan alohida tur: XDP boshqa sabablarni
+ko'radi (blocklist, tezlik cheklovi, amplifikatsiya) va ularda qoida
+ID yoki identity yo'q.
 
 #### Chiqish yo'li (`tc_egress`)
 

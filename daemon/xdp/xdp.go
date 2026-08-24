@@ -52,6 +52,9 @@ const (
 	StatDropRateLimit
 	StatAutoBlocked
 	StatRateLimitMapFull
+	StatDropAmplify
+	StatRedirect
+	StatEventLost
 	statMax
 )
 
@@ -65,11 +68,26 @@ var statNames = [statMax]string{
 	StatDropRateLimit:    "tezlik chegarasidan oshgan",
 	StatAutoBlocked:      "avtomatik bloklangan",
 	StatRateLimitMapFull: "chelaklar map'i to'lgan",
+	StatDropAmplify:      "amplifikatsiya portidan",
+	StatRedirect:         "AF_XDP ga yo'naltirilgan",
+	StatEventLost:        "yo'qolgan hodisalar",
 }
 
 // FlagEnforce — hukmni qo'llash. O'chirilgan bo'lsa (dry-run) hamma
 // paket o'tkaziladi, lekin hisoblagichlar to'ldiriladi.
 const FlagEnforce uint32 = 1 << 0
+
+// FlagDropAmplify — DNS/NTP/SSDP/memcached MANBA portlaridan kelgan
+// UDP paketlarini tashlash.
+//
+// ⚠️ Standart holatda O'CHIRILGAN. Bu portlardan kelgan paket odatiy
+// node uchun HAQIQIY javob bo'lishi mumkin — masalan DNS javobi.
+// Uni tashlash node'ning nom yechishini butunlay buzardi.
+//
+// Bayroq faqat edge/PoP mashinalari uchun: ular hech qachon DNS
+// so'ramaydi va bu portlardan kelgan har qanday paket soxta manzil
+// bilan kuchaytirilgan hujum belgisidir.
+const FlagDropAmplify uint32 = 1 << 1
 
 // Mode — XDP qaysi rejimda biriktirilgan.
 type Mode string
@@ -119,8 +137,32 @@ type Config struct {
 	// AutoBlockFor — avtomatik blok qancha davom etadi.
 	AutoBlockFor time.Duration
 
+	// DropAmplification — amplifikatsiya manba portlaridan kelgan
+	// UDP paketlarini tashlash. FlagDropAmplify izohiga qarang.
+	DropAmplification bool
+
+	// EventSample — har nechta tashlashdan bittasi hodisa
+	// sifatida yuboriladi. 0 = o'chirilgan.
+	//
+	// Bo'sh qoldirilsa DefaultEventSample.
+	EventSample uint32
+
+	// OverlayPort — cc01 datapath'ining UDP porti. Shu portga
+	// kelgan paketlar AF_XDP soketiga yo'naltiriladi.
+	//
+	// AF_XDP soketi ulanmagan bo'lsa paket odatdagi yadro steki
+	// orqali ketadi — ya'ni buni yoqish xavfsiz.
+	OverlayPort uint16
+
 	Logger *slog.Logger
 }
+
+// DefaultEventSample — standart namuna olish qadami.
+//
+// Hujum paytida har bir tashlash uchun hodisa yuborish ring
+// bufferni to'ldirib, kuzatuv vositasini xizmatni o'chirish
+// vositasiga aylantirardi.
+const DefaultEventSample uint32 = 16
 
 // Load dasturni yuklaydi va interfeysga biriktiradi.
 //
@@ -248,9 +290,18 @@ func (f *Filter) Configure(cfg Config) error {
 	// Burst berilmagan bo'lsa bir soniyalik zaxira: qisqa
 	// portlashlar cheklovga tushmasin, aks holda oddiy TCP oynasi
 	// ham kesilardi.
+	if cfg.DropAmplification {
+		flags |= FlagDropAmplify
+	}
+
 	burst := cfg.Burst
 	if burst == 0 {
 		burst = cfg.RatePPS
+	}
+
+	sample := cfg.EventSample
+	if sample == 0 {
+		sample = DefaultEventSample
 	}
 
 	value := configValue{
@@ -259,6 +310,8 @@ func (f *Filter) Configure(cfg Config) error {
 		Burst:          burst,
 		AutoBlockAfter: cfg.AutoBlockAfter,
 		AutoBlockNS:    uint64(cfg.AutoBlockFor.Nanoseconds()),
+		EventSample:    sample,
+		OverlayPort:    cfg.OverlayPort,
 	}
 
 	if err := configMap.Put(uint32(0), value); err != nil {
@@ -409,6 +462,9 @@ type configValue struct {
 	Burst          uint32
 	AutoBlockAfter uint32
 	AutoBlockNS    uint64
+	EventSample    uint32
+	OverlayPort    uint16
+	_              uint16
 }
 
 type blockValue struct {

@@ -23,7 +23,8 @@ func TestLayout_MatchesKernelStructs(t *testing.T) {
 		got  uintptr
 		want uintptr
 	}{
-		{"cc01_config", unsafe.Sizeof(configValue{}), 24},
+		{"cc01_config", unsafe.Sizeof(configValue{}), 32},
+		{"cc01_xdp_event", eventSize, 32},
 		{"cc01_block", unsafe.Sizeof(blockValue{}), 16},
 		{"cc01_rl_value", unsafe.Sizeof(rateLimitValue{}), 32},
 	}
@@ -55,14 +56,17 @@ func TestLayout_FieldOffsets(t *testing.T) {
 // ishonchsiz bo'lib qoladi — buni sezish qiyin.
 func TestLayout_StatIndexes(t *testing.T) {
 	expected := map[int]string{
-		0: "CC01_STAT_TOTAL",
-		1: "CC01_STAT_PASS",
-		2: "CC01_STAT_DROP_BLOCKLIST",
-		3: "CC01_STAT_DROP_MALFORMED",
-		4: "CC01_STAT_NOT_IPV6",
-		5: "CC01_STAT_DROP_RATELIMIT",
-		6: "CC01_STAT_AUTO_BLOCKED",
-		7: "CC01_STAT_RL_MAP_FULL",
+		0:  "CC01_STAT_TOTAL",
+		1:  "CC01_STAT_PASS",
+		2:  "CC01_STAT_DROP_BLOCKLIST",
+		3:  "CC01_STAT_DROP_MALFORMED",
+		4:  "CC01_STAT_NOT_IPV6",
+		5:  "CC01_STAT_DROP_RATELIMIT",
+		6:  "CC01_STAT_AUTO_BLOCKED",
+		7:  "CC01_STAT_RL_MAP_FULL",
+		8:  "CC01_STAT_DROP_AMPLIFY",
+		9:  "CC01_STAT_REDIRECT",
+		10: "CC01_STAT_EVENT_LOST",
 	}
 
 	actual := map[int]string{
@@ -74,6 +78,9 @@ func TestLayout_StatIndexes(t *testing.T) {
 		StatDropRateLimit:    "CC01_STAT_DROP_RATELIMIT",
 		StatAutoBlocked:      "CC01_STAT_AUTO_BLOCKED",
 		StatRateLimitMapFull: "CC01_STAT_RL_MAP_FULL",
+		StatDropAmplify:      "CC01_STAT_DROP_AMPLIFY",
+		StatRedirect:         "CC01_STAT_REDIRECT",
+		StatEventLost:        "CC01_STAT_EVENT_LOST",
 	}
 
 	for index, name := range expected {
@@ -100,5 +107,27 @@ func TestStats_AllCountersNamed(t *testing.T) {
 
 	if name := stats.Name(statMax); name != "noma'lum" {
 		t.Errorf("chegaradan tashqari indeks %q qaytardi", name)
+	}
+}
+
+// Bosqich qiymatlari C dagi CC01_STAGE_* bilan mos kelishi kerak.
+func TestStage_MatchesKernelValues(t *testing.T) {
+	cases := map[Stage]uint8{
+		StageBlocklist: 1,
+		StageRateLimit: 2,
+		StageAmplify:   3,
+	}
+
+	for stage, want := range cases {
+		if uint8(stage) != want {
+			t.Errorf("%v = %d, C'da %d", stage, stage, want)
+		}
+		if stage.String() == "noma'lum" {
+			t.Errorf("bosqich %d nomsiz", stage)
+		}
+	}
+
+	if Stage(99).String() != "noma'lum" {
+		t.Error("noma'lum bosqich uchun nom qaytdi")
 	}
 }

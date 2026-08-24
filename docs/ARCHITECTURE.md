@@ -124,7 +124,7 @@ Bu hujjat **maqsadli** arxitekturani tasvirlaydi. Repozitoriyda hozir mavjud kod
 | Mesh VPN — hole punching (cone NAT) | `daemon/engine` — disco pong AYNAN ping kelgan yo'l bilan qaytadi | ✅ `make punch-demo` |
 | Mesh VPN — hole punching (symmetric NAT) | `daemon/punch` — birthday paradoks, peerga xos soket | ✅ symmetric↔cone; symmetric↔symmetric imkonsiz |
 | Mesh VPN — to'liq ICE nomzod to'plami | — | Hali yo'q (`host`/`srflx` bor, `prflx` yo'q) |
-| eBPF/XDP pipeline | `daemon/xdp` — blocklist, tezlik cheklovi, avtomatik blok | ✅ |
+| eBPF/XDP pipeline | `daemon/xdp` — blocklist, tezlik cheklovi, avtomatik blok, hodisalar, AF_XDP redirect | ✅ SYN cookie ❌ (mustaqil ishlamaydi) |
 | Zero-trust policy (eBPF) | `daemon/tcpolicy` — ingress+egress, hukm keshi, MSS clamp, DSCP | ✅ |
 | Public IPv6 / BGP / TasIX PoP | — | Butunlay yo'q |
 

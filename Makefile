@@ -152,7 +152,7 @@ bpf-verify: check-docker ## Dasturni haqiqiy yadro verifier'iga yuklab ko'radi
 	@$(DOCKER) run --rm --privileged -v "$(CURDIR)":/src -w /src/daemon \
 	  -e GOWORK=off -e GOCACHE=/tmp/gocache -e GOMODCACHE=/tmp/gomod \
 	  golang:1.25 sh -c 'apt-get update -qq >/dev/null 2>&1 && \
-	    apt-get install -y -qq iproute2 iputils-ping >/dev/null 2>&1 && \
+	    apt-get install -y -qq iproute2 iputils-ping netcat-openbsd net-tools >/dev/null 2>&1 && \
 	    go test -count=1 -run TestXDP -v ./xdp/... ./tcpolicy/...' 2>&1 \
 	  | tee /tmp/cc01-bpf-verify.log || true
 	@if grep -qE '^(--- FAIL|FAIL|# )' /tmp/cc01-bpf-verify.log; then \

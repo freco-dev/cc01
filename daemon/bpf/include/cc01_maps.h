@@ -26,6 +26,9 @@ enum cc01_stat {
     CC01_STAT_DROP_RATELIMIT, /* tezlik chegarasidan oshgan */
     CC01_STAT_AUTO_BLOCKED,   /* avtomatik blocklist'ga qo'shilgan */
     CC01_STAT_RL_MAP_FULL,    /* chelaklar map'i to'lgan — cheklov ishlamadi */
+    CC01_STAT_DROP_AMPLIFY,   /* amplifikatsiya manba portidan kelgan */
+    CC01_STAT_REDIRECT,       /* AF_XDP soketiga yo'naltirilgan */
+    CC01_STAT_EVENT_LOST,     /* ring buffer to'lgan */
     CC01_STAT__MAX,
 };
 
@@ -74,6 +77,18 @@ struct cc01_config {
 
     /* auto_block_ns — avtomatik blok qancha davom etadi. */
     __u64 auto_block_ns;
+
+    /* event_sample — har nechta tashlashdan bittasi hodisa
+     * sifatida yuboriladi. 0 = o'chirilgan.
+     */
+    __u32 event_sample;
+
+    /* overlay_port — cc01 datapath'ining UDP porti. Shu portga
+     * kelgan paketlar AF_XDP soketiga yo'naltiriladi. 0 =
+     * yo'naltirilmaydi.
+     */
+    __u16 overlay_port;
+    __u16 _pad3;
 };
 
 /* tc policy dasturining sozlamasi. */
@@ -129,6 +144,64 @@ struct cc01_policy_cfg {
  * kesib qo'yishi mumkin.
  */
 #define CC01_F_ENFORCE (1u << 0)
+
+/* F_DROP_AMPLIFY — DNS/NTP/SSDP/memcached MANBA portlaridan kelgan
+ * UDP paketlarini tashlash.
+ *
+ * ⚠️ ATAYLAB O'CHIRILGAN holatda keladi. Bu portlardan kelgan paket
+ * odatiy node uchun HAQIQIY javob bo'lishi mumkin — masalan DNS
+ * javobi. Uni tashlash node'ning nom yechishini butunlay buzardi.
+ *
+ * Bayroq faqat edge/PoP mashinalari uchun: ular hech qachon DNS
+ * so'ramaydi va bu portlardan kelgan har qanday paket soxta manzil
+ * bilan kuchaytirilgan hujum belgisidir.
+ */
+#define CC01_F_DROP_AMPLIFY (1u << 1)
+
+/* ⚠️ SYN cookie ATAYLAB amalga oshirilmagan.
+ *
+ * §4.3 dagi psevdokod `xdp_syn_cookie_reply` ni ko'rsatadi va u
+ * qurildi ham: verifier qabul qildi, SYN-ACK yasaldi va klient uni
+ * checksum xatosisiz QABUL QILDI hamda ACK yubordi.
+ *
+ * Lekin qo'l siqish TUGAMADI. Sabab yadroda: `cookie_v6_check`
+ * `tcp_synq_no_recent_overflow(sk)` tekshiruvidan o'tadi va u faqat
+ * YADRONING O'ZI cookie rejimiga o'tgan bo'lsa cookie'ni qabul
+ * qiladi. Bizning SYN yadroga yetib bormagani uchun o'sha bayroq
+ * hech qachon qo'yilmaydi — ACK ga RST javob beriladi va ulanish
+ * yarim ochiq qoladi.
+ *
+ * Yadroning o'z selftest'i (`xdp_synproxy`) ham buni MUSTAQIL
+ * ishlatmaydi: u netfilter SYNPROXY bilan juftlanadi va qo'l
+ * siqishni o'sha tugatadi.
+ *
+ * Ishlamaydigan himoyani yoqib qo'yish himoyasizlikdan YOMONROQ:
+ * operator o'zini himoyalangan deb hisoblaydi, TCP esa butunlay
+ * ishlamay qoladi. Shuning uchun kod olib tashlandi.
+ */
+
+/* XDP hodisasi: nima uchun paket tashlandi.
+ *
+ * tc dagi hodisadan ALOHIDA tur: XDP boshqa sabablarni ko'radi
+ * (blocklist, tezlik cheklovi) va ularda qoida ID yoki identity
+ * yo'q. Bitta tuzilmaga siqish maydonlarning yarmini bo'sh
+ * qoldirardi va ma'nosini xiralashtirardi.
+ */
+struct cc01_xdp_event {
+    __u64 timestamp_ns;
+    __u8  src[16];
+
+    /* stage — CC01_STAGE_*. */
+    __u8  stage;
+
+    /* dry_run — hukm qo'llandimi yoki faqat hisoblandimi. */
+    __u8  dry_run;
+    __u8  _pad[6];
+};
+
+#define CC01_STAGE_BLOCKLIST 1
+#define CC01_STAGE_RATELIMIT 2
+#define CC01_STAGE_AMPLIFY   3
 
 /* Blocklist yozuvi. */
 /* Bu yerda ham packed yo'q: ikkala maydon 8 baytli va tabiiy
