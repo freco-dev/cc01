@@ -2316,14 +2316,43 @@ handshake) begona manzildan yozmoqchi bo'ladi va rad etiladi.
 
 ### Faza 2 — eBPF Security Layer (6 hafta)
 
-| Deliverable | Acceptance criteria |
-| --- | --- |
-| `xdp_filter` Stage 0–5 to'liq | `BPF_PROG_TEST_RUN` testlari 100% o'tadi |
-| Policy compiler (ACL → LPM trie) | 10k qoida < 500 ms kompilyatsiya |
-| `cc01 firewall` buyruqlari + dry-run | `firewall test` to'g'ri qoidani ko'rsatadi |
-| Ring buffer event pipeline | 100k event/s yo'qotishsiz |
-| Anti-DDoS: rate limit + SYN cookie | 14.8 Mpps flood, legit trafik SLO ichida |
-| Mikrosegmentatsiya (tag-based) | Lateral movement testi bloklanadi |
+| Deliverable | Acceptance criteria | Holat |
+| --- | --- | --- |
+| `xdp_filter` Stage 0–5 to'liq | `BPF_PROG_TEST_RUN` testlari 100% o'tadi | ✅ `daemon/xdp` |
+| Policy compiler (ACL → LPM trie) | 10k qoida < 500 ms kompilyatsiya | ✅ o'lchandi: **6 ms** |
+| `cc01 firewall` buyruqlari + dry-run | `firewall test` to'g'ri qoidani ko'rsatadi | ✅ `daemon/cmd/cc01` |
+| Ring buffer event pipeline | 100k event/s yo'qotishsiz | ✅ o'lchandi: **≈255k/s**, yadro tomonda 0 yo'qotish |
+| Anti-DDoS: rate limit + SYN cookie | 14.8 Mpps flood, legit trafik SLO ichida | ⚠️ qisman — quyida |
+| Mikrosegmentatsiya (tag-based) | Lateral movement testi bloklanadi | ✅ `make cp-demo` (node-3 `db` bloklanadi) |
+
+**Anti-DDoS qatori nega qisman.** Ikki sabab bor va ikkalasi ham
+o'lchovga taalluqli:
+
+1. **14.8 Mpps o'lchanmagan.** Bu 10G interfeysning liniya tezligi va
+   uni haqiqiy temirda, native XDP bilan o'lchash kerak. macOS ustidagi
+   Docker'da (veth, generic XDP) chiqadigan raqam liniya tezligini
+   emas, virtualizatsiya narxini ko'rsatardi. Token chelagining o'zi
+   `TestProgTest_XDPRateLimits` va `TestProgTest_XDPAutoBlocks` bilan
+   sinalgan — ya'ni mantiq to'g'ri, tezlik esa hali tasdiqlanmagan.
+2. **SYN cookie umuman qurilmagan** — sababi quyida.
+
+**SYN cookie nega yo'q.** XDP dan cookie yuborish ishlamaydi: qaytgan
+ACK ni `cookie_v6_check` tekshiradi va u `tcp_synq_no_recent_overflow(sk)`
+ga bog'liq — yadro faqat O'ZI chiqargan cookie'ni tan oladi. Ya'ni XDP
+chiqargan SYN-ACK ga kelgan ACK ga yadro RST bilan javob beradi
+(`SyncookiesRecv=0` va `SyncookiesFailed=0` — ya'ni hisoblagichgacha
+ham yetib bormaydi). To'g'ri yechim — netfilter `SYNPROXY`; u alohida
+ish sifatida qoldirildi. Yarim ishlaydigan himoyani ishlaydi deb
+ko'rsatishdan ko'ra yo'qligini aytish xavfsizroq.
+
+**Hodisa oqimi paketga emas, OQIMGA bog'langan.** `emit_event` faqat
+hukm keshi o'tkazib yuborilganda chaqiriladi, ya'ni bitta manbadan
+kelgan million paket bitta hodisa beradi. Flood paytida jurnal emas,
+hisoblagich o'sadi. O'lchov shuning uchun har safar boshqa manba
+portidan yuboradi (`TestProgTest_EventThroughput`), yo'qotish
+hisoblagichining o'zi esa alohida test bilan isbotlangan
+(`TestProgTest_EventLossIsReported`: iste'molchisiz 60k oqimdan
+~56k hodisa yo'qoladi).
 
 ### Faza 3 — Tunneling / ngrok parity (6 hafta)
 

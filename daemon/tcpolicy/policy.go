@@ -221,6 +221,32 @@ type Filter struct {
 	nextIdentity uint32
 }
 
+// loadCollection dasturni yadroga yuklaydi, BIRIKTIRMASDAN.
+//
+// Ajratilgani testlar uchun: `BPF_PROG_TEST_RUN` sintetik paket
+// bilan ishlaydi va unga interfeys ham, tarmoq ham kerak emas.
+func loadCollection() (*ebpf.Collection, error) {
+	if err := removeMemlock(); err != nil {
+		return nil, fmt.Errorf("tcpolicy: %w", err)
+	}
+
+	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(programELF))
+	if err != nil {
+		return nil, fmt.Errorf("tcpolicy: dasturni o'qish: %w", err)
+	}
+
+	collection, err := ebpf.NewCollection(spec)
+	if err != nil {
+		var verifier *ebpf.VerifierError
+		if errors.As(err, &verifier) {
+			return nil, fmt.Errorf("tcpolicy: verifier rad etdi:\n%+v", verifier)
+		}
+		return nil, fmt.Errorf("tcpolicy: yuklash: %w", err)
+	}
+
+	return collection, nil
+}
+
 // Load dasturni yuklaydi va interfeysga biriktiradi.
 //
 // Interfeys L3 bo'lishi SHART (MAC manzili yo'q). Dastur paketni
@@ -251,22 +277,9 @@ func Load(cfg Config) (*Filter, error) {
 			ErrNotLayer3, cfg.Interface)
 	}
 
-	if err := removeMemlock(); err != nil {
-		return nil, fmt.Errorf("tcpolicy: %w", err)
-	}
-
-	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(programELF))
+	collection, err := loadCollection()
 	if err != nil {
-		return nil, fmt.Errorf("tcpolicy: dasturni o'qish: %w", err)
-	}
-
-	collection, err := ebpf.NewCollection(spec)
-	if err != nil {
-		var verifier *ebpf.VerifierError
-		if errors.As(err, &verifier) {
-			return nil, fmt.Errorf("tcpolicy: verifier rad etdi:\n%+v", verifier)
-		}
-		return nil, fmt.Errorf("tcpolicy: yuklash: %w", err)
+		return nil, err
 	}
 
 	ingress := collection.Programs["cc01_tc_ingress"]

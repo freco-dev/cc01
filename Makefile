@@ -153,12 +153,15 @@ bpf-verify: check-docker ## Dasturni haqiqiy yadro verifier'iga yuklab ko'radi
 	  -e GOWORK=off -e GOCACHE=/tmp/gocache -e GOMODCACHE=/tmp/gomod \
 	  golang:1.25 sh -c 'apt-get update -qq >/dev/null 2>&1 && \
 	    apt-get install -y -qq iproute2 iputils-ping netcat-openbsd net-tools >/dev/null 2>&1 && \
-	    go test -count=1 -run TestXDP -v ./xdp/... ./tcpolicy/...' 2>&1 \
+	    go test -count=1 -v ./xdp/... ./tcpolicy/...' 2>&1 \
 	  | tee /tmp/cc01-bpf-verify.log || true
 	@if grep -qE '^(--- FAIL|FAIL|# )' /tmp/cc01-bpf-verify.log; then \
 	  echo; echo "✘ Testlar yiqildi."; exit 1; \
 	fi
-	@for probe in TestXDP_LoadsAndAttaches TestXDPPolicy_LoadsAndAttaches; do \
+	@for probe in TestXDP_LoadsAndAttaches TestXDPPolicy_LoadsAndAttaches \
+	              TestProgTest_XDPNeverAborts TestProgTest_XDPRateLimits \
+	              TestProgTest_XDPAutoBlocks TestProgTest_TCAllowsMatchingRule \
+	              TestProgTest_EventThroughput TestProgTest_EventLossIsReported; do \
 	  grep -q "^--- PASS: $$probe" /tmp/cc01-bpf-verify.log || { \
 	    echo; echo "✘ $$probe BAJARILMADI (o'tkazib yuborilgan)."; \
 	    echo "  O'tkazib yuborilgan test o'tgan testga o'xshaydi."; \

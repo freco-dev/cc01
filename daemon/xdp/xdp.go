@@ -166,6 +166,34 @@ type Config struct {
 // vositasiga aylantirardi.
 const DefaultEventSample uint32 = 16
 
+// loadCollection dasturni yadroga yuklaydi, BIRIKTIRMASDAN.
+//
+// Ajratilgani testlar uchun: `BPF_PROG_TEST_RUN` sintetik paket
+// bilan ishlaydi va unga interfeys ham, tarmoq ham kerak emas.
+func loadCollection() (*ebpf.Collection, error) {
+	if err := removeMemlock(); err != nil {
+		return nil, fmt.Errorf("xdp: %w", err)
+	}
+
+	spec, err := ebpf.LoadCollectionSpecFromReader(newReader(programELF))
+	if err != nil {
+		return nil, fmt.Errorf("xdp: dasturni o'qish: %w", err)
+	}
+
+	collection, err := ebpf.NewCollection(spec)
+	if err != nil {
+		// Verifier xatosi juda uzun bo'ladi va uni qisqartirish
+		// sababni yashirardi — to'liq chiqaramiz.
+		var verifier *ebpf.VerifierError
+		if errors.As(err, &verifier) {
+			return nil, fmt.Errorf("xdp: verifier rad etdi:\n%+v", verifier)
+		}
+		return nil, fmt.Errorf("xdp: yuklash: %w", err)
+	}
+
+	return collection, nil
+}
+
 // Load dasturni yuklaydi va interfeysga biriktiradi.
 //
 // Biriktirish AVVAL native rejimda urinadi; drayver qo'llamasa
@@ -185,24 +213,9 @@ func Load(cfg Config) (*Filter, error) {
 		return nil, fmt.Errorf("xdp: interfeys topilmadi (%s): %w", cfg.Interface, err)
 	}
 
-	if err := removeMemlock(); err != nil {
-		return nil, fmt.Errorf("xdp: %w", err)
-	}
-
-	spec, err := ebpf.LoadCollectionSpecFromReader(newReader(programELF))
+	collection, err := loadCollection()
 	if err != nil {
-		return nil, fmt.Errorf("xdp: dasturni o'qish: %w", err)
-	}
-
-	collection, err := ebpf.NewCollection(spec)
-	if err != nil {
-		// Verifier xatosi juda uzun bo'ladi va uni qisqartirish
-		// sababni yashirardi — to'liq chiqaramiz.
-		var verifier *ebpf.VerifierError
-		if errors.As(err, &verifier) {
-			return nil, fmt.Errorf("xdp: verifier rad etdi:\n%+v", verifier)
-		}
-		return nil, fmt.Errorf("xdp: yuklash: %w", err)
+		return nil, err
 	}
 
 	program := collection.Programs["cc01_xdp_filter"]

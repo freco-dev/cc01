@@ -130,7 +130,14 @@ Bu hujjat **maqsadli** arxitekturani tasvirlaydi. Repozitoriyda hozir mavjud kod
 | Mikrosegmentatsiya (tag) | `tag:web` → node manzillari; registry versiyasiga bog'langan | ✅ lateral movement bloklanadi |
 | Public IPv6 / BGP / TasIX PoP | — | Butunlay yo'q |
 
-**Xulosa:** tokenli, egalik qilingan subdomain bilan HTTP tunnel uchidan uchiga ishlaydi — bu §3.3 (Edge), §3.4 (Account Plane) va §4.4 (Tunneling) ning ibtidoiy, lekin **butun** kesimi. Mesh va eBPF qatlamlari (§3.2, §5) hali boshlanmagan. Amaliy ketma-ketlik `DEV_SPEC.md` §8 (Roadmap) da.
+**Xulosa:** overlay mesh (§3.2) va eBPF xavfsizlik qatlami (§5) ishlaydi:
+ikki node NAT ortidan ham to'g'ridan-to'g'ri shifrlangan kanal quradi,
+Control Plane Raft klasteri sifatida ishlaydi, trafik esa XDP da
+filtrlanadi va TC da deny-by-default siyosati bilan tekshiriladi.
+Tunneling (§4.4) hozircha ibtidoiy: tokenli, egalik qilingan subdomain
+bilan HTTP tunnel uchidan uchiga ishlaydi. Public IPv6, BGP va TasIX
+PoP (§3.5) hali boshlanmagan. Amaliy ketma-ketlik `DEV_SPEC.md` §8
+(Roadmap) da.
 
 ---
 
@@ -523,7 +530,7 @@ Har bir PoP quyidagi rollarni bajaradi:
                                        ▼
                         ┌──────────────────────────────────┐
                         │  Stage 1: XDP Scrubber           │
-                        │  · SYN cookie · rate limit       │
+                        │  · rate limit · SYN cookie (❌)   │
                         │  · blocklist · protocol sanity   │
                         └──────────────┬───────────────────┘
                           ┌────────────┼─────────────┐
@@ -882,7 +889,7 @@ Underlay MTU (Ethernet)          : 1500
 | **T**ampering | Tranzitda paket o'zgartirilishi | ChaCha20-Poly1305 AEAD, auth tag tekshiruvi |
 | **R**epudiation | Node harakatni inkor etadi | Append-only audit log, node cert bilan imzolangan control amallari |
 | **I**nfo disclosure | Relay/edge trafikni o'qiydi | E2E shifrlash; TLS passthrough rejimi; relay faqat `node_id` ko'radi |
-| **D**oS | Volumetric flood, SYN flood, handshake flood | XDP scrubber, SYN cookie, cookie-based handshake rate limit (WG MAC2) |
+| **D**oS | Volumetric flood, SYN flood, handshake flood | XDP scrubber (rate limit + blocklist + amplification filter), cookie-based handshake rate limit (WG MAC2). **SYN flood hozircha qoplanmagan** — SYN cookie XDP dan ishlamaydi, SYNPROXY kerak |
 | **E**levation | Kompromis qilingan node butun tarmoqqa kiradi | Zero-Trust ACL, mikrosegmentatsiya, qisqa TTL sertifikat, device posture |
 | **S**poofing (hisob) | Begona subdomainni egallash, o'g'irlangan token | AP'da subdomain egaligi majburiy; token faqat hash holida saqlanadi, bekor qilish darhol kuchga kiradi |
 | **E**levation (hisob) | Tarif kvotasini chetlab o'tish | Kvota edge'da majburlanadi (AP faqat qiymatni beradi); usage hisoboti bilan post-hoc tekshiruv |
@@ -917,8 +924,8 @@ Underlay MTU (Ethernet)          : 1500
    │   · token bucket per src /64 (pps + bps)                          │
    │   · limit oshsa → XDP_DROP + ringbuf event (auto-blocklist)       │
    ├───────────────────────────────────────────────────────────────────┤
-   │ Stage 3: ANTI-DDoS         map: cc01_synstate                     │
-   │   · TCP SYN → SYN cookie generatsiya (stateless)                  │
+   │ Stage 3: ANTI-DDoS                                                │
+   │   · TCP SYN → SYN cookie (❌ QURILMAGAN, quyiga qarang)            │
    │   · UDP amplification portlari (53,123,1900,11211) → filter       │
    │   · fragment flood → reassembly limit                             │
    ├───────────────────────────────────────────────────────────────────┤
@@ -937,6 +944,17 @@ Underlay MTU (Ethernet)          : 1500
    XDP_DROP     XDP_PASS      XDP_REDIRECT     XDP_TX      XDP_ABORTED
    (0 alloc,    (normal       (AF_XDP zero-    (reflect,   (bug →
     counter++)   stack)        copy → cc01d)    relay TX)   alert)
+
+> **SYN cookie nega qurilmagan.** XDP dan cookie'li SYN-ACK yuborish
+> mumkin, lekin qaytgan ACK ni yadro qabul qilmaydi: `cookie_v6_check`
+> `tcp_synq_no_recent_overflow(sk)` ga bog'liq, ya'ni yadro faqat
+> O'ZI chiqargan cookie'ni tan oladi. Amalda klient SYN-ACK'ni qabul
+> qilib ACK yuboradi, server esa RST bilan javob beradi —
+> `SyncookiesRecv=0` va `SyncookiesFailed=0`, ya'ni hisoblagichgacha
+> ham yetmaydi. Yana bir cheklov: veth `XDP_TX` ni faqat juftida
+> native XDP bo'lsa uzatadi. To'g'ri yechim — netfilter `SYNPROXY`
+> (u handshake'ni yadro nomidan yakunlaydi). Shu sababli Stage 3 da
+> faqat amplification filtri va tezlik cheklovi ishlaydi.
 
                     ╔═══════════════════════════════════════════╗
    TUN (cc0)  ───►  ║  TC INGRESS / EGRESS (clsact)              ║
