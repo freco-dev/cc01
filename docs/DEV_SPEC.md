@@ -2406,7 +2406,7 @@ hisoblagichining o'zi esa alohida test bilan isbotlangan
 | ACME avtomatizatsiyasi (wildcard + on-demand) | Sertifikat < 30 s, avto-renew | ⚠️ on-demand ✅, wildcard ❌ (quyida) |
 | `tunnel http/tcp/udp/tls` | ngrok bilan funksional paritet (asosiy stsenariylar) | ⚠️ http ✅, tcp ✅, udp/tls ❌ |
 | QUIC transport + stream mux | HTTP p95 overhead < 8 ms | ❌ |
-| Traffic inspector (`:4040`) | So'rov/javob real vaqtda ko'rinadi | ❌ |
+| Traffic inspector (`:4040`) | So'rov/javob real vaqtda ko'rinadi | ✅ `cli-client/inspect` |
 | Custom domain + basic/OAuth auth | Dokumentatsiya bilan | ⚠️ custom domain ✅, auth ❌ |
 | AP: `CustomDomain` + TXT verifikatsiya oqimi | Domen tasdiqlangach ACME avtomatik ishga tushadi | ❌ |
 | AP: billing integratsiyasi + usage hisob-kitobi | Oylik hisob usage bilan mos keladi | ❌ |
@@ -2457,6 +2457,44 @@ chiqmaydi — server esa hech qanday xato ko'rsatmasdi.
 `make tunnel-demo` buni uchidan uchiga sinaydi: tunnel ochiladi,
 subdomain HTTP va HTTPS orqali javob beradi, begona domenga esa
 qo'l siqishi rad etiladi.
+
+#### Traffic inspector
+
+`cc01-tunnel -inspect 127.0.0.1:4040` tunneldan o'tgan HTTP
+so'rov/javoblarini ko'rsatadi (`cli-client/inspect`). Sahifa
+jonli yangilanadi — Server-Sent Events orqali; WebSocket kerak
+emas, chunki oqim bir tomonlama.
+
+⚠️ **Manzil LOOPBACK bo'lishi shart** va bu tekshiruvni chetlab
+o'tib bo'lmaydi (`ErrNotLoopback`). Sahifada so'rovlarning to'liq
+sarlavhalari va tanalari ko'rinadi — ular ichida `Authorization`,
+cookie va parollar bo'ladi. Uni tarmoqqa chiqarish tunneldan
+o'tgan hamma sirni ochib qo'yardi.
+
+⚠️ **Kuzatuv PASSIV.** Baytlar `io.TeeReader` orqali nusxalanadi
+va oqimning o'zi hech qachon o'zgartirilmaydi. Bundan tashqari
+yozuvchi xatolarni YUTADI (`safeWriter`): parser to'xtaganda
+quvur yopiladi, `io.TeeReader` esa yozuv xatosini O'QISH xatosi
+deb yuqoriga uzatardi — va tunnel uzilardi. Inspector qulaylik
+vositasi; uning yiqilishi trafikni to'xtatmasligi kerak.
+
+Boshqa qarorlar:
+
+- **Faqat HTTP.** TCP tunnelida baytlarni izohlab bo'lmaydi va
+  ularni "so'rov" deb ko'rsatish yolg'on ma'lumot berardi.
+- **Tana chegaralanadi** (64 KB): inspector xotirada ishlaydi va
+  katta fayl yuklash jarayonni yeb qo'yardi. Qirqilgani sahifada
+  oshkora belgilanadi.
+- **Halqasimon bufer** (200 ta almashuv): eng eskilari tashlanadi.
+- **Sekin obunachi o'tkazib yuboriladi**: jonli oqim kanali
+  to'lgan bo'lsa yozuv tashlanadi, aks holda brauzer tabi
+  tunnelni sekinlashtirardi.
+- **Javobsiz so'rov ham yoziladi**: ulanish uzilgan so'rovlar
+  aynan eng qiziqlari.
+
+`http.ReadResponse` ga so'rov BERILADI: usiz `HEAD` va `204`
+javoblarida tananing bor-yo'qligini aniqlab bo'lmaydi va parser
+oqimni noto'g'ri o'qib, keyingi barcha almashuvlarni buzardi.
 
 ### Faza 4 — Edge Transit & TasIX (5 hafta)
 

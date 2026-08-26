@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/freco-dev/cc01/cli-client/inspect"
 	"github.com/freco-dev/cc01/core-server/events"
 	cc01v1 "github.com/freco-dev/cc01/proto/gen/cc01/v1"
 )
@@ -25,6 +26,9 @@ type config struct {
 	subdomain  string
 	cname      string
 	token      string
+
+	// inspectAddr — kuzatuv sahifasi. Bo'sh bo'lsa o'chirilgan.
+	inspectAddr string
 }
 
 func main() {
@@ -43,6 +47,8 @@ func parseFlags() config {
 	flag.StringVar(&conf.cname, "cname", "", "optional custom domain (CNAME)")
 	flag.StringVar(&conf.token, "token", os.Getenv("CC01_TOKEN"),
 		"API token (yoki CC01_TOKEN muhit o'zgaruvchisi)")
+	flag.StringVar(&conf.inspectAddr, "inspect", "127.0.0.1:4040",
+		"kuzatuv sahifasi manzili (faqat loopback; o'chirish uchun bo'sh qoldiring)")
 	flag.Parse()
 
 	conf.protocol = strings.ToLower(strings.TrimSpace(conf.protocol))
@@ -95,9 +101,33 @@ func run(conf config) error {
 		return err
 	}
 
-	printTunnelInfo(opened, conf.localAddr)
+	// Kuzatuv faqat HTTP uchun: TCP tunnelida baytlarni izohlab
+	// bo'lmaydi va ularni ko'rsatish yolg'on ma'lumot berardi.
+	var inspector *inspect.Server
+	if conf.inspectAddr != "" && protocol == cc01v1.Protocol_PROTOCOL_HTTP {
+		recorder := inspect.New(inspect.Options{})
+
+		inspector, err = inspect.Listen(recorder, conf.inspectAddr)
+		if err != nil {
+			// Kuzatuv qulaylik vositasi — usiz ham tunnel
+			// ishlashi kerak.
+			log.Printf("kuzatuv sahifasi ochilmadi: %v", err)
+		} else {
+			defer inspector.Close()
+			tunnelRecorder = recorder
+		}
+	}
+
+	printTunnelInfo(opened, conf.localAddr, inspector)
 	return serveTunnel(control, serverHost, conf.localAddr, uint16(opened.GetPrivatePort()))
 }
+
+// tunnelRecorder — kuzatuv yoqilgan bo'lsa to'ldiriladi.
+//
+// Global: `bridgeConnection` chaqiruv zanjiri orqali uzatish
+// butun imzoni o'zgartirishni talab qilardi va bu funksiya
+// jarayonda bittagina tunnel uchun ishlaydi.
+var tunnelRecorder *inspect.Recorder
 
 func parseProtocol(raw string) (cc01v1.Protocol, error) {
 	switch raw {
@@ -164,22 +194,48 @@ func bridgeConnection(serverHost string, privatePort uint16, localAddr string, c
 	}
 	defer localConn.Close()
 
-	bind(privateConn, localConn)
+	var fromPublic, fromLocal io.Writer
+	if tunnelRecorder != nil {
+		tap := tunnelRecorder.Tap()
+		defer tap.Close()
+
+		fromPublic = tap.RequestWriter()
+		fromLocal = tap.ResponseWriter()
+	}
+
+	bind(privateConn, localConn, fromPublic, fromLocal)
 	return nil
 }
 
-func bind(a net.Conn, b net.Conn) {
+// bind ikki ulanishni bog'laydi va ixtiyoriy ravishda kuzatadi.
+//
+// `tapA` — `a` dan O'QILGAN baytlar (ommaviy klientdan kelgan
+// so'rovlar), `tapB` — `b` dan o'qilganlar (lokal xizmat
+// javoblari). Ular nil bo'lishi mumkin.
+//
+// ⚠️ Kuzatuv `io.TeeReader` orqali: baytlar nusxalanadi, oqimning
+// o'zi hech qachon o'zgartirilmaydi.
+func bind(a net.Conn, b net.Conn, tapA, tapB io.Writer) {
 	var once sync.Once
 	closeBoth := func() {
 		_ = a.Close()
 		_ = b.Close()
 	}
 
+	readA := io.Reader(a)
+	if tapA != nil {
+		readA = io.TeeReader(a, tapA)
+	}
+	readB := io.Reader(b)
+	if tapB != nil {
+		readB = io.TeeReader(b, tapB)
+	}
+
 	go func() {
-		_, _ = io.Copy(a, b)
+		_, _ = io.Copy(a, readB)
 		once.Do(closeBoth)
 	}()
-	_, _ = io.Copy(b, a)
+	_, _ = io.Copy(b, readA)
 	once.Do(closeBoth)
 }
 
@@ -194,7 +250,13 @@ func hostFromAddr(addr string) (string, error) {
 	return host, nil
 }
 
-func printTunnelInfo(opened *cc01v1.TunnelOpened, localAddr string) {
+func printTunnelInfo(opened *cc01v1.TunnelOpened, localAddr string, inspector *inspect.Server) {
+	defer func() {
+		if inspector != nil {
+			fmt.Fprintf(os.Stdout, "  Inspect  %s\n", inspector.URL())
+		}
+	}()
+
 	switch opened.GetProtocol() {
 	case cc01v1.Protocol_PROTOCOL_HTTP:
 		fmt.Fprintf(os.Stdout, "HTTP tunnel ochildi: http://%s -> %s\n",

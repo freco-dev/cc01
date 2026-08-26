@@ -73,10 +73,14 @@ echo "  HTTP :8080, HTTPS :8443, event :4321"
 
 echo
 echo "═══ klient tunnel ochadi ═══"
+# Kuzatuv sahifasi 0.0.0.0 da EMAS: u faqat loopback'da ochiladi
+# (sarlavhalar va tanalar ichida sirlar bo'ladi). Konteynerdan
+# ko'rish uchun `docker exec` ishlatamiz.
 $DOCKER run -d --name cc01-client --network $NET --ip 172.39.0.30 \
   --entrypoint cc01-tunnel $IMAGE \
   -server $EDGE_IP:4321 -local 172.39.0.20:8080 \
-  -proto http -subdomain demo -cname app.mijoz.test >/dev/null
+  -proto http -subdomain demo -cname app.mijoz.test \
+  -inspect 127.0.0.1:4040 >/dev/null
 sleep 3
 
 TUNNEL_LOG=$($DOCKER logs cc01-client 2>&1 | tail -3)
@@ -146,6 +150,42 @@ else
 fi
 
 echo
+echo "═══ traffic inspector ═══"
+# Yuqoridagi so'rovlar kuzatuv sahifasida ko'rinishi kerak.
+SEEN=$($DOCKER exec cc01-client curl -s --max-time 5 \
+  http://127.0.0.1:4040/api/exchanges 2>/dev/null || true)
+
+if echo "$SEEN" | grep -q '"method":"GET"'; then
+  COUNT=$(echo "$SEEN" | grep -o '"method"' | wc -l | tr -d ' ')
+  echo "  ✔ $COUNT ta so'rov yozib olindi"
+else
+  echo "  ✘ kuzatuv sahifasi so'rovlarni ko'rsatmadi"
+  $DOCKER logs cc01-client 2>&1 | tail -5
+  exit 1
+fi
+
+# Javob statuslari ham yozilishi kerak — faqat so'rovni ko'rsatish
+# inspector'ning yarmi bo'lardi.
+if echo "$SEEN" | grep -q '"status":200'; then
+  echo "  ✔ javob statuslari ham yozildi"
+else
+  echo "  ✘ javoblar yozilmadi"
+  exit 1
+fi
+
+# ⚠️ Sahifa TARMOQQA chiqmasligi kerak: unda sarlavhalar va
+# tanalar ko'rinadi.
+OUTSIDE=$($DOCKER run --rm --network $NET --entrypoint curl $IMAGE \
+  -s --max-time 3 http://172.39.0.30:4040/api/exchanges 2>&1 || true)
+if [ -z "$OUTSIDE" ] || echo "$OUTSIDE" | grep -qiE "refused|timed out|couldn't connect"; then
+  echo "  ✔ sahifa tashqaridan ochilmaydi"
+else
+  echo "  ✘ kuzatuv sahifasi TARMOQQA ochiq:"
+  echo "$OUTSIDE" | head -2 | sed 's/^/    /'
+  exit 1
+fi
+
+echo
 echo "── natija ──"
 echo "  tunnel ishlaydi, sertifikat SNI bo'yicha tanlanadi,"
-echo "  begona domen rad etiladi"
+echo "  begona domen rad etiladi, trafik kuzatiladi"
