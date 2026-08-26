@@ -123,6 +123,10 @@ punch-demo: check-docker ## NAT teshish (cone): relaydan to'g'ridan-to'g'ri yo'l
 raft-demo: check-docker ## Control Plane klasteri: 3 replika, lider failover
 	sh daemon/testdata/raft-demo.sh
 
+.PHONY: tunnel-demo
+tunnel-demo: check-docker ## Tunnel: subdomain, SNI bo'yicha TLS, begona domen rad etiladi
+	sh core-server/testdata/tunnel-demo.sh
+
 .PHONY: punch-sym-demo
 punch-sym-demo: check-docker ## Birthday punching: symmetric NAT ortidagi node bilan to'g'ridan-to'g'ri
 	sh daemon/testdata/punch-sym-demo.sh

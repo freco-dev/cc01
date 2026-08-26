@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -22,13 +23,18 @@ func (s *TCPServer) Init(port uint16, title string) error {
 	return nil
 }
 
-func (s *TCPServer) InitTLS(port uint16, title, certFile, keyFile string) error {
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return err
+// InitTLS TLS listener ochadi.
+//
+// Sertifikat FAYLDAN emas, `config.GetCertificate` orqali
+// tanlanadi: edge bir vaqtda wildcard subdomainlarga ham, custom
+// domainlarga ham xizmat qiladi va qaysi biri kerakligi faqat
+// SNI dan ma'lum bo'ladi (DEV_SPEC §2.1 `tlsmgr`).
+func (s *TCPServer) InitTLS(port uint16, title string, config *tls.Config) error {
+	if config == nil || config.GetCertificate == nil {
+		return errors.New("tls: sertifikat tanlovchi berilmagan")
 	}
-	config := tls.Config{Certificates: []tls.Certificate{cert}}
-	ln, err := tls.Listen("tcp", fmt.Sprintf(":%d", port), &config)
+
+	ln, err := tls.Listen("tcp", fmt.Sprintf(":%d", port), config)
 	if err != nil {
 		return err
 	}

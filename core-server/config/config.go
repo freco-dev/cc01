@@ -31,6 +31,18 @@ type Config struct {
 	TLSCertFile         string
 	TLSKeyFile          string
 
+	// ACME — custom domainlar uchun avtomatik sertifikat.
+	//
+	// ⚠️ Wildcard sertifikat bunga KIRMAYDI: `*.cc01.uz` ni olish
+	// uchun DNS-01 sinovi kerak, u esa DNS provayderining
+	// kalitlarini talab qiladi. Shuning uchun wildcard operator
+	// tomonidan fayl sifatida beriladi, ACME esa faqat mijoz
+	// domenlariga ishlaydi (ular HTTP-01/TLS-ALPN-01 bilan
+	// hal bo'ladi).
+	ACMEEmail     string
+	ACMEDirectory string
+	ACMECA        string
+
 	AuthMode      AuthMode
 	AccessAddr    string
 	AccessTimeout time.Duration
@@ -64,7 +76,48 @@ func (c *Config) Load() error {
 		return errors.New("CC01_TLS_KEY yoki CC01_TLS_CERT sozlanmagan")
 	}
 
+	if err := c.loadACME(); err != nil {
+		return err
+	}
 	return c.loadAuth()
+}
+
+// ACMEEnabled — custom domainlarga avtomatik sertifikat yoqilganmi.
+func (c *Config) ACMEEnabled() bool { return c.ACMEEmail != "" }
+
+// loadACME ACME sozlamalarini o'qiydi.
+//
+// Email berilmasa ACME O'CHIQ qoladi va custom domainlar HTTPS
+// ololmaydi. Buni jimgina yoqib qo'ymaymiz: ACME haqiqiy tashqi
+// xizmatga murojaat qiladi va uning limitlari bor.
+func (c *Config) loadACME() error {
+	c.ACMEEmail = os.Getenv("CC01_ACME_EMAIL")
+	if c.ACMEEmail == "" {
+		return nil
+	}
+
+	c.ACMEDirectory = os.Getenv("CC01_ACME_DIR")
+	if c.ACMEDirectory == "" {
+		return errors.New(
+			"CC01_ACME_EMAIL berilgan, lekin CC01_ACME_DIR sozlanmagan.\n" +
+				"  Sertifikatlar DOIMIY diskda saqlanishi shart: bo'sh papka\n" +
+				"  har qayta ishga tushishda hamma sertifikatni qaytadan\n" +
+				"  chiqartirib, ACME limitiga urardi.")
+	}
+
+	// Sinov katalogi qisqa yozuv bilan tanlanadi: to'liq URL ni
+	// qo'lda yozishda xato qilish oson va xato ishlab chiqarish
+	// katalogiga urib qo'yardi.
+	switch ca := os.Getenv("CC01_ACME_CA"); ca {
+	case "", "production":
+		c.ACMECA = ""
+	case "staging":
+		c.ACMECA = acmeStagingCA
+	default:
+		c.ACMECA = ca
+	}
+
+	return nil
 }
 
 // loadAuth avtorizatsiyani deny-by-default tamoyili bo'yicha sozlaydi

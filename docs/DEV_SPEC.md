@@ -2400,16 +2400,63 @@ hisoblagichining o'zi esa alohida test bilan isbotlangan
 
 ### Faza 3 — Tunneling / ngrok parity (6 hafta)
 
-| Deliverable | Acceptance criteria |
+| Deliverable | Acceptance criteria | Holat |
+| --- | --- | --- |
+| Edge ingress: SNI router + TLS terminatsiya | 50k concurrent tunnel/node | ✅ SNI ✅, 50k o'lchanmagan |
+| ACME avtomatizatsiyasi (wildcard + on-demand) | Sertifikat < 30 s, avto-renew | ⚠️ on-demand ✅, wildcard ❌ (quyida) |
+| `tunnel http/tcp/udp/tls` | ngrok bilan funksional paritet (asosiy stsenariylar) | ⚠️ http ✅, tcp ✅, udp/tls ❌ |
+| QUIC transport + stream mux | HTTP p95 overhead < 8 ms | ❌ |
+| Traffic inspector (`:4040`) | So'rov/javob real vaqtda ko'rinadi | ❌ |
+| Custom domain + basic/OAuth auth | Dokumentatsiya bilan | ⚠️ custom domain ✅, auth ❌ |
+| AP: `CustomDomain` + TXT verifikatsiya oqimi | Domen tasdiqlangach ACME avtomatik ishga tushadi | ❌ |
+| AP: billing integratsiyasi + usage hisob-kitobi | Oylik hisob usage bilan mos keladi | ❌ |
+
+#### TLS: SNI bo'yicha sertifikat tanlash
+
+Edge bir vaqtda ikki xil nomga xizmat qiladi: `*.cc01.uz`
+subdomainlariga va mijozlarning o'z domenlariga. Qaysi biri
+kerakligi faqat SNI dan ma'lum, shuning uchun sertifikat fayldan
+emas, `tls.Config.GetCertificate` orqali tanlanadi
+(`core-server/tlsmgr`).
+
+Qoidalar:
+
+| SNI | Sertifikat |
 | --- | --- |
-| Edge ingress: SNI router + TLS terminatsiya | 50k concurrent tunnel/node |
-| ACME avtomatizatsiyasi (wildcard + on-demand) | Sertifikat < 30 s, avto-renew |
-| `tunnel http/tcp/udp/tls` | ngrok bilan funksional paritet (asosiy stsenariylar) |
-| QUIC transport + stream mux | HTTP p95 overhead < 8 ms |
-| Traffic inspector (`:4040`) | So'rov/javob real vaqtda ko'rinadi |
-| Custom domain + basic/OAuth auth | Dokumentatsiya bilan |
-| AP: `CustomDomain` + TXT verifikatsiya oqimi | Domen tasdiqlangach ACME avtomatik ishga tushadi |
-| AP: billing integratsiyasi + usage hisob-kitobi | Oylik hisob usage bilan mos keladi |
+| yo'q | **rad etiladi** |
+| `X.cc01.uz` | wildcard |
+| `cc01.uz` | apex (wildcard uni QOPLAMAYDI) |
+| `a.b.cc01.uz` | **rad etiladi** — wildcard bitta yorliqni qoplaydi |
+| tirik tunneli bor custom domain | ACME |
+| boshqa har qanday nom | **rad etiladi** |
+
+⚠️ **Nega noma'lum nom rad etiladi.** Bu ACME dagi eng jiddiy
+suiiste'mol yo'li: kimdir o'z domenining DNS'ini bizga qaratsa va
+biz har bir SNI ga sertifikat chiqaraversak, Let's Encrypt
+limitlariga urilib, HAQIQIY mijozlarga sertifikat chiqara olmay
+qolardik. Shuning uchun custom domain faqat **tirik tunneli
+bo'lsa** xizmat oladi; egalikni esa access-server tunnel
+ochilishidan oldin tekshiradi.
+
+⚠️ **Resolver keshlamaydi** va bu ataylab. certmagic sertifikatni
+fon rejimida yangilaydi, ya'ni bizdagi nusxa eskirib qolardi.
+Keshsiz ruxsat har bir qo'l siqishida qaytadan tekshiriladi —
+tunnel yopilishi bilan sertifikat berish darhol to'xtaydi.
+
+⚠️ **Wildcard ACME dan olinmaydi.** `*.cc01.uz` uchun DNS-01 sinovi
+kerak, u esa DNS provayderining kalitlarini talab qiladi. Shuning
+uchun wildcard operator tomonidan fayl sifatida beriladi
+(`CC01_TLS_CERT`/`CC01_TLS_KEY`), ACME esa faqat custom
+domainlarga ishlaydi — ular HTTP-01/TLS-ALPN-01 bilan hal bo'ladi
+va DNS kaliti kerak emas.
+
+`acme-tls/1` `NextProtos` ga qo'shiladi: usiz ACME serveri
+TLS-ALPN-01 sinovini boshlay olmaydi va sertifikat hech qachon
+chiqmaydi — server esa hech qanday xato ko'rsatmasdi.
+
+`make tunnel-demo` buni uchidan uchiga sinaydi: tunnel ochiladi,
+subdomain HTTP va HTTPS orqali javob beradi, begona domenga esa
+qo'l siqishi rad etiladi.
 
 ### Faza 4 — Edge Transit & TasIX (5 hafta)
 
