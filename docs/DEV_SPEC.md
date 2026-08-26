@@ -505,12 +505,27 @@ shuning uchun `HeartbeatTimeout` va `ElectionTimeout` 500 ms ga,
 | Lider failover | **0.9–1.0 s** (DoD: < 5 s) |
 | Ijara saqlanishi | o'sha kalit yangi liderdan **aynan o'sha manzilni** oladi |
 | Kvorum yo'qolishi | qolgan node liderlikdan voz kechadi, yozuv rad etiladi |
+| Liderni topish | node uchala manzildan liderni **o'zi** topadi |
 
-**Hali qurilmagani — liderga yo'naltirish.** Follower yozuvni
-bajara olmaydi va `UNAVAILABLE` xatosini lider manzili bilan
-qaytaradi. Klient hozircha o'zi liderga ulanishi kerak; avtomatik
-yo'naltirish uchun Raft manzili va gRPC manzili orasidagi moslik
-kerak.
+**Liderni topish.** Yozuvni faqat lider bajara oladi. Follower
+`UNAVAILABLE` qaytaradi va xatoga `ErrorInfo{Reason: "NOT_LEADER"}`
+tafsilotini biriktiradi — klient sababni xato MATNIDAN emas, shu
+tafsilotdan biladi.
+
+Klientga bitta emas, **bir nechta CP manzili** beriladi
+(`-cp a:8443,b:8443,c:8443`) va u `NOT_LEADER` javobida keyingisiga
+o'tadi. Lider topilgach ulanish o'sha nodeda QOLADI: registry
+replikatsiya qilinmaydi, ya'ni heartbeat va NetworkMap oqimi
+manzilni bergan node bilan bir joyda bo'lishi kerak.
+
+⚠️ Liderning Raft manzili klientga ATAYLAB yuborilmaydi. `raft.Leader()`
+Raft transporti portini qaytaradi (`:7000`), klient esa gRPC portiga
+(`:8443`) ulanadi — o'sha manzilni bersak, klient ulanolmaydigan joyga
+borardi. Manzillar ro'yxati bu nomuvofiqlikni butunlay chetlab o'tadi.
+
+`make raft-demo` buni ataylab eng og'ir tartibda sinaydi: ro'yxat
+follower'dan boshlanadi, failover'dan keyin esa nodega yangi lider
+kim ekani UMUMAN aytilmaydi.
 
 ### 3.4 Public IPv6 taqsimlash protokoli
 

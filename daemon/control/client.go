@@ -12,14 +12,18 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/freco-dev/cc01/daemon/noise"
 	"github.com/freco-dev/cc01/daemon/router"
 	cc01v1 "github.com/freco-dev/cc01/proto/gen/cc01/v1"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 // Config — klient sozlamalari.
@@ -96,6 +100,14 @@ type Client struct {
 	cfg     Config
 	log     *slog.Logger
 
+	// addrs — CP manzillari. Klaster rejimida bir nechta bo'ladi:
+	// yozuvni faqat lider bajara oladi, qaysi biri lider ekanini
+	// esa oldindan bilmaymiz.
+	addrs []string
+
+	// current — hozir ulangan manzil indeksi.
+	current int
+
 	nodeID  string
 	address netip.Prefix
 
@@ -126,14 +138,14 @@ func Dial(cfg Config) (*Client, error) {
 		logger = slog.Default()
 	}
 
-	creds, err := transportCredentials(cfg, logger)
+	addrs, err := splitAddresses(cfg.Address)
 	if err != nil {
 		return nil, err
 	}
 
-	conn, err := grpc.NewClient(cfg.Address, grpc.WithTransportCredentials(creds))
+	conn, err := dialAddress(cfg, addrs[0], logger)
 	if err != nil {
-		return nil, fmt.Errorf("control: CP ga ulanish (%s): %w", cfg.Address, err)
+		return nil, err
 	}
 
 	return &Client{
@@ -141,7 +153,72 @@ func Dial(cfg Config) (*Client, error) {
 		service: cc01v1.NewControlServiceClient(conn),
 		cfg:     cfg,
 		log:     logger.With("component", "control"),
+		addrs:   addrs,
 	}, nil
+}
+
+// splitAddresses vergul bilan ajratilgan CP manzillarini bo'ladi.
+//
+// Klasterda bir nechta CP bo'ladi va ularning qaysi biri lider
+// ekani vaqt o'tishi bilan o'zgaradi — shuning uchun operator
+// hammasini beradi, klient esa liderni o'zi topadi.
+func splitAddresses(raw string) ([]string, error) {
+	var addrs []string
+	for _, part := range strings.Split(raw, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			addrs = append(addrs, trimmed)
+		}
+	}
+	if len(addrs) == 0 {
+		return nil, errors.New("control: CP manzili berilmagan")
+	}
+	return addrs, nil
+}
+
+// dialAddress bitta manzilga ulanish quradi.
+func dialAddress(cfg Config, addr string, logger *slog.Logger) (*grpc.ClientConn, error) {
+	creds, err := transportCredentials(cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(creds))
+	if err != nil {
+		return nil, fmt.Errorf("control: CP ga ulanish (%s): %w", addr, err)
+	}
+	return conn, nil
+}
+
+// Address — hozir ulangan CP manzili.
+func (c *Client) Address() string { return c.addrs[c.current] }
+
+// rotate keyingi CP manziliga o'tadi.
+//
+// Eski ulanish YOPILADI: uni ochiq qoldirsak, NetworkMap oqimi
+// eski nodega bog'lanib qolardi va biz lidernikidan farq qiladigan
+// registry'ni kuzatgan bo'lardik.
+//
+// ⚠️ QULFSIZ. Bu xavfsiz, chunki rotate faqat Register ichidan
+// chaqiriladi, Register esa Run() dan OLDIN, bitta gorutinada
+// bajariladi. Kelajakda qayta ro'yxatdan o'tish qo'shilsa (masalan
+// heartbeat NotFound qaytarganda), bu yerga mutex kerak bo'ladi:
+// aks holda watch gorutinasi c.service ni o'qiyotganda biz uni
+// almashtirib yuborardik.
+func (c *Client) rotate() error {
+	next := (c.current + 1) % len(c.addrs)
+
+	conn, err := dialAddress(c.cfg, c.addrs[next], c.log)
+	if err != nil {
+		return err
+	}
+
+	_ = c.conn.Close()
+
+	c.conn = conn
+	c.service = cc01v1.NewControlServiceClient(conn)
+	c.current = next
+
+	return nil
 }
 
 func (c *Client) Close() error { return c.conn.Close() }
@@ -157,7 +234,69 @@ func (c *Client) SetRouter(r *router.Router) { c.cfg.Router = r }
 func (c *Client) NodeID() string { return c.nodeID }
 
 // Register nodeni CP da ro'yxatga oladi va manzil oladi.
+//
+// Klasterda manzil berish RAFT YOZUVI, ya'ni uni faqat lider
+// bajara oladi. Follower "men lider emasman" deb javob beradi va
+// biz keyingi manzilga o'tamiz. Topilgan lider bilan ulanish
+// SAQLANADI: keyingi heartbeat va NetworkMap oqimi o'sha nodedan
+// boradi.
 func (c *Client) Register(ctx context.Context) (*Registration, error) {
+	var lastErr error
+
+	for range c.addrs {
+		registration, err := c.register(ctx)
+		if err == nil {
+			return registration, nil
+		}
+		if !isNotLeader(err) {
+			return nil, fmt.Errorf("control: ro'yxatdan o'tish: %w", err)
+		}
+
+		lastErr = err
+
+		// Bitta manzil bo'lsa aylanadigan joy yo'q — o'zimizga
+		// qayta ulanish behuda.
+		if len(c.addrs) == 1 {
+			break
+		}
+
+		c.log.Info("bu CP lider emas, keyingisiga o'tamiz",
+			"manzil", c.addrs[c.current])
+
+		if rotateErr := c.rotate(); rotateErr != nil {
+			return nil, rotateErr
+		}
+	}
+
+	return nil, fmt.Errorf(
+		"control: %d ta CP manzilining hech biri lider emas: %w",
+		len(c.addrs), lastErr)
+}
+
+// isNotLeader — CP "men lider emasman" dedimi.
+//
+// Sabab xato MATNIDAN emas, tuzilgan tafsilotdan o'qiladi: matn
+// o'zgarishi mumkin, `NOT_LEADER` esa shartnomaning bir qismi.
+func isNotLeader(err error) bool {
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.Unavailable {
+		return false
+	}
+
+	for _, detail := range st.Details() {
+		if info, ok := detail.(*errdetails.ErrorInfo); ok {
+			if info.GetReason() == notLeaderReason {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// notLeaderReason — `control/server` bilan bir xil bo'lishi shart.
+const notLeaderReason = "NOT_LEADER"
+
+func (c *Client) register(ctx context.Context) (*Registration, error) {
 	key := c.cfg.Identity.PublicKey()
 
 	endpoints := make([]string, 0, len(c.cfg.Endpoints))
@@ -182,7 +321,9 @@ func (c *Client) Register(ctx context.Context) (*Registration, error) {
 		AuthToken:        c.cfg.AuthToken,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("control: ro'yxatdan o'tish: %w", err)
+		// ATAYLAB o'ralmaydi: chaqiruvchi gRPC statusini ko'rib
+		// "lider emas" ni ajratishi kerak.
+		return nil, err
 	}
 
 	address, err := netip.ParsePrefix(response.GetAddress())

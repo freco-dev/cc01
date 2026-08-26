@@ -119,7 +119,8 @@ Bu hujjat **maqsadli** arxitekturani tasvirlaydi. Repozitoriyda hozir mavjud kod
 | Mesh VPN — relay (§3.3.2) | `daemon/relay/` — ko'r uzatuvchi, ikki qatlamli shifrlash; CP `relays[]` ni tarqatadi | ✅ symmetric NAT ortidagi nodelar ulanadi |
 | Mesh VPN — yo'l tanlash (§6.2) | `daemon/path/` — holat mashinasi, disco ping/pong, gisterezis | ✅ relay-first, P2P-upgrade |
 | Node autentifikatsiyasi | `daemon/nodecert` + CP bog'lanishi (Raft'da) | ✅ token faqat ro'yxatga olish uchun |
-| Control Plane — Raft klasteri | `control/cluster` — FSM, snapshot, lider tanlash | ✅ failover 0.9–1.0 s |
+| Control Plane — Raft klasteri | `control/cluster` — FSM, snapshot, lider tanlash | ✅ failover 0.9–1.0 s; klient liderni o'zi topadi |
+| Control Plane — registry replikatsiyasi | — | ❌ **yo'q** (quyida) |
 | Mesh VPN — CP kanali (§5.1.1) | TLS 1.3 + SPKI pinning (server), node klient sertifikati | ✅ sertifikat almashtirish/bekor qilish ⏳ |
 | Mesh VPN — hole punching (cone NAT) | `daemon/engine` — disco pong AYNAN ping kelgan yo'l bilan qaytadi | ✅ `make punch-demo` |
 | Mesh VPN — hole punching (symmetric NAT) | `daemon/punch` — birthday paradoks, peerga xos soket | ✅ symmetric↔cone; symmetric↔symmetric imkonsiz |
@@ -129,6 +130,21 @@ Bu hujjat **maqsadli** arxitekturani tasvirlaydi. Repozitoriyda hozir mavjud kod
 | Policy boshqaruvi | `cc01 firewall` + CP dan tarqatish (`control/policy`) | ✅ AP dan boshqarish ⏳ |
 | Mikrosegmentatsiya (tag) | `tag:web` → node manzillari; registry versiyasiga bog'langan | ✅ lateral movement bloklanadi |
 | Public IPv6 / BGP / TasIX PoP | — | Butunlay yo'q |
+
+> **Registry replikatsiya qilinmaydi.** Raft FSM faqat IPAM
+> ijaralarini va node↔sertifikat bog'lanishini olib yuradi
+> (`control/cluster/fsm.go`). Node ro'yxati esa har bir CP
+> jarayonida alohida, xotirada turadi
+> (`registry.New(registry.Options{})`). Oqibati: failover'dan keyin
+> yangi liderning registry'si BO'SH bo'ladi va nodelar qayta
+> ro'yxatdan o'tmaguncha NetworkMap to'liq bo'lmaydi. Manzillar
+> yo'qolmaydi — ular jurnalda — lekin peer ro'yxati vaqtincha
+> kamayadi. To'g'ri yechim registry'ni ham FSM ga ko'chirish; u
+> alohida ish sifatida qoldirilgan.
+>
+> Shu sababli klient liderni topgach o'sha nodega YOPISHIB qoladi:
+> heartbeat va NetworkMap oqimi registry bilan bir joyda bo'lishi
+> kerak.
 
 **Xulosa:** overlay mesh (§3.2) va eBPF xavfsizlik qatlami (§5) ishlaydi:
 ikki node NAT ortidan ham to'g'ridan-to'g'ri shifrlangan kanal quradi,

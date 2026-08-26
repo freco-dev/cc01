@@ -157,8 +157,7 @@ func (s *Service) Register(
 		// yo'naltirardi.
 		var notLeader *cluster.ErrNotLeader
 		if errors.As(err, &notLeader) {
-			return nil, status.Errorf(codes.Unavailable,
-				"bu node lider emas; %s ga murojaat qiling", notLeader.Leader)
+			return nil, notLeaderStatus()
 		}
 
 		return nil, status.Errorf(codes.ResourceExhausted, "manzil berilmadi: %v", err)

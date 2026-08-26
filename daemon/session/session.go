@@ -301,7 +301,9 @@ func (s *Session) build(ctx context.Context) (*active, error) {
 		"node", shortID(registration.NodeID),
 		"iface", device.Name(),
 		"addr", registration.Address.String(),
-		"cp", s.cfg.ControlAddr)
+		// Ro'yxat emas, HAQIQATAN ulangan CP: klasterda klient
+		// liderni o'zi topadi va qaysi biri ekani muhim.
+		"cp", client.Address())
 
 	return built, nil
 }
@@ -425,7 +427,7 @@ func (s *Session) Status() (Status, bool) {
 		Tenant:       s.cfg.Tenant,
 		Address:      current.registration.Address.String(),
 		Interface:    current.device.Name(),
-		ControlPlane: s.cfg.ControlAddr,
+		ControlPlane: current.client.Address(),
 		RelayID:      current.relay.activeID(),
 		ListenPort:   current.engine.ListenPort(),
 		Endpoints:    endpoints,

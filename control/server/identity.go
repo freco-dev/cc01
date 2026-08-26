@@ -104,8 +104,7 @@ func (s *Service) authenticate(ctx context.Context, nodeID, token string) error 
 
 		var notLeader *cluster.ErrNotLeader
 		if errors.As(err, &notLeader) {
-			return status.Errorf(codes.Unavailable,
-				"bu node lider emas; %s ga murojaat qiling", notLeader.Leader)
+			return notLeaderStatus()
 		}
 		return status.Errorf(codes.Internal, "bog'lanishni yozish: %v", err)
 	}

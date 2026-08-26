@@ -41,7 +41,7 @@ var version = "dev"
 func main() {
 	var (
 		genKey       = flag.Bool("genkey", false, "yangi kalit jufti yaratadi va chiqaradi")
-		controlAddr  = flag.String("cp", os.Getenv("CC01_CP_ADDR"), "Control Plane manzili (berilsa peerlar avtomatik olinadi)")
+		controlAddr  = flag.String("cp", os.Getenv("CC01_CP_ADDR"), "Control Plane manzili; klasterda vergul bilan bir nechta (berilsa peerlar avtomatik olinadi)")
 		tenant       = flag.String("tenant", "default", "tenant identifikatori (CP rejimi)")
 		hostname     = flag.String("hostname", "", "node nomi (CP rejimi); bo'sh bo'lsa OS nomi")
 		cpToken      = flag.String("cp-token", os.Getenv("CC01_CP_TOKEN"), "CP bilan kelishilgan sir")
