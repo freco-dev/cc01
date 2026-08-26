@@ -7,6 +7,7 @@ import (
 
 	"github.com/freco-dev/cc01/control/cluster"
 	"github.com/freco-dev/cc01/control/ipam"
+	"github.com/freco-dev/cc01/control/registry"
 )
 
 // openStore IPAM uchun holat omborini tanlaydi.
@@ -14,20 +15,33 @@ import (
 // Klaster sozlanmagan bo'lsa — xotiradagi ombor. U bitta jarayon
 // uchun to'liq to'g'ri ishlaydi, lekin jarayon o'lganda hamma ijara
 // yo'qoladi va nodelar yangi manzil oladi.
+// stores — CP ning holat omborlari.
+type stores struct {
+	leases     ipam.Store
+	identities cluster.IdentityStore
+	nodes      cluster.NodeStore
+	close      func() error
+}
+
 func openStore(
 	cfg runConfig,
+	nodes *registry.Registry,
 	logger *slog.Logger,
-) (ipam.Store, cluster.IdentityStore, func() error, error) {
+) (stores, error) {
 	if cfg.raftBind == "" {
 		logger.Warn("klaster sozlanmagan — holat XOTIRADA saqlanadi va " +
 			"qayta ishga tushirilganda YO'QOLADI; ishlab chiqarish uchun -raft-bind bering")
-		return ipam.NewMemoryStore(), cluster.NewMemoryIdentities(),
-			func() error { return nil }, nil
+		return stores{
+			leases:     ipam.NewMemoryStore(),
+			identities: cluster.NewMemoryIdentities(),
+			nodes:      cluster.NewMemoryNodes(nodes),
+			close:      func() error { return nil },
+		}, nil
 	}
 
 	peers, err := parsePeers(cfg.raftPeers)
 	if err != nil {
-		return nil, nil, nil, err
+		return stores{}, err
 	}
 
 	node, err := cluster.Start(cluster.Config{
@@ -37,15 +51,21 @@ func openStore(
 		Dir:       cfg.raftDir,
 		Bootstrap: cfg.raftBootstrap,
 		Peers:     peers,
+		Nodes:     nodes,
 		Logger:    logger,
 	})
 	if err != nil {
-		return nil, nil, nil, err
+		return stores{}, err
 	}
 
-	// Bitta Raft node ikkala rolni ham bajaradi: ijaralar va node
-	// bog'lanishlari bir xil jurnal orqali ketadi.
-	return node, node, node.Close, nil
+	// Bitta Raft node hamma rolni bajaradi: ijaralar, node
+	// bog'lanishlari va node ro'yxati bir xil jurnal orqali ketadi.
+	return stores{
+		leases:     node,
+		identities: node,
+		nodes:      node,
+		close:      node.Close,
+	}, nil
 }
 
 // parsePeers "id=host:port,id=host:port" ro'yxatini o'qiydi.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"time"
 )
 
 // NetworkMapFor nodega yuboriladigan mapni quradi.
@@ -26,10 +27,13 @@ func (r *Registry) NetworkMapFor(nodeID string, since uint64) (*NetworkMap, erro
 	}
 
 	result := &NetworkMap{
-		Tenant:      self.Tenant,
-		Version:     r.version,
-		Self:        self.Clone(),
-		GeneratedAt: r.now(),
+		Tenant:  self.Tenant,
+		Version: r.version,
+		Self:    self.Clone(),
+		// GeneratedAt — REPLIKATSIYA qilinadigan holat emas, javob
+		// metama'lumoti. Shuning uchun bu yerda devor soatini
+		// o'qish xavfsiz: u jurnal orqali o'tmaydi.
+		GeneratedAt: time.Now(),
 		Relays:      slices.Clone(r.relays),
 	}
 

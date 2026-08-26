@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/freco-dev/cc01/daemon/noise"
@@ -21,6 +22,7 @@ import (
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
@@ -95,10 +97,17 @@ type RelayInfo struct {
 
 // Client — CP bilan aloqani ushlab turuvchi.
 type Client struct {
+	cfg Config
+	log *slog.Logger
+
+	// mu — ulanish almashtirilganda uni himoya qiladi.
+	//
+	// Kerak, chunki uch goroutine bir vaqtda ishlaydi: NetworkMap
+	// oqimi, heartbeat va boshqaruv. Ularning har biri liderni
+	// yo'qotib, boshqa CP ga o'tishni boshlashi mumkin.
+	mu      sync.Mutex
 	conn    *grpc.ClientConn
 	service cc01v1.ControlServiceClient
-	cfg     Config
-	log     *slog.Logger
 
 	// addrs — CP manzillari. Klaster rejimida bir nechta bo'ladi:
 	// yozuvni faqat lider bajara oladi, qaysi biri lider ekanini
@@ -190,21 +199,21 @@ func dialAddress(cfg Config, addr string, logger *slog.Logger) (*grpc.ClientConn
 }
 
 // Address — hozir ulangan CP manzili.
-func (c *Client) Address() string { return c.addrs[c.current] }
+func (c *Client) Address() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.addrs[c.current]
+}
 
 // rotate keyingi CP manziliga o'tadi.
 //
 // Eski ulanish YOPILADI: uni ochiq qoldirsak, NetworkMap oqimi
 // eski nodega bog'lanib qolardi va biz lidernikidan farq qiladigan
 // registry'ni kuzatgan bo'lardik.
-//
-// ⚠️ QULFSIZ. Bu xavfsiz, chunki rotate faqat Register ichidan
-// chaqiriladi, Register esa Run() dan OLDIN, bitta gorutinada
-// bajariladi. Kelajakda qayta ro'yxatdan o'tish qo'shilsa (masalan
-// heartbeat NotFound qaytarganda), bu yerga mutex kerak bo'ladi:
-// aks holda watch gorutinasi c.service ni o'qiyotganda biz uni
-// almashtirib yuborardik.
 func (c *Client) rotate() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	next := (c.current + 1) % len(c.addrs)
 
 	conn, err := dialAddress(c.cfg, c.addrs[next], c.log)
@@ -221,7 +230,60 @@ func (c *Client) rotate() error {
 	return nil
 }
 
-func (c *Client) Close() error { return c.conn.Close() }
+// rotateOnFailure ulanish HAQIQATAN yaroqsiz bo'lsa keyingi CP
+// manziliga o'tadi.
+//
+// ⚠️ Sog' ulanishda aylanmaydi va bu shart. Heartbeat ham,
+// NetworkMap oqimi ham aylantira oladi: birinchisi liderni
+// yo'qotganda, ikkinchisi oqim uzilganda. Aylanish ulanishni
+// yopadi, ya'ni har bir aylanish IKKINCHI siklda ham nosozlikka
+// o'xshab ko'rinadi. Guard bo'lmasa ikkalasi bir-birini quvib,
+// ulanishni manzillar bo'ylab cheksiz surib yurardi.
+func (c *Client) rotateOnFailure() {
+	if len(c.addrs) == 1 {
+		return
+	}
+
+	switch c.state() {
+	case connectivity.TransientFailure, connectivity.Shutdown:
+	default:
+		// Ulanish tirik — nosozlik boshqa sababdan yoki uni
+		// allaqachon boshqa gorutina almashtirgan.
+		return
+	}
+
+	if err := c.rotate(); err != nil {
+		// Xato faqat qayd etiladi: qaytadan urinish siklini
+		// chaqiruvchi boshqaradi va bu yerda to'xtash node'ni
+		// butunlay aloqasiz qoldirardi.
+		c.log.Warn("keyingi CP ga o'tib bo'lmadi", "err", err)
+		return
+	}
+	c.log.Info("boshqa CP ga o'tildi", "manzil", c.Address())
+}
+
+// state — hozirgi ulanishning holati.
+func (c *Client) state() connectivity.State {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn.GetState()
+}
+
+// svc — hozirgi ulanishning klienti.
+//
+// Har chaqiruvda qayta o'qiladi: ulanish almashgan bo'lishi mumkin
+// va eski klientni ushlab qolgan gorutina o'lik nodega yozardi.
+func (c *Client) svc() cc01v1.ControlServiceClient {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.service
+}
+
+func (c *Client) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn.Close()
+}
 
 // SetRouter routerni ulaydi.
 //
@@ -311,7 +373,7 @@ func (c *Client) register(ctx context.Context) (*Registration, error) {
 		preferred = c.address.String()
 	}
 
-	response, err := c.service.Register(ctx, &cc01v1.RegisterRequest{
+	response, err := c.svc().Register(ctx, &cc01v1.RegisterRequest{
 		PublicKey:        key[:],
 		Tenant:           c.cfg.Tenant,
 		Hostname:         c.cfg.Hostname,
@@ -378,7 +440,12 @@ func (c *Client) Run(ctx context.Context, heartbeat time.Duration) error {
 		}
 
 		c.log.Warn("NetworkMap stream uzildi, qayta ulanamiz",
-			"err", err, "backoff", backoff)
+			"err", err, "backoff", backoff, "manzil", c.Address())
+
+		// Ulangan CP yiqilgan bo'lishi mumkin. Bitta manzilni
+		// cheksiz qayta chaqirsak, node butun klaster tirik
+		// bo'lsa ham aloqasiz qolardi.
+		c.rotateOnFailure()
 
 		select {
 		case <-ctx.Done():
@@ -392,7 +459,7 @@ func (c *Client) Run(ctx context.Context, heartbeat time.Duration) error {
 
 // watch bitta stream sessiyasini boshqaradi.
 func (c *Client) watch(ctx context.Context) error {
-	stream, err := c.service.WatchNetworkMap(ctx, &cc01v1.WatchNetworkMapRequest{
+	stream, err := c.svc().WatchNetworkMap(ctx, &cc01v1.WatchNetworkMapRequest{
 		NodeId:    c.nodeID,
 		AuthToken: c.cfg.AuthToken,
 		// Har doim 0: qayta ulanganda to'liq map olamiz. Stream
@@ -427,13 +494,33 @@ func (c *Client) heartbeatLoop(ctx context.Context, interval time.Duration) {
 				endpoints = append(endpoints, endpoint.String())
 			}
 
-			if _, err := c.service.Heartbeat(ctx, &cc01v1.HeartbeatRequest{
+			_, err := c.svc().Heartbeat(ctx, &cc01v1.HeartbeatRequest{
 				NodeId:    c.nodeID,
 				Endpoints: endpoints,
 				AuthToken: c.cfg.AuthToken,
-			}); err != nil && ctx.Err() == nil {
-				c.log.Debug("heartbeat muvaffaqiyatsiz", "err", err)
+			})
+			if err == nil || ctx.Err() != nil {
+				continue
 			}
+
+			// Heartbeat TTL ni uzaytiradi, ya'ni u Raft yozuvi va
+			// faqat liderda ishlaydi. Lider almashgan bo'lsa
+			// keyingi manzilga o'tamiz — aks holda node jimgina
+			// muddati o'tib, ro'yxatdan tushib ketardi.
+			if isNotLeader(err) {
+				// Bu yerda guard ISHLATILMAYDI: ulanishning o'zi
+				// sog', shunchaki lider boshqa nodeda.
+				c.log.Info("heartbeat: lider almashgan, keyingi CP ga o'tamiz",
+					"manzil", c.Address())
+				if len(c.addrs) > 1 {
+					if rotateErr := c.rotate(); rotateErr != nil {
+						c.log.Warn("keyingi CP ga o'tib bo'lmadi", "err", rotateErr)
+					}
+				}
+				continue
+			}
+
+			c.log.Debug("heartbeat muvaffaqiyatsiz", "err", err)
 		}
 	}
 }

@@ -42,6 +42,17 @@ type Config struct {
 	// xotiradagi ombor ishlatiladi.
 	Identities cluster.IdentityStore
 
+	// Nodes — node ro'yxatini O'ZGARTIRISH yo'li. nil bo'lsa
+	// registry to'g'ridan-to'g'ri o'zgartiriladi (klastersiz rejim).
+	//
+	// Registry o'qish uchun baribir kerak: yozuv jurnaldan o'tadi,
+	// o'qish esa mahalliy nusxadan.
+	Nodes cluster.NodeStore
+
+	// NodeTTL — heartbeat kelmasa node qancha vaqtdan keyin
+	// ro'yxatdan chiqariladi. 0 bo'lsa registry.DefaultTTL.
+	NodeTTL time.Duration
+
 	// Policies — zero-trust qoidalar. nil bo'lsa policy
 	// tarqatilmaydi.
 	Policies *policy.Store
@@ -54,6 +65,8 @@ type Service struct {
 	cc01v1.UnimplementedControlServiceServer
 
 	registry   *registry.Registry
+	nodes      cluster.NodeStore
+	nodeTTL    time.Duration
 	allocator  *ipam.Allocator
 	identities cluster.IdentityStore
 	policies   *policy.Store
@@ -90,8 +103,20 @@ func New(cfg Config) (*Service, error) {
 		identities = cluster.NewMemoryIdentities()
 	}
 
+	nodes := cfg.Nodes
+	if nodes == nil {
+		nodes = cluster.NewMemoryNodes(cfg.Registry)
+	}
+
+	ttl := cfg.NodeTTL
+	if ttl <= 0 {
+		ttl = registry.DefaultTTL
+	}
+
 	return &Service{
 		registry:   cfg.Registry,
+		nodes:      nodes,
+		nodeTTL:    ttl,
 		allocator:  cfg.Allocator,
 		identities: identities,
 		policies:   cfg.Policies,
@@ -168,15 +193,20 @@ func (s *Service) Register(
 		return nil, status.Errorf(codes.InvalidArgument, "endpoint: %v", err)
 	}
 
-	node, err := s.registry.Register(registry.Registration{
+	node, err := s.nodes.RegisterNode(ctx, registry.Registration{
 		PublicKey: key,
 		Tenant:    req.GetTenant(),
 		Hostname:  req.GetHostname(),
 		Addresses: []netip.Prefix{lease.Prefix},
 		Endpoints: endpoints,
 		Tags:      req.GetTags(),
-	})
+	}, s.nodeTTL)
 	if err != nil {
+		// Bu ham Raft yozuvi — lider almashgan bo'lishi mumkin.
+		var notLeader *cluster.ErrNotLeader
+		if errors.As(err, &notLeader) {
+			return nil, notLeaderStatus()
+		}
 		return nil, status.Errorf(codes.Internal, "ro'yxatga olish: %v", err)
 	}
 
@@ -208,7 +238,11 @@ func (s *Service) Heartbeat(
 		return nil, status.Errorf(codes.InvalidArgument, "endpoint: %v", err)
 	}
 
-	if err := s.registry.Heartbeat(req.GetNodeId(), endpoints); err != nil {
+	if err := s.nodes.HeartbeatNode(ctx, req.GetNodeId(), endpoints, s.nodeTTL); err != nil {
+		var notLeader *cluster.ErrNotLeader
+		if errors.As(err, &notLeader) {
+			return nil, notLeaderStatus()
+		}
 		if errors.Is(err, registry.ErrNodeNotFound) {
 			// Node ro'yxatdan tushib qolgan — qayta ro'yxatdan
 			// o'tishi kerak.

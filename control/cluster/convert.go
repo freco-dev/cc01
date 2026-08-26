@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/freco-dev/cc01/control/ipam"
+	"github.com/freco-dev/cc01/control/registry"
 	cc01v1 "github.com/freco-dev/cc01/proto/gen/cc01/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -63,4 +64,67 @@ func leaseFromProto(record *cc01v1.LeaseRecord) (*ipam.Lease, error) {
 		ExpiresAt:  record.GetExpiresAt().AsTime(),
 		ReleasedAt: released,
 	}, nil
+}
+
+// nodeToProto nodeni snapshot yozuviga aylantiradi.
+func nodeToProto(node *registry.Node) *cc01v1.NodeRecord {
+	record := &cc01v1.NodeRecord{
+		NodeId:    node.ID,
+		PublicKey: node.PublicKey[:],
+		Tenant:    node.Tenant,
+		Hostname:  node.Hostname,
+		Tags:      node.Tags,
+		RelayHome: node.RelayHome,
+		CreatedAt: timestamppb.New(node.CreatedAt),
+		LastSeen:  timestamppb.New(node.LastSeen),
+		ExpiresAt: timestamppb.New(node.ExpiresAt),
+	}
+
+	for _, prefix := range node.Addresses {
+		record.Addresses = append(record.Addresses, prefix.String())
+	}
+	for _, endpoint := range node.Endpoints {
+		record.Endpoints = append(record.Endpoints, endpoint.String())
+	}
+
+	return record
+}
+
+// nodeFromProto snapshot yozuvini nodega aylantiradi.
+func nodeFromProto(record *cc01v1.NodeRecord) (*registry.Node, error) {
+	if len(record.GetPublicKey()) != len(registry.PublicKey{}) {
+		return nil, fmt.Errorf("cluster: node %s: kalit uzunligi %d",
+			record.GetNodeId(), len(record.GetPublicKey()))
+	}
+
+	node := &registry.Node{
+		ID:        record.GetNodeId(),
+		Tenant:    record.GetTenant(),
+		Hostname:  record.GetHostname(),
+		Tags:      record.GetTags(),
+		RelayHome: record.GetRelayHome(),
+		CreatedAt: record.GetCreatedAt().AsTime(),
+		LastSeen:  record.GetLastSeen().AsTime(),
+		ExpiresAt: record.GetExpiresAt().AsTime(),
+	}
+	copy(node.PublicKey[:], record.GetPublicKey())
+
+	for _, raw := range record.GetAddresses() {
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return nil, fmt.Errorf("cluster: node %s: prefiks (%s): %w",
+				record.GetNodeId(), raw, err)
+		}
+		node.Addresses = append(node.Addresses, prefix)
+	}
+	for _, raw := range record.GetEndpoints() {
+		endpoint, err := netip.ParseAddrPort(raw)
+		if err != nil {
+			return nil, fmt.Errorf("cluster: node %s: endpoint (%s): %w",
+				record.GetNodeId(), raw, err)
+		}
+		node.Endpoints = append(node.Endpoints, endpoint)
+	}
+
+	return node, nil
 }

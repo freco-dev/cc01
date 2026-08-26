@@ -32,8 +32,71 @@ message LeaseCommand {
     ReleaseLease      release  = 4;
     SweepLeases       sweep    = 5;
     BindNodeIdentity  bind     = 6;
+
+    // Registry buyruqlari. Nomi "Lease" bo'lsa-da, bu xabar
+    // endi CP ning UMUMIY buyruq konverti: bitta Raft jurnali
+    // bor va undagi har bir yozuv shu turdan o'qiladi. Xabarni
+    // qayta nomlash simdagi formatni o'zgartirmaydi, lekin
+    // generatsiya qilingan nomlarni butun kod bo'ylab
+    // almashtirardi — foydasi yo'q shovqin.
+    RegisterNode      register_node   = 7;
+    HeartbeatNode     heartbeat_node  = 8;
+    UnregisterNode    unregister_node = 9;
+    ExpireNodes       expire_nodes    = 10;
   }
 }
+
+// ── Registry buyruqlari ────────────────────────────────────────
+//
+// Node ro'yxati REPLIKATSIYA qilinishi shart. U faqat liderning
+// xotirasida qolsa, failover'dan keyin yangi liderning ro'yxati
+// bo'sh bo'lardi va nodelar qayta ro'yxatdan o'tmaguncha
+// NetworkMap to'liq bo'lmasdi — ya'ni mesh vaqtincha yemirilardi.
+
+// RegisterNode nodeni ro'yxatga oladi yoki mavjudini yangilaydi.
+message RegisterNode {
+  bytes  public_key = 1;
+  string tenant     = 2;
+  string hostname   = 3;
+
+  // Addresses — prefikslar matn ko'rinishida ("2a0e:1::5/128").
+  repeated string addresses = 4;
+
+  // Endpoints — underlay manzillari ("1.2.3.4:51820").
+  repeated string endpoints = 5;
+
+  repeated string tags       = 6;
+  string          relay_home = 7;
+
+  // TtlSeconds — buyruqqa yoziladi, konstantadan o'qilmaydi:
+  // konstanta o'zgarsa eski jurnal boshqacha qo'llanib,
+  // replikalar ajralib ketardi.
+  uint64 ttl_seconds = 8;
+}
+
+// HeartbeatNode TTL ni uzaytiradi va endpointlarni yangilaydi.
+message HeartbeatNode {
+  string node_id = 1;
+
+  // Endpoints — bo'sh ro'yxat va "berilmagan" ni ajratish uchun
+  // alohida bayroq kerak: birinchisi "endpoint yo'q", ikkinchisi
+  // "tegmang" degani.
+  repeated string endpoints     = 2;
+  bool            has_endpoints = 3;
+
+  uint64 ttl_seconds = 4;
+}
+
+// UnregisterNode nodeni ro'yxatdan chiqaradi.
+message UnregisterNode {
+  string node_id = 1;
+}
+
+// ExpireNodes muddati o'tganlarni chiqaradi.
+//
+// Lider taklif qiladi: `now` buyruqda, ya'ni hamma replika AYNAN
+// bir xil nodelarni chiqaradi.
+message ExpireNodes {}
 
 // AllocateLease — yangi ijara. Prefiks va ID lider tomonidan
 // tanlangan.
@@ -114,4 +177,30 @@ message LeaseRecord {
 message IdentityRecord {
   string node_id  = 1;
   string cert_pin = 2;
+}
+
+// NodeRecord — snapshot'ga yoziladigan bitta node.
+message NodeRecord {
+  string node_id    = 1;
+  bytes  public_key = 2;
+  string tenant     = 3;
+  string hostname   = 4;
+
+  repeated string addresses  = 5;
+  repeated string endpoints  = 6;
+  repeated string tags       = 7;
+  string          relay_home = 8;
+
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp last_seen  = 10;
+  google.protobuf.Timestamp expires_at = 11;
+}
+
+// RegistryMeta — snapshot'dagi registry metama'lumoti.
+//
+// Hozircha faqat versiya, lekin alohida yozuv sifatida: kelajakda
+// qo'shiladigan maydonlar node yozuvlarining formatiga tegmasligi
+// kerak.
+message RegistryMeta {
+  uint64 version = 1;
 }

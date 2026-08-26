@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
@@ -24,6 +26,8 @@ import (
 type fakeCP struct {
 	cc01v1.UnimplementedControlServiceServer
 
+	mu sync.Mutex
+
 	// leader — rost bo'lsa ro'yxatga oladi, aks holda
 	// NOT_LEADER qaytaradi.
 	leader bool
@@ -34,27 +38,65 @@ type fakeCP struct {
 
 	// calls — nechta Register chaqiruvi kelgani.
 	calls int
+
+	// heartbeats — nechta Heartbeat kelgani.
+	heartbeats int
+}
+
+func (f *fakeCP) setLeader(leader bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.leader = leader
+}
+
+func (f *fakeCP) beats() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.heartbeats
+}
+
+// Heartbeat ham Raft yozuvi — faqat liderda ishlaydi.
+func (f *fakeCP) Heartbeat(
+	context.Context, *cc01v1.HeartbeatRequest,
+) (*cc01v1.HeartbeatResponse, error) {
+	f.mu.Lock()
+	leader := f.leader
+	f.heartbeats++
+	f.mu.Unlock()
+
+	if !leader {
+		return nil, notLeaderError()
+	}
+	return &cc01v1.HeartbeatResponse{}, nil
+}
+
+// notLeaderError haqiqiy CP bilan bir xil javob yasaydi.
+func notLeaderError() error {
+	st := status.New(codes.Unavailable, "bu node lider emas")
+	detail, err := st.WithDetails(&errdetails.ErrorInfo{
+		Reason: "NOT_LEADER",
+		Domain: "cc01.control",
+	})
+	if err != nil {
+		return st.Err()
+	}
+	return detail.Err()
 }
 
 func (f *fakeCP) Register(
 	context.Context, *cc01v1.RegisterRequest,
 ) (*cc01v1.RegisterResponse, error) {
+	f.mu.Lock()
 	f.calls++
+	leader, fail := f.leader, f.fail
+	f.mu.Unlock()
 
-	if f.fail != nil {
-		return nil, f.fail
+	if fail != nil {
+		return nil, fail
 	}
 
-	if !f.leader {
-		st := status.New(codes.Unavailable, "bu node lider emas")
-		detail, err := st.WithDetails(&errdetails.ErrorInfo{
-			Reason: "NOT_LEADER",
-			Domain: "cc01.control",
-		})
-		if err != nil {
-			return nil, st.Err()
-		}
-		return nil, detail.Err()
+	if !leader {
+		return nil, notLeaderError()
 	}
 
 	return &cc01v1.RegisterResponse{
@@ -255,4 +297,128 @@ func TestRegister_SingleAddressFollower(t *testing.T) {
 	if follower.calls != 1 {
 		t.Errorf("%d marta chaqirildi, 1 kutilgan edi", follower.calls)
 	}
+}
+
+// Lider almashganda heartbeat yangi liderni topishi kerak.
+//
+// Topa olmasa node jimgina muddati o'tib, ro'yxatdan tushib
+// ketardi — va buni hech kim sezmasdi, chunki NetworkMap oqimi
+// hali ishlab turgan bo'lardi.
+func TestHeartbeat_FollowsNewLeader(t *testing.T) {
+	first := &fakeCP{leader: true}
+	second := &fakeCP{}
+
+	firstAddr := startCP(t, first)
+	secondAddr := startCP(t, second)
+
+	client := leaderTestClient(t, firstAddr+","+secondAddr)
+
+	if _, err := client.Register(context.Background()); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if client.Address() != firstAddr {
+		t.Fatalf("birinchi CP da bo'lishi kerak edi: %s", client.Address())
+	}
+
+	// Lider almashdi.
+	first.setLeader(false)
+	second.setLeader(true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go client.heartbeatLoop(ctx, 50*time.Millisecond)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if client.Address() == secondAddr && second.beats() > 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	t.Errorf("yangi lider topilmadi: manzil=%s, eski CP=%d beat, yangi CP=%d beat",
+		client.Address(), first.beats(), second.beats())
+}
+
+// Sog' ulanishda aylanmaslik kerak.
+//
+// Heartbeat ham, NetworkMap oqimi ham aylantira oladi. Guard
+// bo'lmasa ular bir-birini quvib, ulanishni manzillar bo'ylab
+// cheksiz surib yurardi — va node hech qachon barqaror CP da
+// qolmasdi.
+func TestRotateOnFailure_KeepsHealthyConnection(t *testing.T) {
+	leader := &fakeCP{leader: true}
+	other := &fakeCP{leader: true}
+
+	leaderAddr := startCP(t, leader)
+	client := leaderTestClient(t, leaderAddr+","+startCP(t, other))
+
+	if _, err := client.Register(context.Background()); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	before := client.Address()
+	for range 5 {
+		client.rotateOnFailure()
+	}
+
+	if got := client.Address(); got != before {
+		t.Errorf("sog' ulanish almashtirildi: %s → %s", before, got)
+	}
+}
+
+// CP yiqilsa esa aylanish SHART.
+func TestRotateOnFailure_LeavesDeadCP(t *testing.T) {
+	dead := &fakeCP{leader: true}
+	alive := &fakeCP{leader: true}
+
+	deadAddr, stopDead := startCPStoppable(t, dead)
+	aliveAddr := startCP(t, alive)
+
+	client := leaderTestClient(t, deadAddr+","+aliveAddr)
+	if _, err := client.Register(context.Background()); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	stopDead()
+
+	// Ulanish nosozlikni sezishi uchun bir chaqiruv qilamiz.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		_, _ = client.svc().Heartbeat(context.Background(),
+			&cc01v1.HeartbeatRequest{NodeId: "x"})
+		client.rotateOnFailure()
+		if client.Address() == aliveAddr {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	t.Errorf("o'lik CP da qolib ketdi: %s", client.Address())
+}
+
+// startCPStoppable — to'xtatib bo'ladigan soxta CP.
+func startCPStoppable(t *testing.T, cp *fakeCP) (string, func()) {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("tinglash: %v", err)
+	}
+
+	server := grpc.NewServer()
+	cc01v1.RegisterControlServiceServer(server, cp)
+	go func() { _ = server.Serve(listener) }()
+
+	stopped := false
+	stop := func() {
+		if !stopped {
+			stopped = true
+			server.Stop()
+		}
+	}
+	t.Cleanup(stop)
+
+	return listener.Addr().String(), stop
 }

@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/freco-dev/cc01/control/ipam"
+	"github.com/freco-dev/cc01/control/registry"
 	cc01v1 "github.com/freco-dev/cc01/proto/gen/cc01/v1"
 	"github.com/hashicorp/raft"
 	"google.golang.org/protobuf/proto"
@@ -33,18 +34,38 @@ type FSM struct {
 	// qiladi, chunki ular bir xil jurnal va bir xil snapshot orqali
 	// ketishi kerak.
 	identities map[string]string
+
+	// nodes — node ro'yxati.
+	//
+	// FSM uni O'ZGARTIRADI, servis esa faqat O'QIYDI. Bitta nusxa
+	// ikkalasiga ham beriladi: shu tufayli follower ham to'liq
+	// NetworkMap bera oladi va failover'dan keyin ro'yxat
+	// yo'qolmaydi.
+	//
+	// ⚠️ Registry o'zining ichki qulfiga ega, shuning uchun u
+	// f.mu ostiga OLINMAYDI: ikkita qulfni bir tartibda ushlash
+	// majburiyati deadlock uchun tayyor tuzoq bo'lardi.
+	nodes *registry.Registry
 }
 
-func NewFSM(logger *slog.Logger) *FSM {
+func NewFSM(nodes *registry.Registry, logger *slog.Logger) *FSM {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if nodes == nil {
+		nodes = registry.New(registry.Options{})
 	}
 	return &FSM{
 		state:      ipam.NewState(),
 		identities: make(map[string]string),
+		nodes:      nodes,
 		log:        logger,
 	}
 }
+
+// Nodes — replikatsiya qilinadigan node ro'yxati (faqat o'qish
+// uchun ishlatilsin).
+func (f *FSM) Nodes() *registry.Registry { return f.nodes }
 
 // identity bog'langan sertifikatni qaytaradi.
 func (f *FSM) identity(nodeID string) (string, bool) {
@@ -79,7 +100,11 @@ func (f *FSM) applyBind(cmd *cc01v1.BindNodeIdentity) error {
 // yuboriladi. Shuning uchun xatoni shu yerda qaytarish xavfsiz —
 // u holatga ta'sir qilmaydi.
 type applyResult struct {
-	lease     *ipam.Lease
+	lease *ipam.Lease
+	node  *registry.Node
+
+	// reclaimed — IPAM uchun qaytarilgan ijaralar, registry uchun
+	// chiqarilgan nodelar soni.
 	reclaimed int
 	err       error
 }
@@ -94,6 +119,13 @@ func (f *FSM) Apply(entry *raft.Log) any {
 		// va bu ham deterministik.
 		f.log.Error("jurnal yozuvi o'qilmadi", "index", entry.Index, "err", err)
 		return applyResult{err: fmt.Errorf("cluster: yozuv %d: %w", entry.Index, err)}
+	}
+
+	// Registry buyruqlari IPAM holatiga tegmaydi va o'z qulfi
+	// bilan himoyalangan.
+	if registry.Handles(cmd) {
+		node, expired, err := f.nodes.Apply(cmd)
+		return applyResult{node: node, reclaimed: expired, err: err}
 	}
 
 	// Bog'lanish buyrug'i IPAM holatiga tegmaydi — uni shu yerda
@@ -140,7 +172,14 @@ func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 		identities[nodeID] = pin
 	}
 
-	return &snapshot{leases: leases, identities: identities}, nil
+	nodes, version := f.nodes.Snapshot()
+
+	return &snapshot{
+		leases:     leases,
+		identities: identities,
+		nodes:      nodes,
+		version:    version,
+	}, nil
 }
 
 // Restore snapshot'dan holatni tiklaydi.
@@ -150,23 +189,28 @@ func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 func (f *FSM) Restore(reader io.ReadCloser) error {
 	defer reader.Close()
 
-	leases, identities, err := readSnapshot(reader)
+	restored, err := readSnapshot(reader)
 	if err != nil {
 		return err
 	}
 
 	state := ipam.NewState()
-	for _, lease := range leases {
+	for _, lease := range restored.leases {
 		state.Insert(lease)
 	}
 
 	f.mu.Lock()
 	f.state = state
-	f.identities = identities
+	f.identities = restored.identities
 	f.mu.Unlock()
 
+	f.nodes.Restore(restored.nodes, restored.version)
+
 	f.log.Info("holat snapshot'dan tiklandi",
-		"leases", len(leases), "identities", len(identities))
+		"leases", len(restored.leases),
+		"identities", len(restored.identities),
+		"nodes", len(restored.nodes),
+		"version", restored.version)
 	return nil
 }
 
@@ -174,6 +218,12 @@ func (f *FSM) Restore(reader io.ReadCloser) error {
 type snapshot struct {
 	leases     []*ipam.Lease
 	identities map[string]string
+	nodes      []*registry.Node
+
+	// version — registry versiyasi. Nodelar bilan birga saqlanadi:
+	// usiz tiklangan replika versiyani noldan boshlab, klientlarning
+	// delta sinxronizatsiyasini buzardi.
+	version uint64
 }
 
 // Snapshot yozuvining turlari.
@@ -183,6 +233,8 @@ type snapshot struct {
 const (
 	recordLease    byte = 1
 	recordIdentity byte = 2
+	recordNode     byte = 3
+	recordMeta     byte = 4
 )
 
 // Persist snapshot'ni yozadi.
@@ -203,6 +255,20 @@ func (s *snapshot) Persist(sink raft.SnapshotSink) error {
 			if err := writeRecord(sink, recordIdentity, record); err != nil {
 				return err
 			}
+		}
+
+		for _, node := range s.nodes {
+			if err := writeRecord(sink, recordNode, nodeToProto(node)); err != nil {
+				return err
+			}
+		}
+
+		// Meta OXIRIDA: nodelar o'qib bo'lingach versiya
+		// o'rnatiladi va tartib o'qishda ahamiyatsiz bo'lsa-da,
+		// faylni ko'z bilan o'qiganda mantiq shu tartibda tushunarli.
+		meta := &cc01v1.RegistryMeta{Version: s.version}
+		if err := writeRecord(sink, recordMeta, meta); err != nil {
+			return err
 		}
 		return nil
 	}()
@@ -237,53 +303,78 @@ func writeRecord(sink io.Writer, kind byte, message proto.Message) error {
 	return err
 }
 
+// restored — snapshot'dan o'qilgan holat.
+type restored struct {
+	leases     []*ipam.Lease
+	identities map[string]string
+	nodes      []*registry.Node
+	version    uint64
+}
+
 // readSnapshot Persist yozgan formatni o'qiydi.
-func readSnapshot(reader io.Reader) ([]*ipam.Lease, map[string]string, error) {
+func readSnapshot(reader io.Reader) (restored, error) {
 	var (
-		header     [5]byte
-		leases     []*ipam.Lease
-		identities = make(map[string]string)
+		header [5]byte
+		out    = restored{identities: make(map[string]string)}
 	)
 
 	for {
 		if _, err := io.ReadFull(reader, header[:]); err != nil {
 			if errors.Is(err, io.EOF) {
-				return leases, identities, nil
+				return out, nil
 			}
-			return nil, nil, fmt.Errorf("cluster: snapshot sarlavhasi: %w", err)
+			return restored{}, fmt.Errorf("cluster: snapshot sarlavhasi: %w", err)
 		}
 
 		size := binary.BigEndian.Uint32(header[1:])
 		if size > maxLeaseSize {
-			return nil, nil, fmt.Errorf("cluster: snapshot yozuvi juda katta: %d", size)
+			return restored{}, fmt.Errorf("cluster: snapshot yozuvi juda katta: %d", size)
 		}
 
 		buf := make([]byte, size)
 		if _, err := io.ReadFull(reader, buf); err != nil {
-			return nil, nil, fmt.Errorf("cluster: snapshot yozuvi: %w", err)
+			return restored{}, fmt.Errorf("cluster: snapshot yozuvi: %w", err)
 		}
 
 		switch header[0] {
 		case recordLease:
 			encoded := &cc01v1.LeaseRecord{}
 			if err := proto.Unmarshal(buf, encoded); err != nil {
-				return nil, nil, fmt.Errorf("cluster: ijara yozuvi: %w", err)
+				return restored{}, fmt.Errorf("cluster: ijara yozuvi: %w", err)
 			}
 			lease, err := leaseFromProto(encoded)
 			if err != nil {
-				return nil, nil, err
+				return restored{}, err
 			}
-			leases = append(leases, lease)
+			out.leases = append(out.leases, lease)
 
 		case recordIdentity:
 			encoded := &cc01v1.IdentityRecord{}
 			if err := proto.Unmarshal(buf, encoded); err != nil {
-				return nil, nil, fmt.Errorf("cluster: bog'lanish yozuvi: %w", err)
+				return restored{}, fmt.Errorf("cluster: bog'lanish yozuvi: %w", err)
 			}
-			identities[encoded.GetNodeId()] = encoded.GetCertPin()
+			out.identities[encoded.GetNodeId()] = encoded.GetCertPin()
+
+		case recordNode:
+			encoded := &cc01v1.NodeRecord{}
+			if err := proto.Unmarshal(buf, encoded); err != nil {
+				return restored{}, fmt.Errorf("cluster: node yozuvi: %w", err)
+			}
+			node, err := nodeFromProto(encoded)
+			if err != nil {
+				return restored{}, err
+			}
+			out.nodes = append(out.nodes, node)
+
+		case recordMeta:
+			encoded := &cc01v1.RegistryMeta{}
+			if err := proto.Unmarshal(buf, encoded); err != nil {
+				return restored{}, fmt.Errorf("cluster: registry metasi: %w", err)
+			}
+			out.version = encoded.GetVersion()
 
 		default:
-			return nil, nil, fmt.Errorf("cluster: snapshot yozuvining turi noma'lum: %d", header[0])
+			return restored{}, fmt.Errorf("cluster: snapshot yozuvining turi noma'lum: %d", header[0])
 		}
 	}
 }

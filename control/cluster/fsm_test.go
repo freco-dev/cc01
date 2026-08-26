@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/freco-dev/cc01/control/ipam"
+	"github.com/freco-dev/cc01/control/registry"
 	cc01v1 "github.com/freco-dev/cc01/proto/gen/cc01/v1"
 	"github.com/hashicorp/raft"
 	"google.golang.org/protobuf/proto"
@@ -51,7 +52,7 @@ func allocateCommand(id, prefix string) *cc01v1.LeaseCommand {
 // Snapshot olingan holat qayta tiklanganda bir xil bo'lishi kerak —
 // indekslari bilan birga.
 func TestFSM_SnapshotRoundTrip(t *testing.T) {
-	fsm := NewFSM(quiet())
+	fsm := NewFSM(registry.New(registry.Options{}), quiet())
 
 	for i := range 5 {
 		cmd := allocateCommand(string(rune('a'+i)), netip.PrefixFrom(addrAt(i+1), 128).String())
@@ -73,7 +74,7 @@ func TestFSM_SnapshotRoundTrip(t *testing.T) {
 		t.Error("sink yopilmadi")
 	}
 
-	restored := NewFSM(quiet())
+	restored := NewFSM(registry.New(registry.Options{}), quiet())
 	if err := restored.Restore(io.NopCloser(bytes.NewReader(sink.Bytes()))); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
@@ -100,7 +101,7 @@ func TestFSM_SnapshotRoundTrip(t *testing.T) {
 
 // Bo'sh holat ham to'g'ri tiklanishi kerak.
 func TestFSM_SnapshotOfEmptyState(t *testing.T) {
-	fsm := NewFSM(quiet())
+	fsm := NewFSM(registry.New(registry.Options{}), quiet())
 
 	snapshot, err := fsm.Snapshot()
 	if err != nil {
@@ -112,7 +113,7 @@ func TestFSM_SnapshotOfEmptyState(t *testing.T) {
 		t.Fatalf("Persist: %v", err)
 	}
 
-	restored := NewFSM(quiet())
+	restored := NewFSM(registry.New(registry.Options{}), quiet())
 	if err := restored.Restore(io.NopCloser(bytes.NewReader(sink.Bytes()))); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
@@ -120,7 +121,7 @@ func TestFSM_SnapshotOfEmptyState(t *testing.T) {
 
 // Buzilgan snapshot tiklanmasligi va aniq xato berishi kerak.
 func TestFSM_RejectsCorruptSnapshot(t *testing.T) {
-	fsm := NewFSM(quiet())
+	fsm := NewFSM(registry.New(registry.Options{}), quiet())
 
 	// Uzunlik maydoni ulkan son — usiz shuncha bayt ajratishga
 	// urinardik.
@@ -135,7 +136,7 @@ func TestFSM_RejectsCorruptSnapshot(t *testing.T) {
 // kerak: o'sha yozuv hamma replikada bir xil, ya'ni panic butun
 // klasterni o'ldirardi.
 func TestFSM_SurvivesUnreadableEntry(t *testing.T) {
-	fsm := NewFSM(quiet())
+	fsm := NewFSM(registry.New(registry.Options{}), quiet())
 
 	result, ok := fsm.Apply(&raft.Log{Index: 7, Data: []byte{0xff, 0xff}}).(applyResult)
 	if !ok {

@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/freco-dev/cc01/control/ipam"
+	"github.com/freco-dev/cc01/control/registry"
 	cc01v1 "github.com/freco-dev/cc01/proto/gen/cc01/v1"
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
@@ -63,6 +65,11 @@ type Config struct {
 	// Peers — bootstrap paytidagi boshlang'ich a'zolar
 	// (ID va manzil). Bo'sh bo'lsa faqat o'zi.
 	Peers []Peer
+
+	// Nodes — replikatsiya qilinadigan node ro'yxati. Bo'sh bo'lsa
+	// FSM o'zi yaratadi, lekin unda servis o'sha nusxaga ulana
+	// olmaydi — shuning uchun `cc01-cp` uni oshkora beradi.
+	Nodes *registry.Registry
 
 	Logger *slog.Logger
 }
@@ -149,7 +156,7 @@ func Start(cfg Config) (*Node, error) {
 		return nil, fmt.Errorf("cluster: snapshot ombori: %w", err)
 	}
 
-	fsm := NewFSM(cfg.Logger)
+	fsm := NewFSM(cfg.Nodes, cfg.Logger)
 
 	raftCfg := raft.DefaultConfig()
 	raftCfg.LocalID = raft.ServerID(cfg.ID)
@@ -271,13 +278,25 @@ func (n *Node) Propose(
 		return nil, 0, err
 	}
 
+	result, err := n.propose(cmd)
+	if err != nil {
+		return nil, 0, err
+	}
+	return result.lease, result.reclaimed, result.err
+}
+
+// propose buyruqni jurnalga yozadi va natijani qaytaradi.
+//
+// Propose'dan ajratilgani: registry buyruqlari ijara emas, node
+// qaytaradi va ikkalasi ham AYNAN shu yo'ldan o'tishi kerak.
+func (n *Node) propose(cmd *cc01v1.LeaseCommand) (applyResult, error) {
 	if n.raft.State() != raft.Leader {
-		return nil, 0, &ErrNotLeader{Leader: string(n.raft.Leader())}
+		return applyResult{}, &ErrNotLeader{Leader: string(n.raft.Leader())}
 	}
 
 	encoded, err := proto.Marshal(cmd)
 	if err != nil {
-		return nil, 0, fmt.Errorf("cluster: buyruqni kodlash: %w", err)
+		return applyResult{}, fmt.Errorf("cluster: buyruqni kodlash: %w", err)
 	}
 
 	future := n.raft.Apply(encoded, applyTimeout)
@@ -285,17 +304,17 @@ func (n *Node) Propose(
 		// Lider almashgan bo'lishi mumkin — buni alohida ajratamiz,
 		// shunda chaqiruvchi qayta yo'naltira oladi.
 		if errors.Is(err, raft.ErrLeadershipLost) || errors.Is(err, raft.ErrNotLeader) {
-			return nil, 0, &ErrNotLeader{Leader: string(n.raft.Leader())}
+			return applyResult{}, &ErrNotLeader{Leader: string(n.raft.Leader())}
 		}
-		return nil, 0, fmt.Errorf("cluster: buyruqni qo'llash: %w", err)
+		return applyResult{}, fmt.Errorf("cluster: buyruqni qo'llash: %w", err)
 	}
 
 	result, ok := future.Response().(applyResult)
 	if !ok {
-		return nil, 0, errors.New("cluster: kutilmagan javob turi")
+		return applyResult{}, errors.New("cluster: kutilmagan javob turi")
 	}
 
-	return result.lease, result.reclaimed, result.err
+	return result, nil
 }
 
 // View holatni faqat o'qish uchun beradi.
@@ -378,3 +397,6 @@ func (n *Node) Close() error {
 // Bu tekshiruv kompilyatsiya vaqtida: interfeys o'zgarsa, xato
 // birinchi ishga tushirishda emas, build'da chiqadi.
 var _ ipam.Store = (*Node)(nil)
+
+// netipAddrPort — registry bilan bir xil tur.
+type netipAddrPort = netip.AddrPort

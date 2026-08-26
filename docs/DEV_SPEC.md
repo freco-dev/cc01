@@ -506,6 +506,7 @@ shuning uchun `HeartbeatTimeout` va `ElectionTimeout` 500 ms ga,
 | Ijara saqlanishi | o'sha kalit yangi liderdan **aynan o'sha manzilni** oladi |
 | Kvorum yo'qolishi | qolgan node liderlikdan voz kechadi, yozuv rad etiladi |
 | Liderni topish | node uchala manzildan liderni **o'zi** topadi |
+| Node ro'yxati | failover'dan keyin peerlar saqlanadi (qayta ro'yxatdan o'tmasdan) |
 
 **Liderni topish.** Yozuvni faqat lider bajara oladi. Follower
 `UNAVAILABLE` qaytaradi va xatoga `ErrorInfo{Reason: "NOT_LEADER"}`
@@ -526,6 +527,34 @@ borardi. Manzillar ro'yxati bu nomuvofiqlikni butunlay chetlab o'tadi.
 `make raft-demo` buni ataylab eng og'ir tartibda sinaydi: ro'yxat
 follower'dan boshlanadi, failover'dan keyin esa nodega yangi lider
 kim ekani UMUMAN aytilmaydi.
+
+**Nima replikatsiya qilinadi.**
+
+| Holat | Replikatsiya | Sabab |
+| --- | --- | --- |
+| IPAM ijaralari | ✅ | manzil failover'da yo'qolmasligi kerak |
+| node↔sertifikat bog'lanishi | ✅ | aks holda himoya birinchi nosozlikdayoq yo'qolardi |
+| Node ro'yxati (registry) | ✅ | yangi lider peerlarni bilishi kerak |
+| Relaylar | ❌ | har CP o'zining ichki relay'ini e'lon qiladi |
+| O'zgarishlar jurnali | ❌ | faqat delta uchun; bo'sh jurnal to'liq map beradi |
+
+Node ro'yxatini o'zgartirish YAGONA yo'l — `registry.Apply`.
+O'zgartiruvchi metodlar eksport qilinmagan, ya'ni servis registry'ni
+to'g'ridan-to'g'ri o'zgartira olmaydi: bunday o'zgarish faqat bitta
+replikada qolib, failover'da yo'qolardi.
+
+⚠️ **Vaqt va TTL liderda hal qilinadi** va buyruqqa yoziladi.
+`Apply` ichida `time.Now()` ni o'qish yoki TTL ni konstantadan
+olish replikalarni ajratib yuborardi — konstanta o'zgarsa eski
+jurnal boshqacha qo'llanardi.
+
+⚠️ **Muddat tekshiruvi saralanadi.** U map bo'ylab yuradi, Go'da
+esa map tartibi tasodifiy. Saralamasak, bir xil versiya har
+replikada boshqa nodega tegib qolardi. Buni yakuniy holatni
+solishtirib topib bo'lmaydi (u baribir bir xil) — ajralish faqat
+klientning `since` versiyasi partiya O'RTASIGA tushganda ko'rinadi.
+`TestFSM_RegistryIsDeterministic` aynan shuni tekshiradi va
+saralash olib tashlanganda haqiqatan yiqiladi.
 
 ### 3.4 Public IPv6 taqsimlash protokoli
 

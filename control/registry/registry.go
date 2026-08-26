@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -34,6 +35,16 @@ const (
 )
 
 // Registry — nodelar ro'yxati va versiya jurnali.
+//
+// ⚠️ Bu Raft HOLAT MASHINASINING bir qismi (ARCHITECTURE.md
+// §3.1.6). O'zgartirish YAGONA yo'li — `Apply`, ya'ni protobuf
+// buyrug'i orqali; qolgan metodlar faqat o'qiydi. Shu sababli
+// vaqt ham, TTL ham bu yerda saqlanmaydi: ular buyruqda keladi va
+// liderda hal qilinadi.
+//
+// Har bir CP replikasi o'z nusxasini ushlaydi va bir xil jurnalni
+// qo'llaydi — shuning uchun follower ham to'liq NetworkMap bera
+// oladi va lider almashganda peerlar yo'qolmaydi.
 type Registry struct {
 	mu sync.RWMutex
 
@@ -50,8 +61,6 @@ type Registry struct {
 	log []change
 
 	logLimit int
-	ttl      time.Duration
-	now      func() time.Time
 
 	// watchers — o'zgarishlardan xabardor qilinadigan kanallar.
 	watchers map[int]*watcher
@@ -68,39 +77,26 @@ type watcher struct {
 }
 
 // Options — registry sozlamalari.
+//
+// ⚠️ Bu yerda VAQT ham, TTL ham yo'q. Ular buyruqdan keladi:
+// registry Raft holat mashinasining bir qismi va `Apply` ichida
+// `time.Now()` ni o'qish replikalarni ajratib yuborardi
+// (ARCHITECTURE.md §3.1.6, ADR-006).
 type Options struct {
-	// TTL — nil bo'lsa DefaultTTL.
-	TTL time.Duration
-
-	// LogLimit — nil bo'lsa DefaultLogLimit.
+	// LogLimit — 0 bo'lsa DefaultLogLimit.
 	LogLimit int
-
-	// Now — testlarda vaqtni boshqarish uchun.
-	Now func() time.Time
 }
 
 func New(opts Options) *Registry {
-	ttl := opts.TTL
-	if ttl <= 0 {
-		ttl = DefaultTTL
-	}
-
 	limit := opts.LogLimit
 	if limit <= 0 {
 		limit = DefaultLogLimit
-	}
-
-	now := opts.Now
-	if now == nil {
-		now = time.Now
 	}
 
 	return &Registry{
 		nodes:    make(map[string]*Node),
 		byTenant: make(map[string]map[string]struct{}),
 		logLimit: limit,
-		ttl:      ttl,
-		now:      now,
 		watchers: make(map[int]*watcher),
 	}
 }
@@ -121,7 +117,9 @@ type Registration struct {
 // Idempotent: bir xil kalit bilan qayta chaqirilsa yangi node
 // yaratilmaydi. Node ID kalitdan hosil bo'lgani uchun uni klient
 // tanlay olmaydi.
-func (r *Registry) Register(reg Registration) (*Node, error) {
+func (r *Registry) applyRegister(
+	now time.Time, ttl time.Duration, reg Registration,
+) (*Node, error) {
 	if reg.Tenant == "" {
 		return nil, ErrTenantRequired
 	}
@@ -132,7 +130,6 @@ func (r *Registry) Register(reg Registration) (*Node, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	now := r.now()
 	id := NodeID(reg.PublicKey)
 
 	node, existing := r.nodes[id]
@@ -152,7 +149,7 @@ func (r *Registry) Register(reg Registration) (*Node, error) {
 	node.Tags = slices.Clone(reg.Tags)
 	node.RelayHome = reg.RelayHome
 	node.LastSeen = now
-	node.ExpiresAt = now.Add(r.ttl)
+	node.ExpiresAt = now.Add(ttl)
 
 	r.nodes[id] = node
 	r.attachLocked(node)
@@ -165,7 +162,9 @@ func (r *Registry) Register(reg Registration) (*Node, error) {
 //
 // Endpointlar o'zgarmagan bo'lsa versiya OSHIRILMAYDI: har 30 sekundlik
 // heartbeat butun tenantga delta yuborishga sabab bo'lmasligi kerak.
-func (r *Registry) Heartbeat(nodeID string, endpoints []netipAddrPort) error {
+func (r *Registry) applyHeartbeat(
+	now time.Time, ttl time.Duration, nodeID string, endpoints []netipAddrPort,
+) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -174,9 +173,8 @@ func (r *Registry) Heartbeat(nodeID string, endpoints []netipAddrPort) error {
 		return fmt.Errorf("%w: %s", ErrNodeNotFound, nodeID)
 	}
 
-	now := r.now()
 	node.LastSeen = now
-	node.ExpiresAt = now.Add(r.ttl)
+	node.ExpiresAt = now.Add(ttl)
 
 	if endpoints != nil && !slices.Equal(node.Endpoints, endpoints) {
 		node.Endpoints = slices.Clone(endpoints)
@@ -187,7 +185,7 @@ func (r *Registry) Heartbeat(nodeID string, endpoints []netipAddrPort) error {
 }
 
 // Unregister nodeni ro'yxatdan chiqaradi.
-func (r *Registry) Unregister(nodeID string) error {
+func (r *Registry) applyUnregister(nodeID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -213,6 +211,12 @@ func (r *Registry) Node(nodeID string) (*Node, bool) {
 }
 
 // SetRelays mavjud relay ro'yxatini o'rnatadi.
+//
+// ⚠️ Relaylar REPLIKATSIYA QILINMAYDI va bu ataylab: har bir CP
+// o'zining ichki relay'ini e'lon qiladi (`cmd/cc01-cp/relay.go`).
+// Ularni jurnalga yozsak, replikalar bir-birining manzilini
+// almashtirib turardi va klient o'zi ulanmagan CP ning relay'ini
+// olardi.
 //
 // Ro'yxat o'zgarsa versiya oshadi va kuzatuvchilar xabardor qilinadi:
 // nodelar yangi relayga ulanishi kerak.
@@ -255,26 +259,33 @@ func (r *Registry) Version() uint64 {
 	return r.version
 }
 
-// Expire muddati o'tgan nodelarni ro'yxatdan chiqaradi va nechtasi
-// chiqarilganini qaytaradi.
-func (r *Registry) Expire() int {
+// applyExpire muddati o'tgan nodelarni ro'yxatdan chiqaradi va
+// nechtasi chiqarilganini qaytaradi.
+//
+// ⚠️ Chiqariladiganlar SARALANADI. Go'da map bo'ylab yurish tartibi
+// tasodifiy, `recordLocked` esa har chaqiruvda versiyani oshiradi —
+// ya'ni saralamasak, har bir replikada bir xil versiya BOSHQA
+// nodega tegib qolardi va holat jimgina ajralib ketardi.
+func (r *Registry) applyExpire(now time.Time) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	now := r.now()
-	var removed int
-
+	var expired []string
 	for id, node := range r.nodes {
-		if node.Online(now) {
-			continue
+		if !node.Online(now) {
+			expired = append(expired, id)
 		}
+	}
+	slices.Sort(expired)
+
+	for _, id := range expired {
+		node := r.nodes[id]
 		r.detachLocked(node)
 		delete(r.nodes, id)
 		r.recordLocked(ChangeRemove, node.Tenant, id)
-		removed++
 	}
 
-	return removed
+	return len(expired)
 }
 
 // ─────────────────────── ichki yordamchilar ───────────────────────
@@ -350,6 +361,52 @@ func (r *Registry) tenantMembersLocked(tenant string) []string {
 		return nil
 	}
 	return slices.Sorted(maps.Keys(members))
+}
+
+// Snapshot holatning nusxasini beradi (Raft snapshot uchun).
+//
+// Versiya ham qaytariladi: u replikatsiya qilinadigan holatning
+// bir qismi. Tiklashda nolga tushib qolsa, klientlar allaqachon
+// ko'rgan versiyani qaytadan olib, delta sinxronizatsiyasi
+// buzilardi.
+func (r *Registry) Snapshot() ([]*Node, uint64) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	nodes := make([]*Node, 0, len(r.nodes))
+	for _, node := range r.nodes {
+		nodes = append(nodes, node.Clone())
+	}
+
+	// Snapshot fayli baytma-bayt bir xil bo'lishi uchun saralaymiz.
+	// Zarur emas, lekin ikki replikaning snapshot'ini solishtirish
+	// nosozlik qidirishda juda qulay.
+	slices.SortFunc(nodes, func(a, b *Node) int {
+		return strings.Compare(a.ID, b.ID)
+	})
+
+	return nodes, r.version
+}
+
+// Restore snapshot'dan holatni tiklaydi.
+//
+// O'zgarishlar jurnali TIKLANMAYDI: u faqat delta hisoblash uchun
+// va bo'sh jurnal klientni to'liq map olishga majbur qiladi — bu
+// to'g'ri zaxira yo'l.
+func (r *Registry) Restore(nodes []*Node, version uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.nodes = make(map[string]*Node, len(nodes))
+	r.byTenant = make(map[string]map[string]struct{})
+	r.log = nil
+	r.version = version
+
+	for _, node := range nodes {
+		clone := node.Clone()
+		r.nodes[clone.ID] = clone
+		r.attachLocked(clone)
+	}
 }
 
 // TagIndex tenant ichidagi tag → manzillar xaritasini qaytaradi.

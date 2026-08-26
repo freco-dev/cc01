@@ -40,6 +40,10 @@ type LeaseCommand struct {
 	//	*LeaseCommand_Release
 	//	*LeaseCommand_Sweep
 	//	*LeaseCommand_Bind
+	//	*LeaseCommand_RegisterNode
+	//	*LeaseCommand_HeartbeatNode
+	//	*LeaseCommand_UnregisterNode
+	//	*LeaseCommand_ExpireNodes
 	Command       isLeaseCommand_Command `protobuf_oneof:"command"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -134,6 +138,42 @@ func (x *LeaseCommand) GetBind() *BindNodeIdentity {
 	return nil
 }
 
+func (x *LeaseCommand) GetRegisterNode() *RegisterNode {
+	if x != nil {
+		if x, ok := x.Command.(*LeaseCommand_RegisterNode); ok {
+			return x.RegisterNode
+		}
+	}
+	return nil
+}
+
+func (x *LeaseCommand) GetHeartbeatNode() *HeartbeatNode {
+	if x != nil {
+		if x, ok := x.Command.(*LeaseCommand_HeartbeatNode); ok {
+			return x.HeartbeatNode
+		}
+	}
+	return nil
+}
+
+func (x *LeaseCommand) GetUnregisterNode() *UnregisterNode {
+	if x != nil {
+		if x, ok := x.Command.(*LeaseCommand_UnregisterNode); ok {
+			return x.UnregisterNode
+		}
+	}
+	return nil
+}
+
+func (x *LeaseCommand) GetExpireNodes() *ExpireNodes {
+	if x != nil {
+		if x, ok := x.Command.(*LeaseCommand_ExpireNodes); ok {
+			return x.ExpireNodes
+		}
+	}
+	return nil
+}
+
 type isLeaseCommand_Command interface {
 	isLeaseCommand_Command()
 }
@@ -158,6 +198,28 @@ type LeaseCommand_Bind struct {
 	Bind *BindNodeIdentity `protobuf:"bytes,6,opt,name=bind,proto3,oneof"`
 }
 
+type LeaseCommand_RegisterNode struct {
+	// Registry buyruqlari. Nomi "Lease" bo'lsa-da, bu xabar
+	// endi CP ning UMUMIY buyruq konverti: bitta Raft jurnali
+	// bor va undagi har bir yozuv shu turdan o'qiladi. Xabarni
+	// qayta nomlash simdagi formatni o'zgartirmaydi, lekin
+	// generatsiya qilingan nomlarni butun kod bo'ylab
+	// almashtirardi — foydasi yo'q shovqin.
+	RegisterNode *RegisterNode `protobuf:"bytes,7,opt,name=register_node,json=registerNode,proto3,oneof"`
+}
+
+type LeaseCommand_HeartbeatNode struct {
+	HeartbeatNode *HeartbeatNode `protobuf:"bytes,8,opt,name=heartbeat_node,json=heartbeatNode,proto3,oneof"`
+}
+
+type LeaseCommand_UnregisterNode struct {
+	UnregisterNode *UnregisterNode `protobuf:"bytes,9,opt,name=unregister_node,json=unregisterNode,proto3,oneof"`
+}
+
+type LeaseCommand_ExpireNodes struct {
+	ExpireNodes *ExpireNodes `protobuf:"bytes,10,opt,name=expire_nodes,json=expireNodes,proto3,oneof"`
+}
+
 func (*LeaseCommand_Allocate) isLeaseCommand_Command() {}
 
 func (*LeaseCommand_Renew) isLeaseCommand_Command() {}
@@ -167,6 +229,277 @@ func (*LeaseCommand_Release) isLeaseCommand_Command() {}
 func (*LeaseCommand_Sweep) isLeaseCommand_Command() {}
 
 func (*LeaseCommand_Bind) isLeaseCommand_Command() {}
+
+func (*LeaseCommand_RegisterNode) isLeaseCommand_Command() {}
+
+func (*LeaseCommand_HeartbeatNode) isLeaseCommand_Command() {}
+
+func (*LeaseCommand_UnregisterNode) isLeaseCommand_Command() {}
+
+func (*LeaseCommand_ExpireNodes) isLeaseCommand_Command() {}
+
+// RegisterNode nodeni ro'yxatga oladi yoki mavjudini yangilaydi.
+type RegisterNode struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	PublicKey []byte                 `protobuf:"bytes,1,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
+	Tenant    string                 `protobuf:"bytes,2,opt,name=tenant,proto3" json:"tenant,omitempty"`
+	Hostname  string                 `protobuf:"bytes,3,opt,name=hostname,proto3" json:"hostname,omitempty"`
+	// Addresses — prefikslar matn ko'rinishida ("2a0e:1::5/128").
+	Addresses []string `protobuf:"bytes,4,rep,name=addresses,proto3" json:"addresses,omitempty"`
+	// Endpoints — underlay manzillari ("1.2.3.4:51820").
+	Endpoints []string `protobuf:"bytes,5,rep,name=endpoints,proto3" json:"endpoints,omitempty"`
+	Tags      []string `protobuf:"bytes,6,rep,name=tags,proto3" json:"tags,omitempty"`
+	RelayHome string   `protobuf:"bytes,7,opt,name=relay_home,json=relayHome,proto3" json:"relay_home,omitempty"`
+	// TtlSeconds — buyruqqa yoziladi, konstantadan o'qilmaydi:
+	// konstanta o'zgarsa eski jurnal boshqacha qo'llanib,
+	// replikalar ajralib ketardi.
+	TtlSeconds    uint64 `protobuf:"varint,8,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegisterNode) Reset() {
+	*x = RegisterNode{}
+	mi := &file_cc01_v1_ipam_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegisterNode) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegisterNode) ProtoMessage() {}
+
+func (x *RegisterNode) ProtoReflect() protoreflect.Message {
+	mi := &file_cc01_v1_ipam_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegisterNode.ProtoReflect.Descriptor instead.
+func (*RegisterNode) Descriptor() ([]byte, []int) {
+	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *RegisterNode) GetPublicKey() []byte {
+	if x != nil {
+		return x.PublicKey
+	}
+	return nil
+}
+
+func (x *RegisterNode) GetTenant() string {
+	if x != nil {
+		return x.Tenant
+	}
+	return ""
+}
+
+func (x *RegisterNode) GetHostname() string {
+	if x != nil {
+		return x.Hostname
+	}
+	return ""
+}
+
+func (x *RegisterNode) GetAddresses() []string {
+	if x != nil {
+		return x.Addresses
+	}
+	return nil
+}
+
+func (x *RegisterNode) GetEndpoints() []string {
+	if x != nil {
+		return x.Endpoints
+	}
+	return nil
+}
+
+func (x *RegisterNode) GetTags() []string {
+	if x != nil {
+		return x.Tags
+	}
+	return nil
+}
+
+func (x *RegisterNode) GetRelayHome() string {
+	if x != nil {
+		return x.RelayHome
+	}
+	return ""
+}
+
+func (x *RegisterNode) GetTtlSeconds() uint64 {
+	if x != nil {
+		return x.TtlSeconds
+	}
+	return 0
+}
+
+// HeartbeatNode TTL ni uzaytiradi va endpointlarni yangilaydi.
+type HeartbeatNode struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	NodeId string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	// Endpoints — bo'sh ro'yxat va "berilmagan" ni ajratish uchun
+	// alohida bayroq kerak: birinchisi "endpoint yo'q", ikkinchisi
+	// "tegmang" degani.
+	Endpoints     []string `protobuf:"bytes,2,rep,name=endpoints,proto3" json:"endpoints,omitempty"`
+	HasEndpoints  bool     `protobuf:"varint,3,opt,name=has_endpoints,json=hasEndpoints,proto3" json:"has_endpoints,omitempty"`
+	TtlSeconds    uint64   `protobuf:"varint,4,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HeartbeatNode) Reset() {
+	*x = HeartbeatNode{}
+	mi := &file_cc01_v1_ipam_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HeartbeatNode) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HeartbeatNode) ProtoMessage() {}
+
+func (x *HeartbeatNode) ProtoReflect() protoreflect.Message {
+	mi := &file_cc01_v1_ipam_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HeartbeatNode.ProtoReflect.Descriptor instead.
+func (*HeartbeatNode) Descriptor() ([]byte, []int) {
+	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *HeartbeatNode) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *HeartbeatNode) GetEndpoints() []string {
+	if x != nil {
+		return x.Endpoints
+	}
+	return nil
+}
+
+func (x *HeartbeatNode) GetHasEndpoints() bool {
+	if x != nil {
+		return x.HasEndpoints
+	}
+	return false
+}
+
+func (x *HeartbeatNode) GetTtlSeconds() uint64 {
+	if x != nil {
+		return x.TtlSeconds
+	}
+	return 0
+}
+
+// UnregisterNode nodeni ro'yxatdan chiqaradi.
+type UnregisterNode struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UnregisterNode) Reset() {
+	*x = UnregisterNode{}
+	mi := &file_cc01_v1_ipam_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UnregisterNode) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UnregisterNode) ProtoMessage() {}
+
+func (x *UnregisterNode) ProtoReflect() protoreflect.Message {
+	mi := &file_cc01_v1_ipam_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UnregisterNode.ProtoReflect.Descriptor instead.
+func (*UnregisterNode) Descriptor() ([]byte, []int) {
+	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *UnregisterNode) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+// ExpireNodes muddati o'tganlarni chiqaradi.
+//
+// Lider taklif qiladi: `now` buyruqda, ya'ni hamma replika AYNAN
+// bir xil nodelarni chiqaradi.
+type ExpireNodes struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExpireNodes) Reset() {
+	*x = ExpireNodes{}
+	mi := &file_cc01_v1_ipam_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExpireNodes) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExpireNodes) ProtoMessage() {}
+
+func (x *ExpireNodes) ProtoReflect() protoreflect.Message {
+	mi := &file_cc01_v1_ipam_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExpireNodes.ProtoReflect.Descriptor instead.
+func (*ExpireNodes) Descriptor() ([]byte, []int) {
+	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{4}
+}
 
 // AllocateLease — yangi ijara. Prefiks va ID lider tomonidan
 // tanlangan.
@@ -194,7 +527,7 @@ type AllocateLease struct {
 
 func (x *AllocateLease) Reset() {
 	*x = AllocateLease{}
-	mi := &file_cc01_v1_ipam_proto_msgTypes[1]
+	mi := &file_cc01_v1_ipam_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -206,7 +539,7 @@ func (x *AllocateLease) String() string {
 func (*AllocateLease) ProtoMessage() {}
 
 func (x *AllocateLease) ProtoReflect() protoreflect.Message {
-	mi := &file_cc01_v1_ipam_proto_msgTypes[1]
+	mi := &file_cc01_v1_ipam_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -219,7 +552,7 @@ func (x *AllocateLease) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AllocateLease.ProtoReflect.Descriptor instead.
 func (*AllocateLease) Descriptor() ([]byte, []int) {
-	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{1}
+	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *AllocateLease) GetLeaseId() string {
@@ -288,7 +621,7 @@ type RenewLease struct {
 
 func (x *RenewLease) Reset() {
 	*x = RenewLease{}
-	mi := &file_cc01_v1_ipam_proto_msgTypes[2]
+	mi := &file_cc01_v1_ipam_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -300,7 +633,7 @@ func (x *RenewLease) String() string {
 func (*RenewLease) ProtoMessage() {}
 
 func (x *RenewLease) ProtoReflect() protoreflect.Message {
-	mi := &file_cc01_v1_ipam_proto_msgTypes[2]
+	mi := &file_cc01_v1_ipam_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -313,7 +646,7 @@ func (x *RenewLease) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewLease.ProtoReflect.Descriptor instead.
 func (*RenewLease) Descriptor() ([]byte, []int) {
-	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{2}
+	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *RenewLease) GetLeaseId() string {
@@ -339,7 +672,7 @@ type ReleaseLease struct {
 
 func (x *ReleaseLease) Reset() {
 	*x = ReleaseLease{}
-	mi := &file_cc01_v1_ipam_proto_msgTypes[3]
+	mi := &file_cc01_v1_ipam_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -351,7 +684,7 @@ func (x *ReleaseLease) String() string {
 func (*ReleaseLease) ProtoMessage() {}
 
 func (x *ReleaseLease) ProtoReflect() protoreflect.Message {
-	mi := &file_cc01_v1_ipam_proto_msgTypes[3]
+	mi := &file_cc01_v1_ipam_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -364,7 +697,7 @@ func (x *ReleaseLease) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReleaseLease.ProtoReflect.Descriptor instead.
 func (*ReleaseLease) Descriptor() ([]byte, []int) {
-	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{3}
+	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ReleaseLease) GetLeaseId() string {
@@ -384,7 +717,7 @@ type SweepLeases struct {
 
 func (x *SweepLeases) Reset() {
 	*x = SweepLeases{}
-	mi := &file_cc01_v1_ipam_proto_msgTypes[4]
+	mi := &file_cc01_v1_ipam_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -396,7 +729,7 @@ func (x *SweepLeases) String() string {
 func (*SweepLeases) ProtoMessage() {}
 
 func (x *SweepLeases) ProtoReflect() protoreflect.Message {
-	mi := &file_cc01_v1_ipam_proto_msgTypes[4]
+	mi := &file_cc01_v1_ipam_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -409,7 +742,7 @@ func (x *SweepLeases) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SweepLeases.ProtoReflect.Descriptor instead.
 func (*SweepLeases) Descriptor() ([]byte, []int) {
-	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{4}
+	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{8}
 }
 
 // BindNodeIdentity nodeni uning TLS sertifikatiga bog'laydi.
@@ -429,7 +762,7 @@ type BindNodeIdentity struct {
 
 func (x *BindNodeIdentity) Reset() {
 	*x = BindNodeIdentity{}
-	mi := &file_cc01_v1_ipam_proto_msgTypes[5]
+	mi := &file_cc01_v1_ipam_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -441,7 +774,7 @@ func (x *BindNodeIdentity) String() string {
 func (*BindNodeIdentity) ProtoMessage() {}
 
 func (x *BindNodeIdentity) ProtoReflect() protoreflect.Message {
-	mi := &file_cc01_v1_ipam_proto_msgTypes[5]
+	mi := &file_cc01_v1_ipam_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -454,7 +787,7 @@ func (x *BindNodeIdentity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BindNodeIdentity.ProtoReflect.Descriptor instead.
 func (*BindNodeIdentity) Descriptor() ([]byte, []int) {
-	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{5}
+	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *BindNodeIdentity) GetNodeId() string {
@@ -496,7 +829,7 @@ type LeaseRecord struct {
 
 func (x *LeaseRecord) Reset() {
 	*x = LeaseRecord{}
-	mi := &file_cc01_v1_ipam_proto_msgTypes[6]
+	mi := &file_cc01_v1_ipam_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -508,7 +841,7 @@ func (x *LeaseRecord) String() string {
 func (*LeaseRecord) ProtoMessage() {}
 
 func (x *LeaseRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_cc01_v1_ipam_proto_msgTypes[6]
+	mi := &file_cc01_v1_ipam_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -521,7 +854,7 @@ func (x *LeaseRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LeaseRecord.ProtoReflect.Descriptor instead.
 func (*LeaseRecord) Descriptor() ([]byte, []int) {
-	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{6}
+	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *LeaseRecord) GetId() string {
@@ -605,7 +938,7 @@ type IdentityRecord struct {
 
 func (x *IdentityRecord) Reset() {
 	*x = IdentityRecord{}
-	mi := &file_cc01_v1_ipam_proto_msgTypes[7]
+	mi := &file_cc01_v1_ipam_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -617,7 +950,7 @@ func (x *IdentityRecord) String() string {
 func (*IdentityRecord) ProtoMessage() {}
 
 func (x *IdentityRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_cc01_v1_ipam_proto_msgTypes[7]
+	mi := &file_cc01_v1_ipam_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -630,7 +963,7 @@ func (x *IdentityRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IdentityRecord.ProtoReflect.Descriptor instead.
 func (*IdentityRecord) Descriptor() ([]byte, []int) {
-	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{7}
+	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *IdentityRecord) GetNodeId() string {
@@ -647,19 +980,219 @@ func (x *IdentityRecord) GetCertPin() string {
 	return ""
 }
 
+// NodeRecord — snapshot'ga yoziladigan bitta node.
+type NodeRecord struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	PublicKey     []byte                 `protobuf:"bytes,2,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
+	Tenant        string                 `protobuf:"bytes,3,opt,name=tenant,proto3" json:"tenant,omitempty"`
+	Hostname      string                 `protobuf:"bytes,4,opt,name=hostname,proto3" json:"hostname,omitempty"`
+	Addresses     []string               `protobuf:"bytes,5,rep,name=addresses,proto3" json:"addresses,omitempty"`
+	Endpoints     []string               `protobuf:"bytes,6,rep,name=endpoints,proto3" json:"endpoints,omitempty"`
+	Tags          []string               `protobuf:"bytes,7,rep,name=tags,proto3" json:"tags,omitempty"`
+	RelayHome     string                 `protobuf:"bytes,8,opt,name=relay_home,json=relayHome,proto3" json:"relay_home,omitempty"`
+	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	LastSeen      *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=last_seen,json=lastSeen,proto3" json:"last_seen,omitempty"`
+	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NodeRecord) Reset() {
+	*x = NodeRecord{}
+	mi := &file_cc01_v1_ipam_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NodeRecord) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NodeRecord) ProtoMessage() {}
+
+func (x *NodeRecord) ProtoReflect() protoreflect.Message {
+	mi := &file_cc01_v1_ipam_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NodeRecord.ProtoReflect.Descriptor instead.
+func (*NodeRecord) Descriptor() ([]byte, []int) {
+	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *NodeRecord) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *NodeRecord) GetPublicKey() []byte {
+	if x != nil {
+		return x.PublicKey
+	}
+	return nil
+}
+
+func (x *NodeRecord) GetTenant() string {
+	if x != nil {
+		return x.Tenant
+	}
+	return ""
+}
+
+func (x *NodeRecord) GetHostname() string {
+	if x != nil {
+		return x.Hostname
+	}
+	return ""
+}
+
+func (x *NodeRecord) GetAddresses() []string {
+	if x != nil {
+		return x.Addresses
+	}
+	return nil
+}
+
+func (x *NodeRecord) GetEndpoints() []string {
+	if x != nil {
+		return x.Endpoints
+	}
+	return nil
+}
+
+func (x *NodeRecord) GetTags() []string {
+	if x != nil {
+		return x.Tags
+	}
+	return nil
+}
+
+func (x *NodeRecord) GetRelayHome() string {
+	if x != nil {
+		return x.RelayHome
+	}
+	return ""
+}
+
+func (x *NodeRecord) GetCreatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return nil
+}
+
+func (x *NodeRecord) GetLastSeen() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastSeen
+	}
+	return nil
+}
+
+func (x *NodeRecord) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
+// RegistryMeta — snapshot'dagi registry metama'lumoti.
+//
+// Hozircha faqat versiya, lekin alohida yozuv sifatida: kelajakda
+// qo'shiladigan maydonlar node yozuvlarining formatiga tegmasligi
+// kerak.
+type RegistryMeta struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Version       uint64                 `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegistryMeta) Reset() {
+	*x = RegistryMeta{}
+	mi := &file_cc01_v1_ipam_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegistryMeta) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegistryMeta) ProtoMessage() {}
+
+func (x *RegistryMeta) ProtoReflect() protoreflect.Message {
+	mi := &file_cc01_v1_ipam_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegistryMeta.ProtoReflect.Descriptor instead.
+func (*RegistryMeta) Descriptor() ([]byte, []int) {
+	return file_cc01_v1_ipam_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *RegistryMeta) GetVersion() uint64 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
 var File_cc01_v1_ipam_proto protoreflect.FileDescriptor
 
 const file_cc01_v1_ipam_proto_rawDesc = "" +
 	"\n" +
-	"\x12cc01/v1/ipam.proto\x12\acc01.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xbc\x02\n" +
+	"\x12cc01/v1/ipam.proto\x12\acc01.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xba\x04\n" +
 	"\fLeaseCommand\x12,\n" +
 	"\x03now\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x03now\x124\n" +
 	"\ballocate\x18\x02 \x01(\v2\x16.cc01.v1.AllocateLeaseH\x00R\ballocate\x12+\n" +
 	"\x05renew\x18\x03 \x01(\v2\x13.cc01.v1.RenewLeaseH\x00R\x05renew\x121\n" +
 	"\arelease\x18\x04 \x01(\v2\x15.cc01.v1.ReleaseLeaseH\x00R\arelease\x12,\n" +
 	"\x05sweep\x18\x05 \x01(\v2\x14.cc01.v1.SweepLeasesH\x00R\x05sweep\x12/\n" +
-	"\x04bind\x18\x06 \x01(\v2\x19.cc01.v1.BindNodeIdentityH\x00R\x04bindB\t\n" +
-	"\acommand\"\xe7\x01\n" +
+	"\x04bind\x18\x06 \x01(\v2\x19.cc01.v1.BindNodeIdentityH\x00R\x04bind\x12<\n" +
+	"\rregister_node\x18\a \x01(\v2\x15.cc01.v1.RegisterNodeH\x00R\fregisterNode\x12?\n" +
+	"\x0eheartbeat_node\x18\b \x01(\v2\x16.cc01.v1.HeartbeatNodeH\x00R\rheartbeatNode\x12B\n" +
+	"\x0funregister_node\x18\t \x01(\v2\x17.cc01.v1.UnregisterNodeH\x00R\x0eunregisterNode\x129\n" +
+	"\fexpire_nodes\x18\n" +
+	" \x01(\v2\x14.cc01.v1.ExpireNodesH\x00R\vexpireNodesB\t\n" +
+	"\acommand\"\xf1\x01\n" +
+	"\fRegisterNode\x12\x1d\n" +
+	"\n" +
+	"public_key\x18\x01 \x01(\fR\tpublicKey\x12\x16\n" +
+	"\x06tenant\x18\x02 \x01(\tR\x06tenant\x12\x1a\n" +
+	"\bhostname\x18\x03 \x01(\tR\bhostname\x12\x1c\n" +
+	"\taddresses\x18\x04 \x03(\tR\taddresses\x12\x1c\n" +
+	"\tendpoints\x18\x05 \x03(\tR\tendpoints\x12\x12\n" +
+	"\x04tags\x18\x06 \x03(\tR\x04tags\x12\x1d\n" +
+	"\n" +
+	"relay_home\x18\a \x01(\tR\trelayHome\x12\x1f\n" +
+	"\vttl_seconds\x18\b \x01(\x04R\n" +
+	"ttlSeconds\"\x8c\x01\n" +
+	"\rHeartbeatNode\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x1c\n" +
+	"\tendpoints\x18\x02 \x03(\tR\tendpoints\x12#\n" +
+	"\rhas_endpoints\x18\x03 \x01(\bR\fhasEndpoints\x12\x1f\n" +
+	"\vttl_seconds\x18\x04 \x01(\x04R\n" +
+	"ttlSeconds\")\n" +
+	"\x0eUnregisterNode\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\"\r\n" +
+	"\vExpireNodes\"\xe7\x01\n" +
 	"\rAllocateLease\x12\x19\n" +
 	"\blease_id\x18\x01 \x01(\tR\aleaseId\x12\x16\n" +
 	"\x06prefix\x18\x02 \x01(\tR\x06prefix\x12\x12\n" +
@@ -697,7 +1230,27 @@ const file_cc01_v1_ipam_proto_rawDesc = "" +
 	"releasedAt\"D\n" +
 	"\x0eIdentityRecord\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x19\n" +
-	"\bcert_pin\x18\x02 \x01(\tR\acertPinB\x89\x01\n" +
+	"\bcert_pin\x18\x02 \x01(\tR\acertPin\"\x96\x03\n" +
+	"\n" +
+	"NodeRecord\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x1d\n" +
+	"\n" +
+	"public_key\x18\x02 \x01(\fR\tpublicKey\x12\x16\n" +
+	"\x06tenant\x18\x03 \x01(\tR\x06tenant\x12\x1a\n" +
+	"\bhostname\x18\x04 \x01(\tR\bhostname\x12\x1c\n" +
+	"\taddresses\x18\x05 \x03(\tR\taddresses\x12\x1c\n" +
+	"\tendpoints\x18\x06 \x03(\tR\tendpoints\x12\x12\n" +
+	"\x04tags\x18\a \x03(\tR\x04tags\x12\x1d\n" +
+	"\n" +
+	"relay_home\x18\b \x01(\tR\trelayHome\x129\n" +
+	"\n" +
+	"created_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x127\n" +
+	"\tlast_seen\x18\n" +
+	" \x01(\v2\x1a.google.protobuf.TimestampR\blastSeen\x129\n" +
+	"\n" +
+	"expires_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"(\n" +
+	"\fRegistryMeta\x12\x18\n" +
+	"\aversion\x18\x01 \x01(\x04R\aversionB\x89\x01\n" +
 	"\vcom.cc01.v1B\tIpamProtoP\x01Z2github.com/freco-dev/cc01/proto/gen/cc01/v1;cc01v1\xa2\x02\x03CXX\xaa\x02\aCc01.V1\xca\x02\aCc01\\V1\xe2\x02\x13Cc01\\V1\\GPBMetadata\xea\x02\bCc01::V1b\x06proto3"
 
 var (
@@ -712,33 +1265,46 @@ func file_cc01_v1_ipam_proto_rawDescGZIP() []byte {
 	return file_cc01_v1_ipam_proto_rawDescData
 }
 
-var file_cc01_v1_ipam_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_cc01_v1_ipam_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_cc01_v1_ipam_proto_goTypes = []any{
 	(*LeaseCommand)(nil),          // 0: cc01.v1.LeaseCommand
-	(*AllocateLease)(nil),         // 1: cc01.v1.AllocateLease
-	(*RenewLease)(nil),            // 2: cc01.v1.RenewLease
-	(*ReleaseLease)(nil),          // 3: cc01.v1.ReleaseLease
-	(*SweepLeases)(nil),           // 4: cc01.v1.SweepLeases
-	(*BindNodeIdentity)(nil),      // 5: cc01.v1.BindNodeIdentity
-	(*LeaseRecord)(nil),           // 6: cc01.v1.LeaseRecord
-	(*IdentityRecord)(nil),        // 7: cc01.v1.IdentityRecord
-	(*timestamppb.Timestamp)(nil), // 8: google.protobuf.Timestamp
+	(*RegisterNode)(nil),          // 1: cc01.v1.RegisterNode
+	(*HeartbeatNode)(nil),         // 2: cc01.v1.HeartbeatNode
+	(*UnregisterNode)(nil),        // 3: cc01.v1.UnregisterNode
+	(*ExpireNodes)(nil),           // 4: cc01.v1.ExpireNodes
+	(*AllocateLease)(nil),         // 5: cc01.v1.AllocateLease
+	(*RenewLease)(nil),            // 6: cc01.v1.RenewLease
+	(*ReleaseLease)(nil),          // 7: cc01.v1.ReleaseLease
+	(*SweepLeases)(nil),           // 8: cc01.v1.SweepLeases
+	(*BindNodeIdentity)(nil),      // 9: cc01.v1.BindNodeIdentity
+	(*LeaseRecord)(nil),           // 10: cc01.v1.LeaseRecord
+	(*IdentityRecord)(nil),        // 11: cc01.v1.IdentityRecord
+	(*NodeRecord)(nil),            // 12: cc01.v1.NodeRecord
+	(*RegistryMeta)(nil),          // 13: cc01.v1.RegistryMeta
+	(*timestamppb.Timestamp)(nil), // 14: google.protobuf.Timestamp
 }
 var file_cc01_v1_ipam_proto_depIdxs = []int32{
-	8, // 0: cc01.v1.LeaseCommand.now:type_name -> google.protobuf.Timestamp
-	1, // 1: cc01.v1.LeaseCommand.allocate:type_name -> cc01.v1.AllocateLease
-	2, // 2: cc01.v1.LeaseCommand.renew:type_name -> cc01.v1.RenewLease
-	3, // 3: cc01.v1.LeaseCommand.release:type_name -> cc01.v1.ReleaseLease
-	4, // 4: cc01.v1.LeaseCommand.sweep:type_name -> cc01.v1.SweepLeases
-	5, // 5: cc01.v1.LeaseCommand.bind:type_name -> cc01.v1.BindNodeIdentity
-	8, // 6: cc01.v1.LeaseRecord.issued_at:type_name -> google.protobuf.Timestamp
-	8, // 7: cc01.v1.LeaseRecord.expires_at:type_name -> google.protobuf.Timestamp
-	8, // 8: cc01.v1.LeaseRecord.released_at:type_name -> google.protobuf.Timestamp
-	9, // [9:9] is the sub-list for method output_type
-	9, // [9:9] is the sub-list for method input_type
-	9, // [9:9] is the sub-list for extension type_name
-	9, // [9:9] is the sub-list for extension extendee
-	0, // [0:9] is the sub-list for field type_name
+	14, // 0: cc01.v1.LeaseCommand.now:type_name -> google.protobuf.Timestamp
+	5,  // 1: cc01.v1.LeaseCommand.allocate:type_name -> cc01.v1.AllocateLease
+	6,  // 2: cc01.v1.LeaseCommand.renew:type_name -> cc01.v1.RenewLease
+	7,  // 3: cc01.v1.LeaseCommand.release:type_name -> cc01.v1.ReleaseLease
+	8,  // 4: cc01.v1.LeaseCommand.sweep:type_name -> cc01.v1.SweepLeases
+	9,  // 5: cc01.v1.LeaseCommand.bind:type_name -> cc01.v1.BindNodeIdentity
+	1,  // 6: cc01.v1.LeaseCommand.register_node:type_name -> cc01.v1.RegisterNode
+	2,  // 7: cc01.v1.LeaseCommand.heartbeat_node:type_name -> cc01.v1.HeartbeatNode
+	3,  // 8: cc01.v1.LeaseCommand.unregister_node:type_name -> cc01.v1.UnregisterNode
+	4,  // 9: cc01.v1.LeaseCommand.expire_nodes:type_name -> cc01.v1.ExpireNodes
+	14, // 10: cc01.v1.LeaseRecord.issued_at:type_name -> google.protobuf.Timestamp
+	14, // 11: cc01.v1.LeaseRecord.expires_at:type_name -> google.protobuf.Timestamp
+	14, // 12: cc01.v1.LeaseRecord.released_at:type_name -> google.protobuf.Timestamp
+	14, // 13: cc01.v1.NodeRecord.created_at:type_name -> google.protobuf.Timestamp
+	14, // 14: cc01.v1.NodeRecord.last_seen:type_name -> google.protobuf.Timestamp
+	14, // 15: cc01.v1.NodeRecord.expires_at:type_name -> google.protobuf.Timestamp
+	16, // [16:16] is the sub-list for method output_type
+	16, // [16:16] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_cc01_v1_ipam_proto_init() }
@@ -752,6 +1318,10 @@ func file_cc01_v1_ipam_proto_init() {
 		(*LeaseCommand_Release)(nil),
 		(*LeaseCommand_Sweep)(nil),
 		(*LeaseCommand_Bind)(nil),
+		(*LeaseCommand_RegisterNode)(nil),
+		(*LeaseCommand_HeartbeatNode)(nil),
+		(*LeaseCommand_UnregisterNode)(nil),
+		(*LeaseCommand_ExpireNodes)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -759,7 +1329,7 @@ func file_cc01_v1_ipam_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cc01_v1_ipam_proto_rawDesc), len(file_cc01_v1_ipam_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   8,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -34,7 +34,7 @@ func (c *clock) advance(d time.Duration) {
 func newRegistry(t *testing.T) (*Registry, *clock) {
 	t.Helper()
 	c := newClock()
-	return New(Options{Now: c.Now}), c
+	return New(Options{}), c
 }
 
 func key(seed string) PublicKey {
@@ -43,10 +43,12 @@ func key(seed string) PublicKey {
 	return k
 }
 
-func register(t *testing.T, r *Registry, tenant, name string, addr string) *Node {
+// register — soat testda oshkora beriladi: registry endi vaqtni
+// o'zi o'qimaydi (Raft holat mashinasi bo'lgani uchun).
+func register(t *testing.T, r *Registry, c *clock, tenant, name string, addr string) *Node {
 	t.Helper()
 
-	node, err := r.Register(Registration{
+	node, err := r.applyRegister(c.Now(), DefaultTTL, Registration{
 		PublicKey: key(name),
 		Tenant:    tenant,
 		Hostname:  name,
@@ -62,9 +64,9 @@ func register(t *testing.T, r *Registry, tenant, name string, addr string) *Node
 // ═══════════════ Ro'yxatga olish ═══════════════
 
 func TestRegister_DerivesIDFromPublicKey(t *testing.T) {
-	r, _ := newRegistry(t)
+	r, c := newRegistry(t)
 
-	node := register(t, r, "t1", "laptop", "2a0e:1234:1::1/128")
+	node := register(t, r, c, "t1", "laptop", "2a0e:1234:1::1/128")
 
 	if node.ID != NodeID(key("laptop")) {
 		t.Errorf("ID kalitdan hosil qilinishi kerak, olindi %q", node.ID)
@@ -77,10 +79,10 @@ func TestRegister_DerivesIDFromPublicKey(t *testing.T) {
 // Bir xil kalit bilan qayta ro'yxatdan o'tish yangi node yaratmasligi
 // kerak — klient qayta ulanishi odatiy hol.
 func TestRegister_IsIdempotent(t *testing.T) {
-	r, _ := newRegistry(t)
+	r, c := newRegistry(t)
 
-	first := register(t, r, "t1", "laptop", "2a0e:1234:1::1/128")
-	second := register(t, r, "t1", "laptop", "2a0e:1234:1::1/128")
+	first := register(t, r, c, "t1", "laptop", "2a0e:1234:1::1/128")
+	second := register(t, r, c, "t1", "laptop", "2a0e:1234:1::1/128")
 
 	if first.ID != second.ID {
 		t.Errorf("bir xil ID kutilgan: %s va %s", first.ID, second.ID)
@@ -91,20 +93,20 @@ func TestRegister_IsIdempotent(t *testing.T) {
 }
 
 func TestRegister_Validation(t *testing.T) {
-	r, _ := newRegistry(t)
+	r, c := newRegistry(t)
 
-	if _, err := r.Register(Registration{PublicKey: key("a")}); !errors.Is(err, ErrTenantRequired) {
+	if _, err := r.applyRegister(c.Now(), DefaultTTL, Registration{PublicKey: key("a")}); !errors.Is(err, ErrTenantRequired) {
 		t.Errorf("ErrTenantRequired kutilgan, olindi: %v", err)
 	}
-	if _, err := r.Register(Registration{Tenant: "t1"}); !errors.Is(err, ErrKeyRequired) {
+	if _, err := r.applyRegister(c.Now(), DefaultTTL, Registration{Tenant: "t1"}); !errors.Is(err, ErrKeyRequired) {
 		t.Errorf("ErrKeyRequired kutilgan, olindi: %v", err)
 	}
 }
 
 func TestRegister_ReturnsCopy(t *testing.T) {
-	r, _ := newRegistry(t)
+	r, c := newRegistry(t)
 
-	node := register(t, r, "t1", "laptop", "2a0e:1234:1::1/128")
+	node := register(t, r, c, "t1", "laptop", "2a0e:1234:1::1/128")
 	node.Addresses[0] = netip.MustParsePrefix("::/0")
 
 	stored, _ := r.Node(node.ID)
@@ -116,11 +118,11 @@ func TestRegister_ReturnsCopy(t *testing.T) {
 // ═══════════════ Tenant izolyatsiyasi ═══════════════
 
 func TestNetworkMap_OnlyShowsOwnTenant(t *testing.T) {
-	r, _ := newRegistry(t)
+	r, c := newRegistry(t)
 
-	alice := register(t, r, "t1", "alice", "2a0e:1234:1::1/128")
-	register(t, r, "t1", "bob", "2a0e:1234:1::2/128")
-	register(t, r, "t2", "stranger", "2a0e:9999:1::1/128")
+	alice := register(t, r, c, "t1", "alice", "2a0e:1234:1::1/128")
+	register(t, r, c, "t1", "bob", "2a0e:1234:1::2/128")
+	register(t, r, c, "t2", "stranger", "2a0e:9999:1::1/128")
 
 	netmap, err := r.NetworkMapFor(alice.ID, 0)
 	if err != nil {
@@ -138,10 +140,10 @@ func TestNetworkMap_OnlyShowsOwnTenant(t *testing.T) {
 // Node o'zi bilan sessiya qurmaydi — u peerlar ro'yxatida bo'lmasligi
 // kerak.
 func TestNetworkMap_SelfIsNotAPeer(t *testing.T) {
-	r, _ := newRegistry(t)
+	r, c := newRegistry(t)
 
-	alice := register(t, r, "t1", "alice", "2a0e:1234:1::1/128")
-	register(t, r, "t1", "bob", "2a0e:1234:1::2/128")
+	alice := register(t, r, c, "t1", "alice", "2a0e:1234:1::1/128")
+	register(t, r, c, "t1", "bob", "2a0e:1234:1::2/128")
 
 	netmap, _ := r.NetworkMapFor(alice.ID, 0)
 
@@ -166,10 +168,10 @@ func TestNetworkMap_UnknownNode(t *testing.T) {
 // ═══════════════ Delta sync ═══════════════
 
 func TestNetworkMap_FirstRequestIsFull(t *testing.T) {
-	r, _ := newRegistry(t)
+	r, c := newRegistry(t)
 
-	alice := register(t, r, "t1", "alice", "2a0e:1234:1::1/128")
-	register(t, r, "t1", "bob", "2a0e:1234:1::2/128")
+	alice := register(t, r, c, "t1", "alice", "2a0e:1234:1::1/128")
+	register(t, r, c, "t1", "bob", "2a0e:1234:1::2/128")
 
 	netmap, _ := r.NetworkMapFor(alice.ID, 0)
 
@@ -182,10 +184,10 @@ func TestNetworkMap_FirstRequestIsFull(t *testing.T) {
 }
 
 func TestNetworkMap_NoChangesGivesEmptyDelta(t *testing.T) {
-	r, _ := newRegistry(t)
+	r, c := newRegistry(t)
 
-	alice := register(t, r, "t1", "alice", "2a0e:1234:1::1/128")
-	register(t, r, "t1", "bob", "2a0e:1234:1::2/128")
+	alice := register(t, r, c, "t1", "alice", "2a0e:1234:1::1/128")
+	register(t, r, c, "t1", "bob", "2a0e:1234:1::2/128")
 
 	first, _ := r.NetworkMapFor(alice.ID, 0)
 	second, _ := r.NetworkMapFor(alice.ID, first.Version)
@@ -200,15 +202,15 @@ func TestNetworkMap_NoChangesGivesEmptyDelta(t *testing.T) {
 }
 
 func TestNetworkMap_DeltaCarriesOnlyChanges(t *testing.T) {
-	r, _ := newRegistry(t)
+	r, c := newRegistry(t)
 
-	alice := register(t, r, "t1", "alice", "2a0e:1234:1::1/128")
-	register(t, r, "t1", "bob", "2a0e:1234:1::2/128")
+	alice := register(t, r, c, "t1", "alice", "2a0e:1234:1::1/128")
+	register(t, r, c, "t1", "bob", "2a0e:1234:1::2/128")
 
 	base, _ := r.NetworkMapFor(alice.ID, 0)
 
 	// Uchinchi node qo'shiladi.
-	register(t, r, "t1", "carol", "2a0e:1234:1::3/128")
+	register(t, r, c, "t1", "carol", "2a0e:1234:1::3/128")
 
 	delta, _ := r.NetworkMapFor(alice.ID, base.Version)
 
@@ -227,14 +229,14 @@ func TestNetworkMap_DeltaCarriesOnlyChanges(t *testing.T) {
 }
 
 func TestNetworkMap_DeltaReportsRemovals(t *testing.T) {
-	r, _ := newRegistry(t)
+	r, c := newRegistry(t)
 
-	alice := register(t, r, "t1", "alice", "2a0e:1234:1::1/128")
-	bob := register(t, r, "t1", "bob", "2a0e:1234:1::2/128")
+	alice := register(t, r, c, "t1", "alice", "2a0e:1234:1::1/128")
+	bob := register(t, r, c, "t1", "bob", "2a0e:1234:1::2/128")
 
 	base, _ := r.NetworkMapFor(alice.ID, 0)
 
-	if err := r.Unregister(bob.ID); err != nil {
+	if err := r.applyUnregister(bob.ID); err != nil {
 		t.Fatalf("Unregister: %v", err)
 	}
 
@@ -251,15 +253,15 @@ func TestNetworkMap_DeltaReportsRemovals(t *testing.T) {
 // Bitta node bir necha marta o'zgarsa, deltada FAQAT BIR MARTA
 // bo'lishi kerak — klientga oraliq holatlar kerak emas.
 func TestNetworkMap_DeltaCollapsesRepeatedChanges(t *testing.T) {
-	r, _ := newRegistry(t)
+	r, c := newRegistry(t)
 
-	alice := register(t, r, "t1", "alice", "2a0e:1234:1::1/128")
-	bob := register(t, r, "t1", "bob", "2a0e:1234:1::2/128")
+	alice := register(t, r, c, "t1", "alice", "2a0e:1234:1::1/128")
+	bob := register(t, r, c, "t1", "bob", "2a0e:1234:1::2/128")
 
 	base, _ := r.NetworkMapFor(alice.ID, 0)
 
 	for i := range 5 {
-		if err := r.Heartbeat(bob.ID, []netip.AddrPort{
+		if err := r.applyHeartbeat(c.Now(), DefaultTTL, bob.ID, []netip.AddrPort{
 			netip.MustParseAddrPort(fmt.Sprintf("203.0.113.%d:51820", i+10)),
 		}); err != nil {
 			t.Fatalf("Heartbeat: %v", err)
@@ -283,17 +285,17 @@ func TestNetworkMap_DeltaCollapsesRepeatedChanges(t *testing.T) {
 // Node o'chirilib, keyin qayta qo'shilsa — delta uni MAVJUD deb
 // ko'rsatishi kerak, o'chirilgan emas.
 func TestNetworkMap_RemovedThenReaddedAppearsAsPeer(t *testing.T) {
-	r, _ := newRegistry(t)
+	r, c := newRegistry(t)
 
-	alice := register(t, r, "t1", "alice", "2a0e:1234:1::1/128")
-	bob := register(t, r, "t1", "bob", "2a0e:1234:1::2/128")
+	alice := register(t, r, c, "t1", "alice", "2a0e:1234:1::1/128")
+	bob := register(t, r, c, "t1", "bob", "2a0e:1234:1::2/128")
 
 	base, _ := r.NetworkMapFor(alice.ID, 0)
 
-	if err := r.Unregister(bob.ID); err != nil {
+	if err := r.applyUnregister(bob.ID); err != nil {
 		t.Fatalf("Unregister: %v", err)
 	}
-	register(t, r, "t1", "bob", "2a0e:1234:1::2/128")
+	register(t, r, c, "t1", "bob", "2a0e:1234:1::2/128")
 
 	delta, _ := r.NetworkMapFor(alice.ID, base.Version)
 
@@ -309,9 +311,9 @@ func TestNetworkMap_RemovedThenReaddedAppearsAsPeer(t *testing.T) {
 // aks holda u o'zgarishlarni jimgina o'tkazib yuborardi.
 func TestNetworkMap_FallsBackToFullWhenLogTruncated(t *testing.T) {
 	c := newClock()
-	r := New(Options{Now: c.Now, LogLimit: 4})
+	r := New(Options{LogLimit: 4})
 
-	alice, err := r.Register(Registration{
+	alice, err := r.applyRegister(c.Now(), DefaultTTL, Registration{
 		PublicKey: key("alice"), Tenant: "t1",
 		Addresses: []netip.Prefix{netip.MustParsePrefix("2a0e:1234:1::1/128")},
 	})
@@ -323,7 +325,7 @@ func TestNetworkMap_FallsBackToFullWhenLogTruncated(t *testing.T) {
 
 	// Jurnalni to'ldirib yuboramiz.
 	for i := range 10 {
-		register(t, r, "t1", fmt.Sprintf("node-%d", i), "2a0e:1234:1::9/128")
+		register(t, r, c, "t1", fmt.Sprintf("node-%d", i), "2a0e:1234:1::9/128")
 	}
 
 	netmap, _ := r.NetworkMapFor(alice.ID, base.Version)
@@ -341,13 +343,13 @@ func TestNetworkMap_FallsBackToFullWhenLogTruncated(t *testing.T) {
 // Har 30 sekundlik heartbeat butun tenantga delta yuborishga sabab
 // bo'lmasligi kerak.
 func TestHeartbeat_WithoutChangesDoesNotBumpVersion(t *testing.T) {
-	r, _ := newRegistry(t)
+	r, c := newRegistry(t)
 
-	node := register(t, r, "t1", "laptop", "2a0e:1234:1::1/128")
+	node := register(t, r, c, "t1", "laptop", "2a0e:1234:1::1/128")
 	before := r.Version()
 
 	for range 5 {
-		if err := r.Heartbeat(node.ID, node.Endpoints); err != nil {
+		if err := r.applyHeartbeat(c.Now(), DefaultTTL, node.ID, node.Endpoints); err != nil {
 			t.Fatalf("Heartbeat: %v", err)
 		}
 	}
@@ -358,12 +360,12 @@ func TestHeartbeat_WithoutChangesDoesNotBumpVersion(t *testing.T) {
 }
 
 func TestHeartbeat_EndpointChangeBumpsVersion(t *testing.T) {
-	r, _ := newRegistry(t)
+	r, c := newRegistry(t)
 
-	node := register(t, r, "t1", "laptop", "2a0e:1234:1::1/128")
+	node := register(t, r, c, "t1", "laptop", "2a0e:1234:1::1/128")
 	before := r.Version()
 
-	if err := r.Heartbeat(node.ID, []netip.AddrPort{
+	if err := r.applyHeartbeat(c.Now(), DefaultTTL, node.ID, []netip.AddrPort{
 		netip.MustParseAddrPort("198.51.100.7:51820"),
 	}); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
@@ -375,9 +377,9 @@ func TestHeartbeat_EndpointChangeBumpsVersion(t *testing.T) {
 }
 
 func TestHeartbeat_UnknownNode(t *testing.T) {
-	r, _ := newRegistry(t)
+	r, c := newRegistry(t)
 
-	if err := r.Heartbeat("yoq", nil); !errors.Is(err, ErrNodeNotFound) {
+	if err := r.applyHeartbeat(c.Now(), DefaultTTL, "yoq", nil); !errors.Is(err, ErrNodeNotFound) {
 		t.Fatalf("ErrNodeNotFound kutilgan, olindi: %v", err)
 	}
 }
@@ -385,17 +387,17 @@ func TestHeartbeat_UnknownNode(t *testing.T) {
 func TestExpire_RemovesStaleNodes(t *testing.T) {
 	r, c := newRegistry(t)
 
-	alice := register(t, r, "t1", "alice", "2a0e:1234:1::1/128")
-	bob := register(t, r, "t1", "bob", "2a0e:1234:1::2/128")
+	alice := register(t, r, c, "t1", "alice", "2a0e:1234:1::1/128")
+	bob := register(t, r, c, "t1", "bob", "2a0e:1234:1::2/128")
 
 	c.advance(DefaultTTL / 2)
-	if err := r.Heartbeat(alice.ID, nil); err != nil {
+	if err := r.applyHeartbeat(c.Now(), DefaultTTL, alice.ID, nil); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
 
 	c.advance(DefaultTTL/2 + time.Second)
 
-	if removed := r.Expire(); removed != 1 {
+	if removed := r.applyExpire(c.Now()); removed != 1 {
 		t.Errorf("1 ta o'chirilishi kerak edi, %d olindi", removed)
 	}
 
@@ -410,16 +412,16 @@ func TestExpire_RemovesStaleNodes(t *testing.T) {
 // ═══════════════ Watch ═══════════════
 
 func TestWatch_NotifiesOnChange(t *testing.T) {
-	r, _ := newRegistry(t)
+	r, c := newRegistry(t)
 
-	register(t, r, "t1", "alice", "2a0e:1234:1::1/128")
+	register(t, r, c, "t1", "alice", "2a0e:1234:1::1/128")
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	updates := r.Watch(ctx, "t1")
 
-	register(t, r, "t1", "bob", "2a0e:1234:1::2/128")
+	register(t, r, c, "t1", "bob", "2a0e:1234:1::2/128")
 
 	select {
 	case version := <-updates:
@@ -432,14 +434,14 @@ func TestWatch_NotifiesOnChange(t *testing.T) {
 }
 
 func TestWatch_IgnoresOtherTenants(t *testing.T) {
-	r, _ := newRegistry(t)
+	r, c := newRegistry(t)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	updates := r.Watch(ctx, "t1")
 
-	register(t, r, "t2", "stranger", "2a0e:9999:1::1/128")
+	register(t, r, c, "t2", "stranger", "2a0e:9999:1::1/128")
 
 	select {
 	case version := <-updates:
@@ -481,7 +483,7 @@ func TestWatch_UnregistersOnContextCancel(t *testing.T) {
 
 // Sekin kuzatuvchi registryni bloklab qo'ymasligi kerak.
 func TestWatch_SlowWatcherDoesNotBlockRegistry(t *testing.T) {
-	r, _ := newRegistry(t)
+	r, c := newRegistry(t)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -492,7 +494,7 @@ func TestWatch_SlowWatcherDoesNotBlockRegistry(t *testing.T) {
 	go func() {
 		defer close(done)
 		for i := range 100 {
-			register(t, r, "t1", fmt.Sprintf("node-%d", i), "2a0e:1234:1::9/128")
+			register(t, r, c, "t1", fmt.Sprintf("node-%d", i), "2a0e:1234:1::9/128")
 		}
 	}()
 
@@ -504,7 +506,7 @@ func TestWatch_SlowWatcherDoesNotBlockRegistry(t *testing.T) {
 }
 
 func TestRegistry_ConcurrentAccess(t *testing.T) {
-	r, _ := newRegistry(t)
+	r, c := newRegistry(t)
 
 	var wg sync.WaitGroup
 	for worker := range 8 {
@@ -512,7 +514,7 @@ func TestRegistry_ConcurrentAccess(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := range 50 {
-				node, err := r.Register(Registration{
+				node, err := r.applyRegister(c.Now(), DefaultTTL, Registration{
 					PublicKey: key(fmt.Sprintf("w%d-n%d", worker, i)),
 					Tenant:    "t1",
 					Addresses: []netip.Prefix{netip.MustParsePrefix("2a0e:1234:1::1/128")},
@@ -533,11 +535,11 @@ func TestRegistry_ConcurrentAccess(t *testing.T) {
 
 func BenchmarkNetworkMap_Delta(b *testing.B) {
 	c := newClock()
-	r := New(Options{Now: c.Now})
+	r := New(Options{})
 
 	var selfID string
 	for i := range 500 {
-		node, _ := r.Register(Registration{
+		node, _ := r.applyRegister(c.Now(), DefaultTTL, Registration{
 			PublicKey: key(fmt.Sprintf("node-%d", i)),
 			Tenant:    "t1",
 			Addresses: []netip.Prefix{netip.MustParsePrefix("2a0e:1234:1::1/128")},
@@ -557,11 +559,11 @@ func BenchmarkNetworkMap_Delta(b *testing.B) {
 
 func BenchmarkNetworkMap_Full(b *testing.B) {
 	c := newClock()
-	r := New(Options{Now: c.Now})
+	r := New(Options{})
 
 	var selfID string
 	for i := range 500 {
-		node, _ := r.Register(Registration{
+		node, _ := r.applyRegister(c.Now(), DefaultTTL, Registration{
 			PublicKey: key(fmt.Sprintf("node-%d", i)),
 			Tenant:    "t1",
 			Addresses: []netip.Prefix{netip.MustParsePrefix("2a0e:1234:1::1/128")},
@@ -594,7 +596,7 @@ func TestTagIndex_GroupsByTag(t *testing.T) {
 		var key PublicKey
 		key[0] = byte(i + 1)
 
-		if _, err := reg.Register(Registration{
+		if _, err := reg.applyRegister(time.Now(), DefaultTTL, Registration{
 			PublicKey: key,
 			Tenant:    "t1",
 			Hostname:  spec.host,
@@ -627,7 +629,7 @@ func TestTagIndex_IsolatesTenants(t *testing.T) {
 		var key PublicKey
 		key[0] = byte(i + 1)
 
-		if _, err := reg.Register(Registration{
+		if _, err := reg.applyRegister(time.Now(), DefaultTTL, Registration{
 			PublicKey: key,
 			Tenant:    tenant,
 			Tags:      []string{"tag:web"},
@@ -653,7 +655,7 @@ func TestTagIndex_StableOrder(t *testing.T) {
 		var key PublicKey
 		key[0] = byte(i + 1)
 
-		if _, err := reg.Register(Registration{
+		if _, err := reg.applyRegister(time.Now(), DefaultTTL, Registration{
 			PublicKey: key,
 			Tenant:    "t1",
 			Tags:      []string{"tag:web"},

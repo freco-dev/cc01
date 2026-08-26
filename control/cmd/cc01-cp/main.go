@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/freco-dev/cc01/control/cluster"
 	"github.com/freco-dev/cc01/control/ipam"
 	"github.com/freco-dev/cc01/control/policy"
 	"github.com/freco-dev/cc01/control/registry"
@@ -144,13 +145,13 @@ func run(cfg runConfig, logger *slog.Logger) error {
 
 	nodes := registry.New(registry.Options{})
 
-	store, identities, closeStore, err := openStore(cfg, logger)
+	state, err := openStore(cfg, nodes, logger)
 	if err != nil {
 		return err
 	}
-	defer closeStore()
+	defer state.close()
 
-	allocator, err := ipam.New(ipam.Options{Store: store})
+	allocator, err := ipam.New(ipam.Options{Store: state.leases})
 	if err != nil {
 		return err
 	}
@@ -171,7 +172,8 @@ func run(cfg runConfig, logger *slog.Logger) error {
 		Allocator:    allocator,
 		TenantPrefix: prefix,
 		AuthToken:    authToken,
-		Identities:   identities,
+		Identities:   state.identities,
+		Nodes:        state.nodes,
 		Policies:     policies,
 		Logger:       logger,
 	})
@@ -219,7 +221,7 @@ func run(cfg runConfig, logger *slog.Logger) error {
 
 	// Muddati o'tgan nodelarni davriy tozalaymiz.
 	stopSweeper := make(chan struct{})
-	go sweepExpired(nodes, allocator, logger, stopSweeper)
+	go sweepExpired(state.nodes, allocator, logger, stopSweeper)
 
 	logger.Info("cc01-cp tayyor",
 		"listen", listener.Addr().String(),
@@ -248,7 +250,7 @@ func run(cfg runConfig, logger *slog.Logger) error {
 // sweepExpired heartbeat yubormay qo'ygan nodelarni va muddati o'tgan
 // ijaralarni tozalaydi.
 func sweepExpired(
-	nodes *registry.Registry,
+	nodes cluster.NodeStore,
 	allocator *ipam.Allocator,
 	logger *slog.Logger,
 	stop <-chan struct{},
@@ -261,14 +263,34 @@ func sweepExpired(
 		case <-stop:
 			return
 		case <-ticker.C:
-			if removed := nodes.Expire(); removed > 0 {
+			ctx := context.Background()
+
+			// ⚠️ Ikkala tozalash ham Raft YOZUVI, ya'ni ularni
+			// faqat lider bajaradi. Follower'da "lider emas" xatosi
+			// KUTILGAN holat — uni jurnalga yozsak, har bir
+			// follower 30 soniyada bir marta soxta xato chiqarib,
+			// haqiqiy nosozliklarni ko'mib tashlardi.
+			if removed, err := nodes.ExpireNodes(ctx); err != nil {
+				if !isNotLeader(err) {
+					logger.Error("nodelarni tozalash", "err", err)
+				}
+			} else if removed > 0 {
 				logger.Info("muddati o'tgan nodelar chiqarildi", "count", removed)
 			}
-			if reclaimed, err := allocator.Reclaim(context.Background()); err != nil {
-				logger.Error("ijaralarni tozalash", "err", err)
+
+			if reclaimed, err := allocator.Reclaim(ctx); err != nil {
+				if !isNotLeader(err) {
+					logger.Error("ijaralarni tozalash", "err", err)
+				}
 			} else if reclaimed > 0 {
 				logger.Info("ijaralar bo'shatildi", "count", reclaimed)
 			}
 		}
 	}
+}
+
+// isNotLeader — xato "bu node lider emas" ma'nosini bildiradimi.
+func isNotLeader(err error) bool {
+	var notLeader *cluster.ErrNotLeader
+	return errors.As(err, &notLeader)
 }
