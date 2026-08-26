@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/freco-dev/cc01/daemon/noise"
+	"github.com/freco-dev/cc01/daemon/path"
 	"github.com/freco-dev/cc01/daemon/router"
 )
 
@@ -14,7 +15,10 @@ const (
 	KeepaliveInterval = 25 * time.Second
 
 	// tickInterval — taymerlarni tekshirish davri.
-	tickInterval = time.Second
+	//
+	// Yo'l uzilishini tez aniqlash uchun u FastProbeInterval dan
+	// katta bo'lmasligi kerak (ARCHITECTURE.md §6.3: 250 ms).
+	tickInterval = path.FastProbeInterval
 )
 
 // runTimers davriy ishlarni bajaradi: rekey, keepalive, eskirgan
@@ -33,8 +37,21 @@ func (e *Engine) runTimers() {
 			return
 
 		case now := <-ticker.C:
+			// Yo'llarni o'lchaymiz — bu ADR-005 dagi "P2P-upgrade"
+			// qismi: relay ishlab turgan holda to'g'ridan-to'g'ri
+			// yo'l fon rejimida sinaladi.
+			e.probePeers(now)
+
+			// Ketgan peerlarning holati va soketlari tozalanadi.
+			e.reapOrphans()
+
 			for _, peer := range e.router.Peers() {
 				e.tickPeer(peer, now, lastKeepalive)
+
+				// Oddiy probe'lar uzoq vaqt natija bermasa,
+				// sabab katta ehtimol symmetric NAT — teshik
+				// ochishga o'tamiz.
+				e.maybePunch(peer, now)
 			}
 		}
 	}
@@ -74,7 +91,7 @@ func (e *Engine) tickPeer(
 	if err != nil {
 		return
 	}
-	if err := e.send(peer, packet); err != nil {
+	if err := e.sendVia(peer, packet); err != nil {
 		e.log.Debug("keepalive yuborilmadi", "peer", peer.PublicKey, "err", err)
 	}
 }

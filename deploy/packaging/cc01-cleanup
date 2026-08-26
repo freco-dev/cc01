@@ -1,0 +1,33 @@
+#!/bin/sh
+# cc01-cleanup — demon halokatli tugagandan keyin ortda qolgan tarmoq
+# holatini olib tashlaydi (DEV_SPEC §3.3).
+#
+# Odatdagi to'xtashda buning keragi yo'q: `cc01 down` va demon
+# to'xtatilishi marshrutlarni o'zi tozalaydi. Bu skript SIGKILL,
+# panic va OOM holatlari uchun — systemd uni ExecStopPost'da
+# chaqiradi.
+#
+# Faqat AJRATILGAN jadval va O'Z qoidalarimizga tegamiz.
+# Foydalanuvchining marshrutlariga hech qachon.
+
+set -eu
+
+TABLE=51820
+RULE_LOOKUP=5210
+RULE_SUPPRESS=5211
+
+# Interfeys hali tirik bo'lsa, marshrutlar u bilan birga ketadi.
+# Bo'lmasa ham jadvalni bo'shatamiz — u faqat bizniki.
+if ip -6 route show table "$TABLE" 2>/dev/null | grep -q .; then
+    ip -6 route flush table "$TABLE" 2>/dev/null || true
+fi
+
+# Qoidalar interfeysga bog'lanmagan: ular demon o'lganda ham qoladi va
+# trafikni bo'sh jadvalga yo'naltirib turadi.
+for priority in "$RULE_LOOKUP" "$RULE_SUPPRESS"; do
+    while ip -6 rule show 2>/dev/null | grep -q "^$priority:"; do
+        ip -6 rule del priority "$priority" 2>/dev/null || break
+    done
+done
+
+exit 0

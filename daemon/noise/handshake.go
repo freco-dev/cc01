@@ -239,16 +239,35 @@ func (h *Handshake) ReadResponse(packet []byte) (*Session, error) {
 // PeerStatic — handshake davomida aniqlangan peer public kaliti.
 func (h *Handshake) PeerStatic() PublicKey { return h.expectedPeer }
 
+// stunCookieCollision — STUN magic cookie (0x2112A442, RFC 5389) bizning
+// sarlavhamizdagi `receiver_index` maydoniga to'g'ri keladi.
+//
+// STUN xabari 4–8 baytlarida cookie'ni KATTA endian'da saqlaydi, biz esa
+// indeksni kichik endian'da yozamiz — ya'ni to'qnashuv indeks aynan shu
+// qiymatga teng bo'lgandagina yuz beradi.
+//
+// Uni chetlab o'tish orqali paketlarni ajratish EHTIMOLLI emas, ANIQ
+// bo'ladi: cookie bor bo'lsa — bu STUN, yo'q bo'lsa — bu cc01.
+const stunCookieCollision uint32 = 0x42A41221
+
 func randomIndex() (uint32, error) {
-	var buf [4]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return 0, fmt.Errorf("noise: indeks yaratish: %w", err)
+	for range 8 {
+		var buf [4]byte
+		if _, err := rand.Read(buf[:]); err != nil {
+			return 0, fmt.Errorf("noise: indeks yaratish: %w", err)
+		}
+
+		index := binary.LittleEndian.Uint32(buf[:])
+
+		// 0 — "indeks yo'q" ma'nosini bildiradi.
+		if index == 0 || index == stunCookieCollision {
+			continue
+		}
+		return index, nil
 	}
 
-	index := binary.LittleEndian.Uint32(buf[:])
-	if index == 0 {
-		// 0 — "indeks yo'q" ma'nosini bildiradi, uni ishlatmaymiz.
-		index = 1
-	}
-	return index, nil
+	// 2^32 makonda 8 marta ketma-ket ikkita taqiqlangan qiymatga
+	// tushish amalda mumkin emas — bu tasodifiy manba buzilganini
+	// bildiradi.
+	return 0, errors.New("noise: indeks yaratib bo'lmadi")
 }

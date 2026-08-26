@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"syscall"
 
@@ -86,6 +87,84 @@ func addRoute(link netlink.Link, prefix netipPrefix) error {
 	return nil
 }
 
+// listRoutes ajratilgan jadvaldagi BIZNING marshrutlarni qaytaradi.
+//
+// Uchala filtr ham majburiy (DEV_SPEC §3.3):
+//
+//	jadval    — foydalanuvchining asosiy jadvaliga tegmaslik uchun
+//	interfeys — bir vaqtda ikkita cc01 interfeysi bo'lsa, ular
+//	            bir-birining marshrutini o'chirmasligi uchun
+//	protokol  — ajratilgan jadvalga qo'lda qo'shilgan marshrutni
+//	            "ortiqcha" deb o'chirib yubormaslik uchun; `ip route
+//	            add` sukut bo'yicha RTPROT_BOOT qo'yadi, biz esa
+//	            RTPROT_STATIC yozamiz
+func listRoutes(name string) ([]netipPrefix, error) {
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		return nil, fmt.Errorf("tun: interfeys topilmadi (%s): %w", name, err)
+	}
+
+	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6, &netlink.Route{
+		Table:     RouteTable,
+		LinkIndex: link.Attrs().Index,
+		Protocol:  netlink.RouteProtocol(syscall.RTPROT_STATIC),
+	}, netlink.RT_FILTER_TABLE|netlink.RT_FILTER_OIF|netlink.RT_FILTER_PROTOCOL)
+	if err != nil {
+		return nil, fmt.Errorf("tun: marshrutlarni o'qish: %w", err)
+	}
+
+	prefixes := make([]netipPrefix, 0, len(routes))
+	for i := range routes {
+		// Yadro ::/0 ni Dst=nil ko'rinishida qaytaradi.
+		if routes[i].Dst == nil {
+			prefixes = append(prefixes, netip.PrefixFrom(netip.IPv6Unspecified(), 0))
+			continue
+		}
+
+		addr, ok := netip.AddrFromSlice(routes[i].Dst.IP)
+		if !ok {
+			continue
+		}
+		bits, _ := routes[i].Dst.Mask.Size()
+		prefixes = append(prefixes, netip.PrefixFrom(addr.Unmap(), bits))
+	}
+
+	return prefixes, nil
+}
+
+// addRouteFor / delRouteFor — bitta marshrutni nom bo'yicha qo'shadi
+// yoki o'chiradi (rekonsiliatsiya uchun).
+func addRouteFor(name string, prefix netipPrefix) error {
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		return fmt.Errorf("tun: interfeys topilmadi (%s): %w", name, err)
+	}
+	return addRoute(link, prefix)
+}
+
+func delRouteFor(name string, prefix netipPrefix) error {
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		return fmt.Errorf("tun: interfeys topilmadi (%s): %w", name, err)
+	}
+
+	route := &netlink.Route{
+		LinkIndex: link.Attrs().Index,
+		Dst: &net.IPNet{
+			IP:   prefix.Addr().AsSlice(),
+			Mask: net.CIDRMask(prefix.Bits(), 128),
+		},
+		Table:    RouteTable,
+		Protocol: netlink.RouteProtocol(syscall.RTPROT_STATIC),
+	}
+
+	// Allaqachon yo'q bo'lsa — maqsadga erishilgan, xato emas.
+	if err := netlink.RouteDel(route); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("tun: marshrut o'chirish (%v): %w", prefix, err)
+	}
+	return nil
+}
+
 // addRules policy routing qoidalarini o'rnatadi.
 //
 //	5210: cc01d o'zi yubormagan paketlar ajratilgan jadvaldan qidiriladi
@@ -161,7 +240,10 @@ func cleanup(name string) error {
 	var errs []error
 
 	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6,
-		&netlink.Route{Table: RouteTable}, netlink.RT_FILTER_TABLE)
+		&netlink.Route{
+			Table:    RouteTable,
+			Protocol: netlink.RouteProtocol(syscall.RTPROT_STATIC),
+		}, netlink.RT_FILTER_TABLE|netlink.RT_FILTER_PROTOCOL)
 	if err == nil {
 		for i := range routes {
 			if err := netlink.RouteDel(&routes[i]); err != nil {

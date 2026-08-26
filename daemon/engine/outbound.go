@@ -4,6 +4,8 @@ import (
 	"errors"
 
 	"github.com/freco-dev/cc01/daemon/noise"
+	"github.com/freco-dev/cc01/daemon/path"
+	"github.com/freco-dev/cc01/daemon/relay"
 	"github.com/freco-dev/cc01/daemon/router"
 	"github.com/freco-dev/cc01/daemon/tun"
 )
@@ -77,9 +79,46 @@ func (e *Engine) sealAndSend(peer *router.Peer, packet []byte) {
 		return
 	}
 
-	if err := e.send(peer, sealed); err != nil {
+	if err := e.sendVia(peer, sealed); err != nil {
 		e.log.Debug("yuborish muvaffaqiyatsiz", "peer", peer.PublicKey, "err", err)
 	}
+}
+
+// sendVia paketni YO'L TANLASH natijasiga qarab yuboradi.
+//
+// ADR-005 ning amaliy ko'rinishi: tasdiqlanmagan to'g'ridan-to'g'ri
+// yo'l o'rniga relay ishlatiladi, va u tasdiqlangach avtomatik
+// almashadi. Chaqiruvchi qaysi yo'l ishlatilganini bilmaydi.
+func (e *Engine) sendVia(peer *router.Peer, payload []byte) error {
+	state := e.pathFor(peer)
+
+	kind, endpoint, ok := state.tracker.Best()
+	if !ok {
+		// Yo'l kuzatuvchisi hali to'ldirilmagan — peerdagi
+		// endpointga tayanamiz.
+		return e.send(peer, payload)
+	}
+
+	if kind == path.KindRelay {
+		return e.sendViaRelay(peer, payload)
+	}
+
+	// Peer uchun ajratilgan soket bo'lsa — AYNAN u. Yo'l o'sha
+	// soketning NAT yozuvi orqali ochilgan.
+	return e.bindFor(peer.PublicKey).Send(payload, endpoint)
+}
+
+// sendViaRelay paketni relay orqali uzatadi.
+func (e *Engine) sendViaRelay(peer *router.Peer, payload []byte) error {
+	e.relayMu.Lock()
+	client := e.relayClient
+	e.relayMu.Unlock()
+
+	if client == nil {
+		return errors.New("engine: relay sozlanmagan")
+	}
+
+	return client.Send(relay.NodeIDFor(peer.PublicKey), payload)
 }
 
 // enqueue paketni sessiya kutayotgan navbatga qo'shadi.

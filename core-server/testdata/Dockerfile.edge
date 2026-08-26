@@ -1,0 +1,17 @@
+# cc01 edge + klient + origin — tunnel demosi.
+FROM golang:1.25 AS build
+WORKDIR /src
+COPY proto/ ./proto/
+COPY core-server/ ./core-server/
+COPY cli-client/ ./cli-client/
+RUN cd core-server && GOWORK=off CGO_ENABLED=0 go build -o /out/cc01-edge . \
+ && GOWORK=off CGO_ENABLED=0 go build -o /out/cc01-origin ./testdata/origin
+RUN cd cli-client && GOWORK=off CGO_ENABLED=0 go build -o /out/cc01-tunnel .
+
+FROM debian:stable-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl openssl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/cc01-edge   /usr/local/bin/cc01-edge
+COPY --from=build /out/cc01-origin /usr/local/bin/cc01-origin
+COPY --from=build /out/cc01-tunnel /usr/local/bin/cc01-tunnel

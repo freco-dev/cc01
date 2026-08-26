@@ -3,7 +3,7 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-GO_MODULES  := ./core-server/... ./cli-client/... ./daemon/...
+GO_MODULES  := ./proto/... ./core-server/... ./cli-client/... ./daemon/... ./control/...
 PROTO_DIR   := proto
 DOTNET_SLN  := access-server/AccessServer.slnx
 
@@ -55,11 +55,24 @@ lint: vet ## golangci-lint (o'rnatilgan bo'lsa) + go vet
 	  echo "  O'rnatish: https://golangci-lint.run/welcome/install/"; \
 	fi
 
+.PHONY: check-modules
+check-modules: ## Har bir modul workspace'siz ham quriladimi
+	@echo "go.work modullar orasidagi bog'liqlikni yashiradi —"
+	@echo "Docker build esa GOWORK=off bilan ishlaydi, shuning uchun"
+	@echo "har bir modulni alohida tekshiramiz."
+	@for m in proto core-server cli-client daemon control; do \
+	  printf "  %-12s " "$$m"; \
+	  (cd $$m && GOWORK=off go build ./... >/dev/null 2>&1) && echo "OK" \
+	    || { echo "FAIL"; exit 1; }; \
+	done
+
 .PHONY: tidy
 tidy: ## Har bir modulda go mod tidy
 	cd core-server && go mod tidy
 	cd cli-client && go mod tidy
 	cd daemon && go mod tidy
+	cd control && go mod tidy
+	cd proto && go mod tidy
 
 # ── Proto ─────────────────────────────────────────────────────────────────
 
@@ -89,6 +102,122 @@ test-linux: check-docker ## Imtiyozli TUN testlarini Linux konteynerida ishga tu
 .PHONY: mesh-demo
 mesh-demo: check-docker ## Ikkita konteynerda shifrlangan overlay va ping6
 	sh daemon/testdata/mesh-demo.sh
+
+.PHONY: cp-demo
+cp-demo: check-docker ## Control Plane + 3 node: qo'lda konfiguratsiyasiz mesh
+	sh daemon/testdata/cp-demo.sh
+
+.PHONY: nat-demo
+nat-demo: check-docker ## NAT ortidagi node: STUN bilan ikki tomonlama ulanish
+	sh daemon/testdata/nat-demo.sh
+
+.PHONY: relay-demo
+relay-demo: check-docker ## Ikkita node har biri o'z NAT'i ortida: relay orqali
+	sh daemon/testdata/relay-demo.sh
+
+.PHONY: punch-demo
+punch-demo: check-docker ## NAT teshish (cone): relaydan to'g'ridan-to'g'ri yo'lga o'tish
+	sh daemon/testdata/punch-demo.sh
+
+.PHONY: raft-demo
+raft-demo: check-docker ## Control Plane klasteri: 3 replika, lider failover
+	sh daemon/testdata/raft-demo.sh
+
+.PHONY: tunnel-demo
+tunnel-demo: check-docker ## Tunnel: subdomain, SNI bo'yicha TLS, begona domen rad etiladi
+	sh core-server/testdata/tunnel-demo.sh
+
+.PHONY: punch-sym-demo
+punch-sym-demo: check-docker ## Birthday punching: symmetric NAT ortidagi node bilan to'g'ridan-to'g'ri
+	sh daemon/testdata/punch-sym-demo.sh
+
+# ── eBPF ──────────────────────────────────────────────────────────────────
+# Natija (.o) repoga commit qilinadi: `go build` uchun clang kerak emas.
+
+.PHONY: bpf
+bpf: check-docker ## XDP dasturini kompilyatsiya qiladi (daemon/bpf/*.o)
+	$(DOCKER) build -q -t cc01-bpf-build -f daemon/bpf/Dockerfile daemon/bpf >/dev/null
+	$(DOCKER) run --rm -v "$(CURDIR)/daemon":/daemon -w /daemon/bpf \
+	  cc01-bpf-build sh build.sh
+	@echo "  Natijani commit qiling — u generatsiya qilingan artefakt."
+
+.PHONY: bpf-verify
+bpf-verify: check-docker ## Dasturni haqiqiy yadro verifier'iga yuklab ko'radi
+	@# XDP testlari root, /sys/fs/bpf va veth yaratish imkonini talab
+	@# qiladi — shuning uchun privileged konteyner.
+	@#
+	@# Natija SKIP bo'lsa test o'tgandek ko'rinardi, lekin verifier
+	@# umuman ishlamagan bo'lardi. Shuning uchun kamida bitta test
+	@# HAQIQATAN bajarilganini tekshiramiz.
+	@# `| tee` chiqish kodini YASHIRADI — u tee'niki bo'lib qoladi.
+	@# Shuning uchun natijani logdan o'qiymiz va ikki narsani
+	@# tekshiramiz: yiqilgan test yo'qmi, va kalit testlar HAQIQATAN
+	@# bajarildimi (o'tkazib yuborilgan test o'tgan testga o'xshaydi).
+	@$(DOCKER) run --rm --privileged -v "$(CURDIR)":/src -w /src/daemon \
+	  -e GOWORK=off -e GOCACHE=/tmp/gocache -e GOMODCACHE=/tmp/gomod \
+	  golang:1.25 sh -c 'apt-get update -qq >/dev/null 2>&1 && \
+	    apt-get install -y -qq iproute2 iputils-ping netcat-openbsd net-tools >/dev/null 2>&1 && \
+	    go test -count=1 -v ./xdp/... ./tcpolicy/...' 2>&1 \
+	  | tee /tmp/cc01-bpf-verify.log || true
+	@if grep -qE '^(--- FAIL|FAIL|# )' /tmp/cc01-bpf-verify.log; then \
+	  echo; echo "✘ Testlar yiqildi."; exit 1; \
+	fi
+	@for probe in TestXDP_LoadsAndAttaches TestXDPPolicy_LoadsAndAttaches \
+	              TestProgTest_XDPNeverAborts TestProgTest_XDPRateLimits \
+	              TestProgTest_XDPAutoBlocks TestProgTest_TCAllowsMatchingRule \
+	              TestProgTest_EventThroughput TestProgTest_EventLossIsReported; do \
+	  grep -q "^--- PASS: $$probe" /tmp/cc01-bpf-verify.log || { \
+	    echo; echo "✘ $$probe BAJARILMADI (o'tkazib yuborilgan)."; \
+	    echo "  O'tkazib yuborilgan test o'tgan testga o'xshaydi."; \
+	    exit 1; }; \
+	done
+	@echo "✔ ikkala dastur ham haqiqiy yadro verifier'idan o'tdi"
+
+# ── Paketlar (deb/rpm) ────────────────────────────────────────────────────
+# Binarlar konteynerda quriladi: host macOS bo'lishi mumkin, paketga
+# esa Linux binari kerak. nfpm bitta tavsifdan ikkala formatni beradi.
+# Paket versiyasi. deb raqam bilan boshlanishini talab qiladi, rpm esa
+# `-` ni ajratuvchi deb o'qiydi — shuning uchun teg yo'q bo'lganda
+# xeshni 0.0.0 ostiga qo'yamiz va `-` ishlatmaymiz.
+GIT_TAG   := $(shell git describe --tags --abbrev=0 2>/dev/null)
+GIT_SHA   := $(shell git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)
+GIT_DIRTY := $(shell git diff --quiet 2>/dev/null || echo .dirty)
+
+ifeq ($(GIT_TAG),)
+  VERSION ?= 0.0.0+g$(GIT_SHA)$(GIT_DIRTY)
+else
+  VERSION ?= $(patsubst v%,%,$(GIT_TAG))$(GIT_DIRTY)
+endif
+PKG_ARCH ?= amd64 arm64
+
+.PHONY: package
+package: check-docker ## deb va rpm paketlarini quradi (dist/)
+	@for arch in $(PKG_ARCH); do \
+	  echo "→ $$arch binarlari"; \
+	  rm -rf dist/stage; mkdir -p dist/stage; \
+	  $(DOCKER) run --rm -v "$(CURDIR)":/src -w /src/daemon \
+	    -e GOWORK=off -e CGO_ENABLED=0 -e GOOS=linux -e GOARCH=$$arch \
+	    -e GOCACHE=/tmp/gocache -e GOMODCACHE=/tmp/gomod \
+	    golang:1.25 sh -c \
+	      'go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" \
+	         -o /src/dist/stage/cc01d ./cmd/cc01d && \
+	       go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" \
+	         -o /src/dist/stage/cc01  ./cmd/cc01' || exit 1; \
+	  echo "→ $$arch paketlari"; \
+	  for format in deb rpm; do \
+	    $(DOCKER) run --rm -v "$(CURDIR)":/src -w /src \
+	      -e ARCH=$$arch -e VERSION=$(VERSION) \
+	      goreleaser/nfpm:latest package \
+	      --config deploy/packaging/nfpm.yaml --target dist --packager $$format || exit 1; \
+	  done; \
+	done
+	@rm -rf dist/stage
+	@echo
+	@ls -1 dist/*.deb dist/*.rpm
+
+.PHONY: package-verify
+package-verify: check-docker ## Paketni toza konteynerda o'rnatib tekshiradi
+	sh deploy/packaging/verify.sh
 
 # ── .NET (access-server) ──────────────────────────────────────────────────
 
@@ -180,9 +309,10 @@ dev-reset: check-docker ## Dev muhitni volume'lari bilan o'chiradi
 # ── Yig'ma ────────────────────────────────────────────────────────────────
 
 .PHONY: check
-check: lint test proto-lint dotnet-build dotnet-test dotnet-vuln ## CI bajaradigan hamma tekshiruv
+check: lint test check-modules proto-lint dotnet-build dotnet-test dotnet-vuln ## CI bajaradigan hamma tekshiruv
 
 .PHONY: clean
 clean: ## Build artefaktlarini tozalaydi
 	go clean -cache -testcache
+	rm -rf dist
 	dotnet clean $(DOTNET_SLN) --nologo || true

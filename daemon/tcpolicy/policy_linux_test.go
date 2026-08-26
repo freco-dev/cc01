@@ -1,0 +1,1337 @@
+//go:build linux
+
+package tcpolicy
+
+import (
+	"context"
+	"encoding/binary"
+	"errors"
+	"io"
+	"log/slog"
+	"net/netip"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/cilium/ebpf/rlimit"
+	"github.com/freco-dev/cc01/daemon/tun"
+	"golang.org/x/net/icmp"
+	"golang.org/x/net/ipv6"
+)
+
+// Bu testlar HAQIQIY TUN qurilmasi yaratadi va unga paket yozadi.
+//
+// TUN fd'ga yozilgan paket yadro uchun qurilmaga KELGAN paket, ya'ni
+// u tc ingress yo'lidan o'tadi — aynan bizga kerak bo'lgan nuqta.
+//
+// Ishga tushirish: make bpf-verify
+func requireKernel(t *testing.T) {
+	t.Helper()
+
+	if os.Geteuid() != 0 {
+		t.Skip("tc dasturini yuklash uchun root kerak")
+	}
+	if _, err := os.Stat("/dev/net/tun"); err != nil {
+		t.Skipf("/dev/net/tun mavjud emas: %v", err)
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Skipf("memlock chegarasini olib bo'lmadi: %v", err)
+	}
+}
+
+func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+const (
+	localAddr = "fd00:cc01:7c01::1"
+	peerAddr  = "fd00:cc01:7c01::2"
+	testNet   = "fd00:cc01:7c01::/64"
+)
+
+// testDevice sinov uchun TUN qurilmasini yaratadi.
+func testDevice(t *testing.T) *tun.Device {
+	t.Helper()
+
+	device, err := tun.Create(tun.Config{
+		Name:      "cc0pol",
+		Addresses: []netip.Prefix{netip.MustParsePrefix(localAddr + "/128")},
+		Routes:    []netip.Prefix{netip.MustParsePrefix(testNet)},
+	})
+	if err != nil {
+		t.Skipf("TUN yaratilmadi: %v", err)
+	}
+
+	t.Cleanup(func() { _ = device.Close() })
+	return device
+}
+
+// echoRequest peerdan bizga ICMPv6 echo so'rovi yasaydi.
+func echoRequest(t *testing.T, seq int) []byte {
+	t.Helper()
+
+	src := netip.MustParseAddr(peerAddr)
+	dst := netip.MustParseAddr(localAddr)
+
+	body := &icmp.Echo{ID: os.Getpid() & 0xffff, Seq: seq, Data: []byte("cc01-policy")}
+	payload, err := (&icmp.Message{Type: ipv6.ICMPTypeEchoRequest, Body: body}).
+		Marshal(icmp.IPv6PseudoHeader(src.AsSlice(), dst.AsSlice()))
+	if err != nil {
+		t.Fatalf("ICMPv6: %v", err)
+	}
+
+	packet := make([]byte, 40+len(payload))
+	packet[0] = 6 << 4
+	binary.BigEndian.PutUint16(packet[4:6], uint16(len(payload)))
+	packet[6] = 58 // ICMPv6
+	packet[7] = 64
+	copy(packet[8:24], src.AsSlice())
+	copy(packet[24:40], dst.AsSlice())
+	copy(packet[40:], payload)
+
+	return packet
+}
+
+// inject paketni TUN'ga yozadi — yadro uchun bu kelgan paket.
+func inject(t *testing.T, device *tun.Device, packet []byte) {
+	t.Helper()
+
+	buf := make([]byte, tun.Offset+len(packet))
+	copy(buf[tun.Offset:], packet)
+
+	if _, err := device.Write([][]byte{buf}, tun.Offset); err != nil {
+		t.Fatalf("TUN'ga yozish: %v", err)
+	}
+}
+
+// Verifier tc dasturini qabul qilishi kerak.
+func TestXDPPolicy_LoadsAndAttaches(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+}
+
+// L2 qurilmaga biriktirish RAD ETILISHI kerak: dastur paketni
+// Ethernet sarlavhasisiz o'qiydi va L2 qurilmada u baytlarni
+// jimgina noto'g'ri talqin qilardi.
+func TestXDPPolicy_RejectsLayer2Interface(t *testing.T) {
+	requireKernel(t)
+
+	// `lo` da MAC bor (nol bo'lsa ham uzunligi 6) — L2 hisoblanadi.
+	_, err := Load(Config{Interface: "lo", Logger: quiet()})
+	if err == nil {
+		t.Fatal("L2 interfeys qabul qilindi")
+	}
+}
+
+// Deny-by-default: qoida yozilmagan bo'lsa paket tashlanishi kerak.
+func TestXDPPolicy_DeniesByDefault(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	inject(t, device, echoRequest(t, 1))
+	time.Sleep(100 * time.Millisecond)
+
+	stats, err := filter.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+
+	if stats[StatDrop] == 0 {
+		t.Fatalf("qoidasiz paket tashlanmadi (jami=%d ruxsat=%d)",
+			stats[StatTotal], stats[StatAllow])
+	}
+	if stats[StatNoRule] == 0 {
+		t.Error("'qoida topilmadi' hisoblagichi to'ldirilmadi")
+	}
+}
+
+// Qoida qo'shilgach paket o'tishi kerak.
+func TestXDPPolicy_AllowsMatchingRule(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	const identity = 42
+
+	if err := filter.SetIdentity(netip.MustParsePrefix(peerAddr+"/128"), identity); err != nil {
+		t.Fatalf("SetIdentity: %v", err)
+	}
+
+	// ICMPv6 (58) uchun istalgan portga ruxsat.
+	rule := Rule{Identity: identity, Proto: 58, Verdict: Allow, RuleID: 7}
+	if err := filter.AddRule(rule); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	inject(t, device, echoRequest(t, 2))
+	time.Sleep(100 * time.Millisecond)
+
+	stats, err := filter.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats[StatAllow] == 0 {
+		t.Fatalf("qoidaga mos paket o'tkazilmadi (tashlangan=%d)", stats[StatDrop])
+	}
+
+	hits, found, err := filter.Hits(rule)
+	if err != nil || !found {
+		t.Fatalf("qoida yozuvi: found=%v err=%v", found, err)
+	}
+	if hits == 0 {
+		t.Error("qoida hisoblagichi to'ldirilmadi")
+	}
+}
+
+// Uzunroq prefiks ustunlik qilishi kerak (longest-prefix match).
+//
+// Busiz "hammaga taqiq, bittasiga ruxsat" qoidasini yozib
+// bo'lmasdi — eng muhim naqshlardan biri.
+func TestXDPPolicy_LongestPrefixWins(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	// Butun tarmoq — taqiqlangan guruh.
+	if err := filter.SetIdentity(netip.MustParsePrefix(testNet), 1); err != nil {
+		t.Fatalf("SetIdentity(/64): %v", err)
+	}
+	// Aniq bitta node — ruxsat etilgan guruh.
+	if err := filter.SetIdentity(netip.MustParsePrefix(peerAddr+"/128"), 2); err != nil {
+		t.Fatalf("SetIdentity(/128): %v", err)
+	}
+
+	if err := filter.AddRule(Rule{Identity: 1, Verdict: Drop}); err != nil {
+		t.Fatalf("AddRule(drop): %v", err)
+	}
+	if err := filter.AddRule(Rule{Identity: 2, Verdict: Allow}); err != nil {
+		t.Fatalf("AddRule(allow): %v", err)
+	}
+
+	inject(t, device, echoRequest(t, 3))
+	time.Sleep(100 * time.Millisecond)
+
+	stats, err := filter.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats[StatAllow] == 0 {
+		t.Errorf("uzunroq prefiks ustunlik qilmadi (tashlangan=%d)", stats[StatDrop])
+	}
+}
+
+// Aniq port qoidasi umumiy qoidadan ustun bo'lishi kerak.
+func TestXDPPolicy_SpecificRuleBeatsWildcard(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	const identity = 5
+	if err := filter.SetIdentity(netip.MustParsePrefix(peerAddr+"/128"), identity); err != nil {
+		t.Fatalf("SetIdentity: %v", err)
+	}
+
+	// Umumiy: hammaga ruxsat. Aniqroq: ICMPv6 ga taqiq.
+	if err := filter.AddRule(Rule{Identity: identity, Verdict: Allow}); err != nil {
+		t.Fatalf("AddRule(any): %v", err)
+	}
+	if err := filter.AddRule(Rule{Identity: identity, Proto: 58, Verdict: Drop}); err != nil {
+		t.Fatalf("AddRule(icmp): %v", err)
+	}
+
+	inject(t, device, echoRequest(t, 4))
+	time.Sleep(100 * time.Millisecond)
+
+	stats, err := filter.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats[StatDrop] == 0 {
+		t.Errorf("aniqroq qoida ustunlik qilmadi (ruxsat=%d)", stats[StatAllow])
+	}
+}
+
+// Dry-run rejimida paket tashlanmasligi, lekin hisoblanishi kerak.
+//
+// Deny-by-default siyosatida bu ayniqsa muhim: qoidalar to'liq
+// yozilmagan bo'lsa, enforce rejimi butun overlay'ni kesib qo'yardi.
+func TestXDPPolicy_DryRunDoesNotDrop(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: false, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	inject(t, device, echoRequest(t, 5))
+	time.Sleep(100 * time.Millisecond)
+
+	stats, err := filter.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+
+	// Hukm "tashlash" bo'lgan, lekin paket o'tkazilgan.
+	if stats[StatDrop] == 0 {
+		t.Error("dry-run hisoblagichi to'ldirilmadi — qoidani sinab bo'lmaydi")
+	}
+	t.Logf("dry-run: %d paket tashlangan bo'lardi", stats[StatDrop])
+}
+
+// Qoidani olib tashlash ishlashi kerak.
+func TestXDPPolicy_RuleRemoval(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	rule := Rule{Identity: 9, Proto: 58, Verdict: Allow}
+	if err := filter.AddRule(rule); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+	if _, found, _ := filter.Hits(rule); !found {
+		t.Fatal("qoida qo'shilmadi")
+	}
+
+	if err := filter.RemoveRule(rule); err != nil {
+		t.Fatalf("RemoveRule: %v", err)
+	}
+	if _, found, _ := filter.Hits(rule); found {
+		t.Error("qoida o'chirilmadi")
+	}
+
+	// Mavjud bo'lmaganini o'chirish xato emas.
+	if err := filter.RemoveRule(rule); err != nil {
+		t.Errorf("takroriy o'chirish xato berdi: %v", err)
+	}
+}
+
+// Ajratishdan keyin filtr ortda qolmasligi kerak.
+func TestXDPPolicy_CloseDetaches(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if err := filter.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := filter.Close(); err != nil {
+		t.Errorf("takroriy Close: %v", err)
+	}
+
+	// Ajratilgandan keyin paket tegilmasdan o'tishi kerak.
+	inject(t, device, echoRequest(t, 6))
+}
+
+// Hodisa tashlangan paket haqida TO'LIQ ma'lumot berishi kerak.
+//
+// Hisoblagichlar "nechta" ni aytadi, hodisa esa "qaysi manzil,
+// qaysi qoida, qaysi port" ni — nosozlikni tekshirishda aynan shu
+// kerak.
+func TestXDPPolicy_EmitsDropEvent(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{
+		Interface:   device.Name(),
+		Enforce:     true,
+		EventSample: 1, // har bir tashlash uchun
+		Logger:      quiet(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	events, err := filter.Events(ctx)
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+
+	inject(t, device, echoRequest(t, 10))
+
+	select {
+	case event := <-events:
+		if event.Src.String() != peerAddr {
+			t.Errorf("manba %v, %s kutilgan edi", event.Src, peerAddr)
+		}
+		if event.Dst.String() != localAddr {
+			t.Errorf("maqsad %v, %s kutilgan edi", event.Dst, localAddr)
+		}
+		if event.Proto != 58 {
+			t.Errorf("protokol %d, 58 (ICMPv6) kutilgan edi", event.Proto)
+		}
+		if event.RuleID != 0 {
+			t.Errorf("qoida ID %d, 0 kutilgan edi (qoida yo'q)", event.RuleID)
+		}
+		if event.DryRun {
+			t.Error("enforce rejimida dry_run belgilangan")
+		}
+		if event.Uptime == 0 {
+			t.Error("vaqt tamg'asi bo'sh")
+		}
+		t.Logf("hodisa: %s", event)
+
+	case <-time.After(3 * time.Second):
+		stats, _ := filter.Stats()
+		t.Fatalf("hodisa kelmadi (tashlangan=%d yo'qolgan=%d)",
+			stats[StatDrop], stats[StatEventLost])
+	}
+}
+
+// Dry-run hodisasi "tashlangan bo'lardi" deb belgilanishi kerak.
+//
+// Busiz operator qoidani sinab ko'rganda haqiqiy tashlashni
+// mashqdan ajrata olmasdi.
+func TestXDPPolicy_EventMarksDryRun(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{
+		Interface:   device.Name(),
+		Enforce:     false,
+		EventSample: 1,
+		Logger:      quiet(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	events, err := filter.Events(ctx)
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+
+	inject(t, device, echoRequest(t, 11))
+
+	select {
+	case event := <-events:
+		if !event.DryRun {
+			t.Error("dry-run rejimida hodisa haqiqiy tashlash deb belgilandi")
+		}
+		if !contains(event.String(), "bo'lardi") {
+			t.Errorf("hodisa matni dry-run ekanini ko'rsatmaydi: %s", event)
+		}
+
+	case <-time.After(3 * time.Second):
+		t.Fatal("hodisa kelmadi")
+	}
+}
+
+// Hodisa qaysi QOIDA ishlaganini ko'rsatishi kerak.
+func TestXDPPolicy_EventCarriesRuleID(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{
+		Interface: device.Name(), Enforce: true,
+		EventSample: 1, Logger: quiet(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	const (
+		identity = 3
+		ruleID   = 4242
+	)
+
+	if err := filter.SetIdentity(netip.MustParsePrefix(peerAddr+"/128"), identity); err != nil {
+		t.Fatalf("SetIdentity: %v", err)
+	}
+	// Oshkora TAQIQ qoidasi — hodisada uning ID'si ko'rinishi kerak.
+	if err := filter.AddRule(Rule{
+		Identity: identity, Proto: 58, Verdict: Drop, RuleID: ruleID,
+	}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	events, err := filter.Events(ctx)
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+
+	inject(t, device, echoRequest(t, 12))
+
+	select {
+	case event := <-events:
+		if event.RuleID != ruleID {
+			t.Errorf("qoida ID %d, %d kutilgan edi", event.RuleID, ruleID)
+		}
+		if event.Identity != identity {
+			t.Errorf("identity %d, %d kutilgan edi", event.Identity, identity)
+		}
+
+	case <-time.After(3 * time.Second):
+		t.Fatal("hodisa kelmadi")
+	}
+}
+
+// Hodisalar o'chirilgan bo'lsa (EventSample=0) hech narsa
+// yuborilmasligi kerak.
+func TestXDPPolicy_EventsCanBeDisabled(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{
+		Interface: device.Name(), Enforce: true,
+		EventSample: 0, Logger: quiet(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	// EventSample=0 Load ichida standart qiymatga almashadi —
+	// oshkora o'chirish uchun Configure ishlatamiz.
+	if err := filter.Configure(Config{Interface: device.Name(), Enforce: true, EventSample: 0}); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	events, err := filter.Events(ctx)
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+
+	inject(t, device, echoRequest(t, 13))
+
+	select {
+	case event := <-events:
+		t.Errorf("hodisalar o'chirilgan, lekin hodisa keldi: %s", event)
+	case <-time.After(time.Second):
+		// kutilgan natija
+	}
+
+	stats, _ := filter.Stats()
+	if stats[StatDrop] == 0 {
+		t.Error("paket tashlanmadi — test hech narsani tekshirmadi")
+	}
+}
+
+// Kanal ctx bekor qilinganda yopilishi kerak — aks holda goroutine
+// oqib ketardi.
+func TestXDPPolicy_EventsStopOnCancel(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	events, err := filter.Events(ctx)
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+
+	cancel()
+
+	select {
+	case _, open := <-events:
+		if open {
+			// Navbatda hodisa bo'lishi mumkin; kanal keyin
+			// yopilishi kerak.
+			select {
+			case _, open := <-events:
+				if open {
+					t.Error("kanal yopilmadi")
+				}
+			case <-time.After(3 * time.Second):
+				t.Error("kanal yopilmadi")
+			}
+		}
+	case <-time.After(3 * time.Second):
+		t.Error("bekor qilingandan keyin kanal yopilmadi")
+	}
+}
+
+func contains(haystack, needle string) bool {
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return true
+		}
+	}
+	return false
+}
+
+// Kesh ikkinchi paketdan boshlab ishlashi kerak: birinchisi to'liq
+// qidiruvdan o'tadi, keyingilari bitta hash qidiruvi bilan.
+func TestXDPPolicy_CachesVerdict(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	const identity = 11
+	if err := filter.SetIdentity(netip.MustParsePrefix(peerAddr+"/128"), identity); err != nil {
+		t.Fatalf("SetIdentity: %v", err)
+	}
+	if err := filter.AddRule(Rule{Identity: identity, Verdict: Allow, RuleID: 1}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	// Bir xil oqim: bir xil 5-tuple bo'lishi uchun ICMPv6 ishlatamiz
+	// (unda port yo'q, ya'ni kalit har safar bir xil).
+	for seq := range 5 {
+		inject(t, device, echoRequest(t, 20+seq))
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	stats, err := filter.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+
+	if stats[StatCacheMiss] == 0 {
+		t.Error("birinchi paket keshdan o'tdi — bu mumkin emas")
+	}
+	if stats[StatCacheHit] == 0 {
+		t.Fatalf("kesh ishlamadi (o'tkazib yuborilgan=%d topilgan=%d)",
+			stats[StatCacheMiss], stats[StatCacheHit])
+	}
+	t.Logf("kesh: %d topildi, %d o'tkazib yuborildi",
+		stats[StatCacheHit], stats[StatCacheMiss])
+
+	// Keshdan topilganlar ko'proq bo'lishi kerak: 5 paketdan
+	// faqat birinchisi to'liq qidiruvdan o'tadi.
+	if stats[StatCacheHit] <= stats[StatCacheMiss] {
+		t.Errorf("kesh samarasiz: %d topildi, %d o'tkazib yuborildi",
+			stats[StatCacheHit], stats[StatCacheMiss])
+	}
+}
+
+// ENG MUHIM TEKSHIRUV: qoida o'zgargandan keyin keshlangan hukm
+// AMAL QILMASLIGI kerak.
+//
+// Busiz taqiqlangan oqim ochiq qolardi va buni sezish deyarli
+// imkonsiz bo'lardi — filtr ishlayotgandek ko'rinadi.
+func TestXDPPolicy_RuleChangeInvalidatesCache(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	const identity = 12
+	if err := filter.SetIdentity(netip.MustParsePrefix(peerAddr+"/128"), identity); err != nil {
+		t.Fatalf("SetIdentity: %v", err)
+	}
+
+	allow := Rule{Identity: identity, Verdict: Allow, RuleID: 1}
+	if err := filter.AddRule(allow); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	// Oqimni keshga tushiramiz.
+	for seq := range 3 {
+		inject(t, device, echoRequest(t, 30+seq))
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	before, _ := filter.Stats()
+	if before[StatAllow] == 0 {
+		t.Fatal("ruxsat berilgan oqim o'tmadi")
+	}
+
+	generation := filter.Generation()
+
+	// Qoidani OLIB TASHLAYMIZ — endi deny-by-default amal qilishi
+	// kerak.
+	if err := filter.RemoveRule(allow); err != nil {
+		t.Fatalf("RemoveRule: %v", err)
+	}
+
+	if filter.Generation() == generation {
+		t.Error("qoida o'zgardi, lekin avlod oshmadi")
+	}
+
+	allowedBefore := before[StatAllow]
+
+	for seq := range 3 {
+		inject(t, device, echoRequest(t, 40+seq))
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	after, _ := filter.Stats()
+
+	if after[StatAllow] > allowedBefore {
+		t.Fatalf("ESKIRGAN HUKM AMAL QILDI: qoida o'chirilgandan keyin "+
+			"%d ta paket o'tkazildi", after[StatAllow]-allowedBefore)
+	}
+	if after[StatDrop] == 0 {
+		t.Error("qoida o'chirilgandan keyin ham paket tashlanmadi")
+	}
+}
+
+// Identity o'zgarishi ham keshni eskirtirishi kerak — u ham
+// hukmga ta'sir qiladi.
+func TestXDPPolicy_IdentityChangeInvalidatesCache(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	prefix := netip.MustParsePrefix(peerAddr + "/128")
+
+	if err := filter.SetIdentity(prefix, 20); err != nil {
+		t.Fatalf("SetIdentity: %v", err)
+	}
+	if err := filter.AddRule(Rule{Identity: 20, Verdict: Allow, RuleID: 1}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	for seq := range 3 {
+		inject(t, device, echoRequest(t, 50+seq))
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	before, _ := filter.Stats()
+	allowedBefore := before[StatAllow]
+	if allowedBefore == 0 {
+		t.Fatal("oqim o'tmadi")
+	}
+
+	// Manbani BOSHQA guruhga ko'chiramiz — unga qoida yo'q.
+	if err := filter.SetIdentity(prefix, 21); err != nil {
+		t.Fatalf("SetIdentity(21): %v", err)
+	}
+
+	for seq := range 3 {
+		inject(t, device, echoRequest(t, 60+seq))
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	after, _ := filter.Stats()
+	if after[StatAllow] > allowedBefore {
+		t.Errorf("identity o'zgardi, lekin eskirgan hukm amal qildi: "+
+			"%d ta paket o'tkazildi", after[StatAllow]-allowedBefore)
+	}
+}
+
+// Taqiqlar ham keshlanishi kerak: hujum paytida ular eng ko'p
+// uchraydigan holat va ularni har safar qayta hisoblash eng qimmat
+// yo'l bo'lardi.
+func TestXDPPolicy_CachesDrops(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	// Qoida yo'q — hamma paket tashlanadi.
+	for seq := range 5 {
+		inject(t, device, echoRequest(t, 70+seq))
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	stats, _ := filter.Stats()
+	if stats[StatCacheHit] == 0 {
+		t.Errorf("taqiqlar keshlanmadi (o'tkazib yuborilgan=%d)", stats[StatCacheMiss])
+	}
+	t.Logf("taqiq keshi: %d topildi, %d o'tkazib yuborildi",
+		stats[StatCacheHit], stats[StatCacheMiss])
+}
+
+// readMSS TUN'dan chiqqan paketdagi MSS opsiyasini o'qiydi.
+func readMSS(t *testing.T, packet []byte) (uint16, bool) {
+	t.Helper()
+
+	if len(packet) < 40+24 || packet[6] != 6 {
+		return 0, false
+	}
+
+	tcp := packet[40:]
+	doff := int(tcp[12]>>4) * 4
+	if doff < 20 || doff > len(tcp) {
+		return 0, false
+	}
+
+	// Opsiyalar bo'ylab yuramiz.
+	for offset := 20; offset+1 < doff; {
+		kind := tcp[offset]
+		if kind == 0 {
+			return 0, false
+		}
+		if kind == 1 {
+			offset++
+			continue
+		}
+		if offset+2 > doff {
+			return 0, false
+		}
+		length := int(tcp[offset+1])
+		if length < 2 || offset+length > doff {
+			return 0, false
+		}
+		if kind == 2 && length == 4 {
+			return binary.BigEndian.Uint16(tcp[offset+2 : offset+4]), true
+		}
+		offset += length
+	}
+	return 0, false
+}
+
+// Egress yo'li ham biriktirilishi kerak.
+func TestXDPPolicy_AttachesBothDirections(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	// Chiquvchi paket yuborib, egress hisoblagichini tekshiramiz.
+	dialPeer(t, 9)
+	time.Sleep(300 * time.Millisecond)
+
+	stats, err := filter.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats[StatEgressTotal] == 0 {
+		t.Fatal("egress dasturi paket ko'rmadi — biriktirilmagan bo'lishi mumkin")
+	}
+	t.Logf("egress: %d paket", stats[StatEgressTotal])
+}
+
+// MSS clamp chiquvchi SYN paketini HAQIQATDA o'zgartirishi kerak.
+//
+// Overlay MTU 1280, uchlar esa yo'lni 1500 deb hisoblab kattaroq
+// MSS kelishib oladi. Natijada ulanish o'rnatiladi, lekin katta
+// uzatmalar qotib qoladi — tashxislash juda qiyin nosozlik.
+func TestXDPPolicy_ClampsMSS(t *testing.T) {
+	requireKernel(t)
+
+	// MTU 1500: yadro MSS ni 1440 deb e'lon qiladi va
+	// kichraytirish ko'rinadi. MTU 1280 bo'lsa u allaqachon 1220
+	// bo'lardi va test hech narsani tekshirmasdi.
+	device := testDeviceMTU(t, 1500)
+
+	filter, err := Load(Config{
+		Interface: device.Name(), Enforce: true,
+		MSSClamp: 1220, Logger: quiet(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	// Egress uchun ruxsat: aks holda paket tashlanadi va MSS ga
+	// yetib bormaydi.
+	if err := filter.SetIdentity(netip.MustParsePrefix(peerAddr+"/128"), 30); err != nil {
+		t.Fatalf("SetIdentity: %v", err)
+	}
+	if err := filter.AddRule(Rule{
+		Direction: Egress, Identity: 30, Verdict: Allow, RuleID: 1,
+	}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	// Yadro paketni chiqarishi uchun uni marshrut orqali
+	// yuboramiz — xom soket bilan.
+	go dialPeer(t, 9)
+
+	packet := readTCPFromDevice(t, device, 3*time.Second)
+	if packet == nil {
+		stats, _ := filter.Stats()
+		t.Fatalf("chiquvchi paket kelmadi (egress=%d tashlangan=%d)",
+			stats[StatEgressTotal], stats[StatEgressDrop])
+	}
+
+	mss, found := readMSS(t, packet)
+	if !found {
+		t.Fatalf("MSS opsiyasi topilmadi (%d bayt)", len(packet))
+	}
+	if mss > 1220 {
+		t.Errorf("MSS kichraytirilmadi: %d (MTU 1500 da 1440 kutilardi)", mss)
+	}
+	t.Logf("MSS: %d (MTU 1500 da kichraytirilmasa 1440 bo'lardi)", mss)
+
+	stats, _ := filter.Stats()
+	if stats[StatMSSClamped] == 0 {
+		t.Error("MSS hisoblagichi to'ldirilmadi")
+	}
+}
+
+// Chegaradan kichik MSS ga tegilmasligi kerak.
+func TestXDPPolicy_LeavesSmallMSSAlone(t *testing.T) {
+	requireKernel(t)
+
+	// MTU 1280: yadro MSS ni 1220 deb e'lon qiladi — u allaqachon
+	// chegara ostida va unga tegilmasligi kerak.
+	device := testDeviceMTU(t, 1280)
+
+	filter, err := Load(Config{
+		Interface: device.Name(), Enforce: true,
+		MSSClamp: 1220, Logger: quiet(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	if err := filter.SetIdentity(netip.MustParsePrefix(peerAddr+"/128"), 31); err != nil {
+		t.Fatalf("SetIdentity: %v", err)
+	}
+	if err := filter.AddRule(Rule{
+		Direction: Egress, Identity: 31, Verdict: Allow,
+	}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	go dialPeer(t, 9)
+
+	packet := readTCPFromDevice(t, device, 3*time.Second)
+	if packet == nil {
+		t.Fatal("chiquvchi paket kelmadi")
+	}
+
+	mss, found := readMSS(t, packet)
+	if !found {
+		t.Fatal("MSS opsiyasi topilmadi")
+	}
+	if mss != 1220 {
+		t.Errorf("MSS o'zgartirildi: 1220 kutilgan edi, %d olindi", mss)
+	}
+
+	stats, _ := filter.Stats()
+	if stats[StatMSSClamped] != 0 {
+		t.Errorf("chegara ostidagi MSS ga tegildi (%d marta)", stats[StatMSSClamped])
+	}
+}
+
+// Egress policy: qoidasiz chiquvchi paket tashlanishi kerak.
+//
+// Bu buzilgan node tarmoqqa erkin murojaat qilishining oldini
+// oladi — kirish filtri buni qila olmaydi.
+func TestXDPPolicy_DeniesEgressByDefault(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	dialPeer(t, 9)
+	time.Sleep(300 * time.Millisecond)
+
+	stats, err := filter.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats[StatEgressDrop] == 0 {
+		t.Fatalf("qoidasiz chiquvchi paket tashlanmadi (egress=%d)",
+			stats[StatEgressTotal])
+	}
+}
+
+// Kirish va chiqish qoidalari ARALASHMASLIGI kerak: ular bitta
+// map'da yashaydi va faqat yo'nalish maydoni bilan ajraladi.
+func TestXDPPolicy_DirectionsAreSeparate(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	ingress := Rule{Direction: Ingress, Identity: 40, Verdict: Allow, RuleID: 1}
+	egress := Rule{Direction: Egress, Identity: 40, Verdict: Drop, RuleID: 2}
+
+	if err := filter.AddRule(ingress); err != nil {
+		t.Fatalf("AddRule(ingress): %v", err)
+	}
+	if err := filter.AddRule(egress); err != nil {
+		t.Fatalf("AddRule(egress): %v", err)
+	}
+
+	// Ikkalasi ham alohida yashashi kerak.
+	if _, found, _ := filter.Hits(ingress); !found {
+		t.Error("kirish qoidasi yo'qoldi")
+	}
+	if _, found, _ := filter.Hits(egress); !found {
+		t.Error("chiqish qoidasi yo'qoldi")
+	}
+
+	// Birini o'chirish ikkinchisiga tegmasligi kerak.
+	if err := filter.RemoveRule(egress); err != nil {
+		t.Fatalf("RemoveRule: %v", err)
+	}
+	if _, found, _ := filter.Hits(ingress); !found {
+		t.Error("chiqish qoidasi o'chirilganda kirish qoidasi ham ketdi")
+	}
+}
+
+// DSCP chiquvchi paketga qo'yilishi kerak.
+func TestXDPPolicy_MarksDSCP(t *testing.T) {
+	requireKernel(t)
+	device := testDeviceMTU(t, 1500)
+
+	const dscp = 46 // Expedited Forwarding
+
+	filter, err := Load(Config{
+		Interface: device.Name(), Enforce: true,
+		DSCP: dscp, Logger: quiet(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	if err := filter.SetIdentity(netip.MustParsePrefix(peerAddr+"/128"), 50); err != nil {
+		t.Fatalf("SetIdentity: %v", err)
+	}
+	if err := filter.AddRule(Rule{
+		Direction: Egress, Identity: 50, Verdict: Allow,
+	}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	go dialPeer(t, 9)
+
+	packet := readTCPFromDevice(t, device, 3*time.Second)
+	if packet == nil {
+		t.Fatal("chiquvchi paket kelmadi")
+	}
+
+	// IPv6: version(4) | traffic class(8) | flow label(20).
+	// Traffic class birinchi ikki baytga taqsimlangan.
+	trafficClass := (packet[0]&0x0f)<<4 | packet[1]>>4
+	if got := trafficClass >> 2; got != dscp {
+		t.Errorf("DSCP = %d, %d kutilgan edi (traffic class = %#x)",
+			got, dscp, trafficClass)
+	}
+}
+
+// DSCP qo'yilmagan bo'lsa paketga tegilmasligi kerak.
+func TestXDPPolicy_LeavesDSCPAloneByDefault(t *testing.T) {
+	requireKernel(t)
+	device := testDeviceMTU(t, 1500)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	if err := filter.SetIdentity(netip.MustParsePrefix(peerAddr+"/128"), 51); err != nil {
+		t.Fatalf("SetIdentity: %v", err)
+	}
+	if err := filter.AddRule(Rule{
+		Direction: Egress, Identity: 51, Verdict: Allow,
+	}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	go dialPeer(t, 9)
+
+	packet := readTCPFromDevice(t, device, 3*time.Second)
+	if packet == nil {
+		t.Fatal("chiquvchi paket kelmadi")
+	}
+
+	trafficClass := (packet[0]&0x0f)<<4 | packet[1]>>4
+	if dscp := trafficClass >> 2; dscp != 0 {
+		t.Errorf("DSCP sozlanmagan, lekin %d qo'yilgan", dscp)
+	}
+}
+
+// Identity avtomatik ajratilishi kerak: operator CIDR bilan
+// ishlaydi, yadro esa raqam bilan.
+func TestXDPPolicy_AllocatesIdentities(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	first := netip.MustParsePrefix("2a0e:1::/64")
+	second := netip.MustParsePrefix("2a0e:2::/64")
+
+	a, err := filter.IdentityFor(first)
+	if err != nil {
+		t.Fatalf("IdentityFor: %v", err)
+	}
+	b, err := filter.IdentityFor(second)
+	if err != nil {
+		t.Fatalf("IdentityFor: %v", err)
+	}
+
+	if a == b {
+		t.Fatalf("ikkita prefiks bir xil guruh oldi: %d", a)
+	}
+	if a == IdentityUnknown || b == IdentityUnknown {
+		t.Error("nol guruh ajratildi — u 'noma'lum manba' uchun ajratilgan")
+	}
+
+	// Takroriy chaqiruv O'SHA raqamni qaytarishi kerak.
+	again, err := filter.IdentityFor(first)
+	if err != nil {
+		t.Fatalf("takroriy IdentityFor: %v", err)
+	}
+	if again != a {
+		t.Errorf("takroriy chaqiruv boshqa guruh berdi: %d va %d", a, again)
+	}
+}
+
+// Qoidalar ro'yxati prefikslari va hisoblagichlari bilan
+// qaytarilishi kerak.
+func TestXDPPolicy_ListsRulesWithPrefixes(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	prefix := netip.MustParsePrefix(peerAddr + "/128")
+	identity, err := filter.IdentityFor(prefix)
+	if err != nil {
+		t.Fatalf("IdentityFor: %v", err)
+	}
+
+	if err := filter.AddRule(Rule{
+		Identity: identity, Proto: 58, Verdict: Allow, RuleID: 100,
+	}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	inject(t, device, echoRequest(t, 80))
+	time.Sleep(150 * time.Millisecond)
+
+	rules, err := filter.Rules()
+	if err != nil {
+		t.Fatalf("Rules: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("%d ta qoida, 1 kutilgan edi", len(rules))
+	}
+
+	rule := rules[0]
+	if rule.RuleID != 100 {
+		t.Errorf("qoida ID %d", rule.RuleID)
+	}
+	if rule.Prefix != prefix {
+		t.Errorf("prefiks %v, %v kutilgan edi", rule.Prefix, prefix)
+	}
+	if rule.Hits == 0 {
+		t.Error("hisoblagich to'ldirilmadi")
+	}
+}
+
+// Qoidani ID bo'yicha o'chirish ishlashi kerak: CLI aynan shuni
+// ishlatadi.
+func TestXDPPolicy_RemovesByID(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	if err := filter.AddRule(Rule{Identity: 7, Verdict: Allow, RuleID: 55}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	if _, err := filter.RemoveByID(55); err != nil {
+		t.Fatalf("RemoveByID: %v", err)
+	}
+
+	rules, _ := filter.Rules()
+	if len(rules) != 0 {
+		t.Errorf("qoida o'chirilmadi: %d ta qoldi", len(rules))
+	}
+
+	if _, err := filter.RemoveByID(55); !errors.Is(err, ErrRuleNotFound) {
+		t.Errorf("mavjud bo'lmagan ID uchun ErrRuleNotFound kutilgan edi: %v", err)
+	}
+}
+
+// Simulyatsiya YADRODAGI tartibni aynan takrorlashi kerak.
+//
+// Farq qilsa `firewall test` yolg'on gapiradi va bu qoidani
+// noto'g'ri yozishga olib keladi — eng yomon nosozlik turi.
+func TestXDPPolicy_SimulateMatchesKernel(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	peer := netip.MustParseAddr(peerAddr)
+	identity, err := filter.IdentityFor(netip.PrefixFrom(peer, 128))
+	if err != nil {
+		t.Fatalf("IdentityFor: %v", err)
+	}
+
+	// Qoidasiz: deny-by-default.
+	decision, err := filter.Simulate(peer, 443, 6, Ingress)
+	if err != nil {
+		t.Fatalf("Simulate: %v", err)
+	}
+	if decision.Matched || decision.Verdict != Drop {
+		t.Errorf("qoidasiz holat: matched=%v verdict=%v", decision.Matched, decision.Verdict)
+	}
+
+	// Umumiy ruxsat.
+	if err := filter.AddRule(Rule{Identity: identity, Verdict: Allow, RuleID: 1}); err != nil {
+		t.Fatalf("AddRule(any): %v", err)
+	}
+	decision, _ = filter.Simulate(peer, 443, 6, Ingress)
+	if !decision.Matched || decision.Rule.RuleID != 1 {
+		t.Errorf("umumiy qoida topilmadi: %+v", decision)
+	}
+
+	// Aniqroq taqiq ustunlik qilishi kerak.
+	if err := filter.AddRule(Rule{
+		Identity: identity, Port: 443, Proto: 6, Verdict: Drop, RuleID: 2,
+	}); err != nil {
+		t.Fatalf("AddRule(443): %v", err)
+	}
+	decision, _ = filter.Simulate(peer, 443, 6, Ingress)
+	if decision.Rule.RuleID != 2 || decision.Verdict != Drop {
+		t.Errorf("aniqroq qoida ustunlik qilmadi: %+v", decision)
+	}
+
+	// Boshqa port hali ham umumiy qoidaga tushadi.
+	decision, _ = filter.Simulate(peer, 80, 6, Ingress)
+	if decision.Rule.RuleID != 1 {
+		t.Errorf("boshqa port noto'g'ri qoidaga tushdi: %+v", decision)
+	}
+
+	// Simulyatsiya YADRO bilan mos kelishini tekshiramiz: ICMPv6
+	// paketini yuborib, natijani solishtiramiz.
+	sim, _ := filter.Simulate(peer, 0, 58, Ingress)
+
+	before, _ := filter.Stats()
+	inject(t, device, echoRequest(t, 90))
+	time.Sleep(150 * time.Millisecond)
+	after, _ := filter.Stats()
+
+	allowed := after[StatAllow] > before[StatAllow]
+	if allowed != (sim.Verdict == Allow) {
+		t.Errorf("simulyatsiya yadrodan farq qildi: simulyatsiya=%v yadro=allow:%v",
+			sim.Verdict, allowed)
+	}
+}
+
+// Flush hamma qoidani va bog'lanishni o'chirishi kerak.
+func TestXDPPolicy_Flush(t *testing.T) {
+	requireKernel(t)
+	device := testDevice(t)
+
+	filter, err := Load(Config{Interface: device.Name(), Enforce: true, Logger: quiet()})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer filter.Close()
+
+	identity, err := filter.IdentityFor(netip.MustParsePrefix("2a0e:1::/64"))
+	if err != nil {
+		t.Fatalf("IdentityFor: %v", err)
+	}
+	for id := range uint32(3) {
+		if err := filter.AddRule(Rule{
+			Identity: identity, Port: uint16(1000 + id), Verdict: Allow, RuleID: id + 1,
+		}); err != nil {
+			t.Fatalf("AddRule: %v", err)
+		}
+	}
+
+	removed, err := filter.Flush()
+	if err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if removed != 3 {
+		t.Errorf("%d ta qoida o'chirildi, 3 kutilgan edi", removed)
+	}
+
+	rules, _ := filter.Rules()
+	if len(rules) != 0 {
+		t.Errorf("Flush'dan keyin %d ta qoida qoldi", len(rules))
+	}
+	if bindings := filter.Bindings(); len(bindings) != 0 {
+		t.Errorf("Flush'dan keyin %d ta bog'lanish qoldi", len(bindings))
+	}
+}

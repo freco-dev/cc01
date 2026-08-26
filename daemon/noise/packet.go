@@ -34,6 +34,14 @@ const (
 	TypeData          PacketType = 0x04
 	TypeKeepalive     PacketType = 0x05
 	TypeRelayWrap     PacketType = 0x06
+
+	// TypeDisco — yo'l sifatini o'lchash uchun ping/pong
+	// (ARCHITECTURE.md §6.3: "disco ping").
+	//
+	// Bu tur asl spetsifikatsiyadagi 0x01–0x06 ro'yxatiga
+	// QO'SHILGAN: yo'l tanlash uchun kechikishni o'lchash kerak
+	// bo'ldi, keepalive esa buni bera olmaydi — u javob kutmaydi.
+	TypeDisco PacketType = 0x07
 )
 
 func (t PacketType) String() string {
@@ -50,6 +58,8 @@ func (t PacketType) String() string {
 		return "keepalive"
 	case TypeRelayWrap:
 		return "relay_wrap"
+	case TypeDisco:
+		return "disco"
 	default:
 		return fmt.Sprintf("unknown(0x%02x)", uint8(t))
 	}
@@ -110,7 +120,7 @@ func ParseHeader(packet []byte) (Header, error) {
 
 	switch header.Type {
 	case TypeHandshakeInit, TypeHandshakeResp, TypeCookie,
-		TypeData, TypeKeepalive, TypeRelayWrap:
+		TypeData, TypeKeepalive, TypeRelayWrap, TypeDisco:
 		return header, nil
 	default:
 		return Header{}, fmt.Errorf("%w: 0x%02x", ErrUnknownType, packet[0])

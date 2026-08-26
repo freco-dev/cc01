@@ -23,17 +23,38 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/freco-dev/cc01/daemon/conn"
 	"github.com/freco-dev/cc01/daemon/engine"
+	"github.com/freco-dev/cc01/daemon/ipc"
 	"github.com/freco-dev/cc01/daemon/noise"
 	"github.com/freco-dev/cc01/daemon/tun"
 )
 
+// version — build vaqtida ldflags bilan o'rnatiladi
+// (`make package`). Paketsiz qurishda "dev" bo'lib qoladi.
+var version = "dev"
+
 func main() {
 	var (
 		genKey       = flag.Bool("genkey", false, "yangi kalit jufti yaratadi va chiqaradi")
+		controlAddr  = flag.String("cp", os.Getenv("CC01_CP_ADDR"), "Control Plane manzili; klasterda vergul bilan bir nechta (berilsa peerlar avtomatik olinadi)")
+		tenant       = flag.String("tenant", "default", "tenant identifikatori (CP rejimi)")
+		hostname     = flag.String("hostname", "", "node nomi (CP rejimi); bo'sh bo'lsa OS nomi")
+		cpToken      = flag.String("cp-token", os.Getenv("CC01_CP_TOKEN"), "CP bilan kelishilgan sir")
+		cpPin        = flag.String("cp-pin", os.Getenv("CC01_CP_PIN"), "CP sertifikatining SPKI pini (sha256/…); bir nechtasi vergul bilan")
+		cpInsecure   = flag.Bool("cp-insecure", false, "CP kanalini shifrlamaslik (FAQAT lokal sinov)")
+		stateDir     = flag.String("state-dir", stateDirDefault(), "node sertifikati saqlanadigan papka")
+		tags         = flag.String("tags", os.Getenv("CC01_TAGS"), "mikrosegmentatsiya tag'lari, vergul bilan (masalan: web,prod)")
+		firewall     = flag.Bool("firewall", false, "overlay interfeysida eBPF policy filtrini yoqish")
+		fwEnforce    = flag.Bool("firewall-enforce", false, "policy hukmini qo'llash (aks holda dry-run)")
+		advertise    = flag.String("advertise", "", "e'lon qilinadigan underlay manzil host:port")
+		stunServer   = flag.String("stun", os.Getenv("CC01_STUN"), "STUN serveri host:port (NAT ortida public manzilni aniqlash uchun)")
+		socketPath   = flag.String("socket", ipc.DefaultSocket, "IPC soketi (`cc01` CLI uchun)")
+		startDown    = flag.Bool("down", false, "mesh'ni ko'tarmasdan ishga tushish (`cc01 up` kutiladi)")
 		privateKey   = flag.String("key", os.Getenv("CC01_PRIVATE_KEY"), "base64 private kalit")
 		listenPort   = flag.Uint("listen", conn.DefaultPort, "overlay UDP porti")
 		ifaceName    = flag.String("iface", tun.DefaultName, "TUN interfeys nomi")
@@ -58,10 +79,61 @@ func main() {
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
+	// CP manzili berilgan bo'lsa — avtomatik rejim: peerlar, manzil va
+	// marshrutlar Control Plane dan keladi.
+	if *controlAddr != "" {
+		name := *hostname
+		if name == "" {
+			name, _ = os.Hostname()
+		}
+
+		var advertised []netip.AddrPort
+		if *advertise != "" {
+			parsed, err := netip.ParseAddrPort(*advertise)
+			if err != nil {
+				fail(fmt.Errorf("-advertise: %w", err))
+			}
+			advertised = []netip.AddrPort{parsed}
+		}
+
+		var stunAddr netip.AddrPort
+		if *stunServer != "" {
+			parsed, err := netip.ParseAddrPort(*stunServer)
+			if err != nil {
+				fail(fmt.Errorf("-stun: %w", err))
+			}
+			stunAddr = parsed
+		}
+
+		if err := runWithControlPlane(controlConfig{
+			privateKey:      *privateKey,
+			controlAddr:     *controlAddr,
+			tenant:          *tenant,
+			hostname:        name,
+			authToken:       *cpToken,
+			listenPort:      uint16(*listenPort),
+			ifaceName:       *ifaceName,
+			advertised:      advertised,
+			stunServer:      stunAddr,
+			socketPath:      *socketPath,
+			startDown:       *startDown,
+			cpPins:          splitList(*cpPin),
+			cpInsecure:      *cpInsecure,
+			stateDir:        *stateDir,
+			tags:            splitList(*tags),
+			firewall:        *firewall,
+			firewallEnforce: *fwEnforce,
+		}, logger); err != nil {
+			fail(err)
+		}
+		return
+	}
+
 	if err := run(config{
 		privateKey:   *privateKey,
 		listenPort:   uint16(*listenPort),
 		ifaceName:    *ifaceName,
+		socketPath:   *socketPath,
 		localAddr:    *localAddr,
 		peerKey:      *peerKey,
 		peerEndpoint: *peerEndpoint,
@@ -75,6 +147,7 @@ type config struct {
 	privateKey   string
 	listenPort   uint16
 	ifaceName    string
+	socketPath   string
 	localAddr    string
 	peerKey      string
 	peerEndpoint string
@@ -141,6 +214,27 @@ func run(cfg config, logger *slog.Logger) error {
 
 	datapath.Start()
 
+	// IPC statik rejimda ham ochiladi: `-socket` bayrog'i qabul
+	// qilinadi, ya'ni u ishlashi kerak. `cc01 status` va `peer list`
+	// bu yerda CP rejimidagidek foydali.
+	backend := &staticBackend{
+		engine:  datapath,
+		address: address,
+		started: time.Now(),
+	}
+
+	ipcServer, err := ipc.Listen(cfg.socketPath, ipc.NewService(backend, version), logger)
+	if err != nil {
+		logger.Warn("IPC ochilmadi, `cc01 status` ishlamaydi", "err", err)
+	} else {
+		defer ipcServer.Close()
+		go func() {
+			if err := ipcServer.Serve(); err != nil {
+				logger.Error("IPC to'xtadi", "err", err)
+			}
+		}()
+	}
+
 	logger.Info("cc01d tayyor",
 		"pubkey", identity.PublicKey().String(),
 		"iface", device.Name(),
@@ -185,4 +279,31 @@ func printNewKeyPair() error {
 func fail(err error) {
 	fmt.Fprintf(os.Stderr, "cc01d: %v\n", err)
 	os.Exit(1)
+}
+
+// splitList vergul bilan ajratilgan ro'yxatni bo'ladi.
+func splitList(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+
+	parts := strings.Split(value, ",")
+	items := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if item := strings.TrimSpace(part); item != "" {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+// stateDirDefault — sertifikat saqlanadigan standart papka.
+//
+// systemd unit'i StateDirectory=cc01 beradi va u shu yo'lga
+// aylanadi; muhit o'zgaruvchisi bo'lsa undan olinadi.
+func stateDirDefault() string {
+	if dir := os.Getenv("STATE_DIRECTORY"); dir != "" {
+		return dir
+	}
+	return "/var/lib/cc01"
 }

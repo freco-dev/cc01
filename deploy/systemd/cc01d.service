@@ -1,0 +1,78 @@
+[Unit]
+Description=cc01 mesh datapath demoni
+Documentation=https://github.com/freco-dev/cc01
+# Tarmoq bo'lmasa CP ga ulanib bo'lmaydi; nss-lookup CP manzili DNS
+# nomi bo'lgan holat uchun.
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+EnvironmentFile=/etc/cc01/cc01d.env
+ExecStart=/usr/bin/cc01d
+
+# Qayta ishga tushirish: CP vaqtincha yo'q bo'lsa demon o'ladi va
+# qaytishi kerak. RestartSec kichik emas — CP tushgan bo'lsa,
+# yuzlab node bir vaqtda urinib uni yana yiqitmasligi kerak.
+Restart=on-failure
+RestartSec=5s
+
+# TUN yaratish va marshrut qo'yish uchun CAP_NET_ADMIN; eBPF
+# dasturlarini yuklash uchun CAP_BPF va CAP_PERFMON. To'liq root
+# shart emas (DEV_SPEC §7.2 S-5).
+#
+# CAP_PERFMON ring buffer map'lari uchun kerak: ularsiz yadro
+# `operation not permitted` qaytaradi.
+AmbientCapabilities=CAP_NET_ADMIN CAP_BPF CAP_PERFMON
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_BPF CAP_PERFMON
+
+# /run/cc01 ni systemd yaratadi va to'xtaganda tozalaydi.
+RuntimeDirectory=cc01
+RuntimeDirectoryMode=0750
+
+# Demon SIGKILL bilan tugasa marshrutlar va policy qoidalari ortda
+# qolishi mumkin. Odatdagi to'xtashda `Down()` ularni tozalaydi;
+# bu hook halokatli holat uchun (DEV_SPEC §3.3).
+ExecStopPost=-/usr/lib/cc01/cc01-cleanup
+
+# ── Himoya ────────────────────────────────────────────────────────
+# Demon tarmoq stekiga to'liq kirish huquqiga ega, shuning uchun
+# qolgan hamma narsani imkon qadar yopamiz.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=no
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# ⚠️ `bpf` chaqiruvi `@privileged` guruhida va `@system-service` ga
+# KIRMAYDI — uni oshkora qo'shmasak, eBPF dasturlari umuman
+# yuklanmasdi. `perf_event_open` ring buffer uchun.
+SystemCallFilter=bpf perf_event_open
+
+# BPF uchun xotira chegarasi. Eski yadrolarda map'lar RLIMIT_MEMLOCK
+# hisobiga tushadi va standart chegara (64 KB) yetmaydi.
+LimitMEMLOCK=infinity
+
+# Kalit va konfiguratsiya uchun yozish huquqi.
+StateDirectory=cc01
+StateDirectoryMode=0700
+ReadWritePaths=/etc/cc01
+
+# ProtectSystem=strict /proc/sys ni ham yopadi, lekin tun paketi
+# interfeysga xos sysctl yozadi (accept_ra, forwarding).
+ProtectKernelTunables=no
+
+[Install]
+WantedBy=multi-user.target

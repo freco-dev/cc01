@@ -60,5 +60,13 @@ echo "═══ B dan A ga ping6 ═══"
 $DOCKER exec cc01-b ping -6 -c 2 -W 3 "$ADDR_A"
 
 echo
+echo "═══ cc01 status (node A, statik rejim) ═══"
+$DOCKER exec cc01-a cc01 status
+
+echo
+echo "═══ cc01 peer list (node A) ═══"
+$DOCKER exec cc01-a cc01 peer list
+
+echo
 echo "═══ node A logi ═══"
 $DOCKER logs cc01-a 2>&1 | tail -5

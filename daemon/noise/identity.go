@@ -20,6 +20,9 @@ func (k PublicKey) String() string {
 	return base64.StdEncoding.EncodeToString(k[:])
 }
 
+// Bytes — kalitning xom ko'rinishi (nusxa emas, massiv bo'lagi).
+func (k PublicKey) Bytes() []byte { return k[:] }
+
 // IsZero — kalit o'rnatilmaganmi.
 func (k PublicKey) IsZero() bool {
 	var zero PublicKey

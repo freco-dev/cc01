@@ -2,21 +2,22 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/freco-dev/cc01/core-server/access"
 	"github.com/freco-dev/cc01/core-server/config"
 	"github.com/freco-dev/cc01/core-server/events"
-	cc01v1 "github.com/freco-dev/cc01/core-server/gen/cc01/v1"
 	"github.com/freco-dev/cc01/core-server/server"
+	"github.com/freco-dev/cc01/core-server/tlsmgr"
 	"github.com/freco-dev/cc01/core-server/tunnel"
+	cc01v1 "github.com/freco-dev/cc01/proto/gen/cc01/v1"
 )
 
 const dateFormat = "2006/01/02 15:04:05"
@@ -32,6 +33,7 @@ type CC01Server struct {
 	cnameMap        map[string]string
 	tcpTunnels      map[uint16]*tunnel.TCPTunnel
 	httpTunnels     map[string]*tunnel.HTTPTunnel
+	certs           *tlsmgr.Resolver
 }
 
 func (j *CC01Server) Init(conf config.Config) error {
@@ -51,8 +53,79 @@ func (j *CC01Server) Init(conf config.Config) error {
 	if err := j.publicServer.Init(conf.PublicServerPort, "cc01_public_server"); err != nil {
 		return err
 	}
-	err := j.publicServerTLS.InitTLS(conf.PublicServerTLSPort, "cc01_public_server_tls", conf.TLSCertFile, conf.TLSKeyFile)
-	return err
+	tlsConfig, err := j.buildTLS()
+	if err != nil {
+		return err
+	}
+	return j.publicServerTLS.InitTLS(conf.PublicServerTLSPort, "cc01_public_server_tls", tlsConfig)
+}
+
+// buildTLS SNI bo'yicha sertifikat tanlaydigan sozlamani quradi.
+func (j *CC01Server) buildTLS() (*tls.Config, error) {
+	wildcard, err := tls.LoadX509KeyPair(j.config.TLSCertFile, j.config.TLSKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("wildcard sertifikat: %w", err)
+	}
+
+	var acme *tlsmgr.ACME
+	if j.config.ACMEEnabled() {
+		acme, err = tlsmgr.NewACME(tlsmgr.ACMEOptions{
+			Email:     j.config.ACMEEmail,
+			Directory: j.config.ACMEDirectory,
+			CA:        j.config.ACMECA,
+			Decide:    j.knownDomain,
+		})
+		if err != nil {
+			return nil, err
+		}
+		log.Printf("ACME yoqilgan: custom domainlar avtomatik sertifikat oladi (%s)",
+			j.config.ACMEDirectory)
+	} else {
+		log.Printf("⚠️  ACME o'chiq (CC01_ACME_EMAIL berilmagan): " +
+			"custom domainlar HTTPS ola olmaydi")
+	}
+
+	resolver, err := tlsmgr.New(tlsmgr.Options{
+		Domain:   j.config.DomainName,
+		Wildcard: &wildcard,
+		Apex:     &wildcard,
+		Known:    j.knownDomain,
+		Issuer:   issuerOrNil(acme),
+	})
+	if err != nil {
+		return nil, err
+	}
+	j.certs = resolver
+
+	return tlsmgr.TLSConfig(resolver, acme), nil
+}
+
+// issuerOrNil nil `*ACME` ni nil interfeysga aylantiradi.
+//
+// Usiz `Issuer` interfeysi nil ko'rsatkichni o'rab, "nil emas"
+// bo'lib qolardi va resolver mavjud bo'lmagan chiqaruvchiga
+// murojaat qilardi.
+func issuerOrNil(acme *tlsmgr.ACME) tlsmgr.Issuer {
+	if acme == nil {
+		return nil
+	}
+	return acme
+}
+
+// knownDomain — bu custom domenga hozir tunnel ochilganmi.
+//
+// ⚠️ Sertifikat FAQAT tirik tunnel uchun beriladi. Har qanday
+// SNI ga sertifikat chiqarsak, kimdir o'z domenining DNS'ini
+// bizga qaratib, ACME limitlarini yoqib yuborardi.
+//
+// Egalik bu yerda tekshirilmaydi — u access-server tomonida,
+// tunnel ochilishidan oldin hal qilingan.
+func (j *CC01Server) knownDomain(name string) bool {
+	j.tunnelsMx.RLock()
+	defer j.tunnelsMx.RUnlock()
+
+	host, ok := j.cnameMap[name]
+	return ok && host != ""
 }
 
 func (j *CC01Server) initAuthorizer() error {
@@ -116,7 +189,7 @@ func (j *CC01Server) servePublicConn(conn net.Conn) error {
 		writeResponse(conn, 400, "Bad Request", "Bad Request")
 		return nil
 	}
-	host = strings.ToLower(host)
+	host = normalizeHost(host)
 
 	j.tunnelsMx.RLock()
 	if tunnelHost, ok := j.cnameMap[host]; ok && tunnelHost != "" {
@@ -248,6 +321,11 @@ func (j *CC01Server) serveEventConn(conn net.Conn) error {
 			}
 			delete(j.httpTunnels, hostname)
 			j.tunnelsMx.Unlock()
+
+			// Sertifikat keshi tozalanmaydi — resolver umuman
+			// keshlamaydi va ruxsatni har bir qo'l siqishida
+			// qaytadan tekshiradi. Ya'ni cnameMap dan o'chirish
+			// bilan sertifikat berish darhol to'xtaydi.
 		}()
 		t = tn
 

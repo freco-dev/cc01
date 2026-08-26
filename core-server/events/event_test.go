@@ -7,7 +7,7 @@ import (
 	"net"
 	"testing"
 
-	cc01v1 "github.com/freco-dev/cc01/core-server/gen/cc01/v1"
+	cc01v1 "github.com/freco-dev/cc01/proto/gen/cc01/v1"
 )
 
 func TestPreamble_RoundTrip(t *testing.T) {

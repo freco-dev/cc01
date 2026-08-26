@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -163,4 +164,105 @@ func TestDurationEnv(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ── ACME ───────────────────────────────────────────────────────
+
+func TestConfig_ACMEDisabledByDefault(t *testing.T) {
+	cfg := loadWith(t, map[string]string{})
+
+	if cfg.ACMEEnabled() {
+		t.Error("ACME sukut bo'yicha yoqilgan")
+	}
+}
+
+// Doimiy papkasiz ACME har qayta ishga tushishda hamma
+// sertifikatni qaytadan chiqartirib, limitga urardi.
+func TestConfig_ACMERequiresDirectory(t *testing.T) {
+	if _, err := loadRaw(map[string]string{
+		"CC01_ACME_EMAIL": "admin@cc01.uz",
+	}); err == nil {
+		t.Error("papkasiz ACME qabul qilindi")
+	}
+}
+
+// Sinov katalogini qisqa yozuv bilan tanlash: to'liq URL ni qo'lda
+// yozishda xato qilish oson va u ishlab chiqarish katalogiga urib
+// qo'yardi.
+func TestConfig_ACMEStagingShorthand(t *testing.T) {
+	cfg := loadWith(t, map[string]string{
+		"CC01_ACME_EMAIL": "admin@cc01.uz",
+		"CC01_ACME_DIR":   t.TempDir(),
+		"CC01_ACME_CA":    "staging",
+	})
+
+	if !cfg.ACMEEnabled() {
+		t.Fatal("ACME yoqilmadi")
+	}
+	if cfg.ACMECA == "" || !strings.Contains(cfg.ACMECA, "staging") {
+		t.Errorf("sinov katalogi tanlanmadi: %q", cfg.ACMECA)
+	}
+}
+
+func TestConfig_ACMEProductionIsDefault(t *testing.T) {
+	for _, value := range []string{"", "production"} {
+		cfg := loadWith(t, map[string]string{
+			"CC01_ACME_EMAIL": "admin@cc01.uz",
+			"CC01_ACME_DIR":   t.TempDir(),
+			"CC01_ACME_CA":    value,
+		})
+		if cfg.ACMECA != "" {
+			t.Errorf("CC01_ACME_CA=%q → %q, bo'sh kutilgan edi", value, cfg.ACMECA)
+		}
+	}
+}
+
+func TestConfig_ACMEAcceptsCustomCA(t *testing.T) {
+	const pebble = "https://127.0.0.1:14000/dir"
+
+	cfg := loadWith(t, map[string]string{
+		"CC01_ACME_EMAIL": "admin@cc01.uz",
+		"CC01_ACME_DIR":   t.TempDir(),
+		"CC01_ACME_CA":    pebble,
+	})
+
+	if cfg.ACMECA != pebble {
+		t.Errorf("%q, %q kutilgan edi", cfg.ACMECA, pebble)
+	}
+}
+
+// loadWith berilgan muhit bilan konfiguratsiyani yuklaydi.
+func loadWith(t *testing.T, env map[string]string) Config {
+	t.Helper()
+
+	cfg, err := loadRaw(env)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	return cfg
+}
+
+func loadRaw(env map[string]string) (Config, error) {
+	base := map[string]string{
+		"CC01_DOMAIN":     "cc01.uz",
+		"CC01_TLS_CERT":   "/tmp/cert.pem",
+		"CC01_TLS_KEY":    "/tmp/key.pem",
+		"CC01_AUTH_MODE":  "disabled",
+		"CC01_ACME_EMAIL": "",
+		"CC01_ACME_DIR":   "",
+		"CC01_ACME_CA":    "",
+	}
+	for key, value := range env {
+		base[key] = value
+	}
+
+	for key, value := range base {
+		if err := os.Setenv(key, value); err != nil {
+			return Config{}, err
+		}
+	}
+
+	var cfg Config
+	err := cfg.Load()
+	return cfg, err
 }

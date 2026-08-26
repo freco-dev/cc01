@@ -3,6 +3,7 @@ package tun
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"sync"
 
 	wgtun "golang.zx2c4.com/wireguard/tun"
@@ -21,6 +22,12 @@ type Device struct {
 	// configured — manzil/marshrut qo'yilganmi. Close() faqat o'zi
 	// qo'ygan narsalarni tozalaydi.
 	configured bool
+
+	// applied — oxirgi marta qo'llangan marshrutlar. Yadrodan o'qib
+	// bo'lmaydigan platformalarda (macOS) rekonsiliatsiya shunga
+	// tayanadi.
+	routesMx sync.Mutex
+	applied  []netip.Prefix
 
 	closeOnce sync.Once
 	closeErr  error
@@ -57,6 +64,12 @@ func Create(cfg Config) (*Device, error) {
 		return nil, err
 	}
 	device.configured = true
+
+	// Create qo'ygan marshrutlarni boshlang'ich holat sifatida eslab
+	// qolamiz, shunda birinchi SetRoutes ularni "yangi" deb hisoblamaydi.
+	if normalized, err := normalizeRoutes(cfg.Routes); err == nil {
+		device.applied = normalized
+	}
 
 	return device, nil
 }

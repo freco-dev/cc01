@@ -1,0 +1,10 @@
+{
+  "rules": [
+    { "action": "allow", "src": "tag:web", "proto": "icmpv6",
+      "comment": "web guruhidan ping" },
+    { "action": "allow", "dst": "tag:web", "proto": "icmpv6",
+      "comment": "web guruhiga ping" },
+    { "action": "deny", "src": "tag:web", "proto": "tcp", "port": 22,
+      "comment": "SSH taqiqlangan — lateral movement" }
+  ]
+}

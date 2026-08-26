@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"time"
 
 	"golang.org/x/net/ipv6"
 )
@@ -101,13 +102,47 @@ func (b *Bind) Receive(messages []Datagram) (int, error) {
 		messages[i].Payload = messages[i].Payload[:batch[i].N]
 
 		if addr, ok := batch[i].Addr.(*net.UDPAddr); ok {
-			// Endpointlarni bir xil ko'rinishga keltiramiz: IPv4-mapped
-			// manzillar taqqoslashda muammo tug'dirmasligi uchun.
-			messages[i].From = addr.AddrPort()
+			messages[i].From = normalize(addr.AddrPort())
 		}
 	}
 
 	return count, nil
+}
+
+// ReceiveOne bitta paketni deadline bilan o'qiydi.
+//
+// Batch o'qishdan farqi — u qaytishi KAFOLATLANGAN. Bu engine ishga
+// tushishidan oldingi qisqa almashinuvlar uchun kerak (masalan STUN):
+// o'sha paytda bloklanib qoladigan o'quvchi goroutine qoldirib
+// bo'lmaydi — u keyinchalik engine'ning paketlarini o'g'irlaydi.
+func (b *Bind) ReceiveOne(buf []byte, deadline time.Time) (int, netip.AddrPort, error) {
+	if err := b.socket.SetReadDeadline(deadline); err != nil {
+		return 0, netip.AddrPort{}, err
+	}
+	defer func() { _ = b.socket.SetReadDeadline(time.Time{}) }()
+
+	n, from, err := b.socket.ReadFromUDPAddrPort(buf)
+	if err != nil {
+		if b.isClosed() {
+			return 0, netip.AddrPort{}, ErrClosed
+		}
+		return 0, netip.AddrPort{}, err
+	}
+
+	return n, normalize(from), nil
+}
+
+// normalize manzilni YAGONA ko'rinishga keltiradi.
+//
+// Dual-stack soket IPv4 peerni `::ffff:a.b.c.d` ko'rinishida qaytaradi,
+// konfiguratsiyadan kelgan manzil esa sof `a.b.c.d` bo'ladi. Ular
+// netip.AddrPort sifatida TENG EMAS — va bu jimgina buzilishga olib
+// keladi: paket keladi, lekin "kutilgan manzildan emas" deb tashlanadi.
+//
+// Shuning uchun soketdan chiqadigan har bir manzil shu yerda
+// normallashtiriladi.
+func normalize(addr netip.AddrPort) netip.AddrPort {
+	return netip.AddrPortFrom(addr.Addr().Unmap(), addr.Port())
 }
 
 // Send paketni berilgan endpointga yuboradi.

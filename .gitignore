@@ -16,6 +16,17 @@
 **/bin/
 **/obj/
 
+# Go binarlari modul papkasiga tushadi va `go build` ularni paket nomi
+# bilan ataydi — shuning uchun har birini alohida ko'rsatamiz.
+/cli-client/cli-client
+/daemon/cc01
+/daemon/cc01d
+/control/cc01-cp
+/core-server/core-server
+
 # go.work ATAYLAB ignore QILINMAYDI: barcha modullar shu repoda,
 # workspace fayli umumiy va commit qilinadi.
 go.work.sum
+
+# Paket artefaktlari.
+/dist/

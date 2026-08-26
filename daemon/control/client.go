@@ -1,0 +1,576 @@
+// Package control cc01d ni Control Plane bilan bog'laydi.
+//
+// Vazifasi bitta: CP dan kelgan NetworkMap ni routerdagi peerlarga
+// aylantirish. Shundan keyin mesh qo'lda sozlashsiz ishlaydi.
+package control
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/netip"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/freco-dev/cc01/daemon/noise"
+	"github.com/freco-dev/cc01/daemon/router"
+	cc01v1 "github.com/freco-dev/cc01/proto/gen/cc01/v1"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+)
+
+// Config — klient sozlamalari.
+type Config struct {
+	// Address — CP ning gRPC manzili.
+	Address string
+
+	// Identity — shu nodening kalit jufti.
+	Identity *noise.Identity
+
+	// Router — peerlar shu yerga qo'shiladi.
+	Router *router.Router
+
+	Tenant   string
+	Hostname string
+	Tags     []string
+
+	// Endpoints — bizning underlay manzillarimiz.
+	Endpoints []netip.AddrPort
+
+	// AuthToken — CP bilan kelishilgan sir.
+	AuthToken string
+
+	// OnRelays — relay ro'yxati kelganda chaqiriladi.
+	//
+	// Klient relayga o'zi ulanmaydi: relay klienti datapath soketini
+	// talab qiladi, u esa engine bilan birga tug'iladi. Shuning uchun
+	// ro'yxat yuqoriga uzatiladi.
+	OnRelays func([]RelayInfo)
+
+	// Policy — CP qoidalarini qo'llaydigan filtr. nil bo'lsa
+	// qoidalar e'tiborsiz qoldiriladi.
+	Policy PolicyApplier
+
+	// OnNetworkMap har bir qo'llangan NetworkMap dan KEYIN chaqiriladi.
+	//
+	// Peerlar o'zgardi degani marshrutlar ham o'zgargan bo'lishi
+	// mumkin. Chaqiruv NetworkMap oqimi ichida bajariladi, shuning
+	// uchun u bloklanmasligi shart.
+	OnNetworkMap func()
+
+	// Pins — CP sertifikatining kutilayotgan SPKI pinlari
+	// ("sha256/…"). Bir nechtasi kalit almashtirish uchun.
+	Pins []string
+
+	// Insecure — kanalni shifrlamasdan ochish. FAQAT lokal
+	// sinovlar uchun: bu rejimda NetworkMap, node kalitlari va
+	// autentifikatsiya tokeni ochiq matnda uzatiladi.
+	Insecure bool
+
+	// ClientCert — nodening TLS klient sertifikati.
+	//
+	// Bo'sh bo'lsa node faqat token bilan tanitiladi va CP
+	// ogohlantirish yozadi: token umumiy sir, ya'ni himoya
+	// sezilarli darajada zaifroq.
+	ClientCert *tls.Certificate
+
+	Logger *slog.Logger
+}
+
+// RelayInfo — CP e'lon qilgan relay tuguni.
+type RelayInfo struct {
+	ID        string
+	PublicKey noise.PublicKey
+	Endpoint  netip.AddrPort
+	Region    string
+	Priority  uint32
+}
+
+// Client — CP bilan aloqani ushlab turuvchi.
+type Client struct {
+	cfg Config
+	log *slog.Logger
+
+	// mu — ulanish almashtirilganda uni himoya qiladi.
+	//
+	// Kerak, chunki uch goroutine bir vaqtda ishlaydi: NetworkMap
+	// oqimi, heartbeat va boshqaruv. Ularning har biri liderni
+	// yo'qotib, boshqa CP ga o'tishni boshlashi mumkin.
+	mu      sync.Mutex
+	conn    *grpc.ClientConn
+	service cc01v1.ControlServiceClient
+
+	// addrs — CP manzillari. Klaster rejimida bir nechta bo'ladi:
+	// yozuvni faqat lider bajara oladi, qaysi biri lider ekanini
+	// esa oldindan bilmaymiz.
+	addrs []string
+
+	// current — hozir ulangan manzil indeksi.
+	current int
+
+	nodeID  string
+	address netip.Prefix
+
+	// policy — CP qoidalarining oxirgi qo'llangan versiyasi.
+	policy policyState
+}
+
+// Registration — ro'yxatdan o'tish natijasi.
+type Registration struct {
+	NodeID string
+
+	// Address — bizga berilgan overlay manzili.
+	Address netip.Prefix
+
+	// TenantCIDR — tenant segmenti; TUN marshruti shunga qo'yiladi.
+	TenantCIDR netip.Prefix
+
+	HeartbeatInterval time.Duration
+}
+
+func Dial(cfg Config) (*Client, error) {
+	if cfg.Identity == nil {
+		return nil, errors.New("control: identity berilmagan")
+	}
+
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	addrs, err := splitAddresses(cfg.Address)
+	if err != nil {
+		return nil, err
+	}
+
+	conn, err := dialAddress(cfg, addrs[0], logger)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Client{
+		conn:    conn,
+		service: cc01v1.NewControlServiceClient(conn),
+		cfg:     cfg,
+		log:     logger.With("component", "control"),
+		addrs:   addrs,
+	}, nil
+}
+
+// splitAddresses vergul bilan ajratilgan CP manzillarini bo'ladi.
+//
+// Klasterda bir nechta CP bo'ladi va ularning qaysi biri lider
+// ekani vaqt o'tishi bilan o'zgaradi — shuning uchun operator
+// hammasini beradi, klient esa liderni o'zi topadi.
+func splitAddresses(raw string) ([]string, error) {
+	var addrs []string
+	for _, part := range strings.Split(raw, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			addrs = append(addrs, trimmed)
+		}
+	}
+	if len(addrs) == 0 {
+		return nil, errors.New("control: CP manzili berilmagan")
+	}
+	return addrs, nil
+}
+
+// dialAddress bitta manzilga ulanish quradi.
+func dialAddress(cfg Config, addr string, logger *slog.Logger) (*grpc.ClientConn, error) {
+	creds, err := transportCredentials(cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(creds))
+	if err != nil {
+		return nil, fmt.Errorf("control: CP ga ulanish (%s): %w", addr, err)
+	}
+	return conn, nil
+}
+
+// Address — hozir ulangan CP manzili.
+func (c *Client) Address() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.addrs[c.current]
+}
+
+// rotate keyingi CP manziliga o'tadi.
+//
+// Eski ulanish YOPILADI: uni ochiq qoldirsak, NetworkMap oqimi
+// eski nodega bog'lanib qolardi va biz lidernikidan farq qiladigan
+// registry'ni kuzatgan bo'lardik.
+func (c *Client) rotate() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	next := (c.current + 1) % len(c.addrs)
+
+	conn, err := dialAddress(c.cfg, c.addrs[next], c.log)
+	if err != nil {
+		return err
+	}
+
+	_ = c.conn.Close()
+
+	c.conn = conn
+	c.service = cc01v1.NewControlServiceClient(conn)
+	c.current = next
+
+	return nil
+}
+
+// rotateOnFailure ulanish HAQIQATAN yaroqsiz bo'lsa keyingi CP
+// manziliga o'tadi.
+//
+// ⚠️ Sog' ulanishda aylanmaydi va bu shart. Heartbeat ham,
+// NetworkMap oqimi ham aylantira oladi: birinchisi liderni
+// yo'qotganda, ikkinchisi oqim uzilganda. Aylanish ulanishni
+// yopadi, ya'ni har bir aylanish IKKINCHI siklda ham nosozlikka
+// o'xshab ko'rinadi. Guard bo'lmasa ikkalasi bir-birini quvib,
+// ulanishni manzillar bo'ylab cheksiz surib yurardi.
+func (c *Client) rotateOnFailure() {
+	if len(c.addrs) == 1 {
+		return
+	}
+
+	switch c.state() {
+	case connectivity.TransientFailure, connectivity.Shutdown:
+	default:
+		// Ulanish tirik — nosozlik boshqa sababdan yoki uni
+		// allaqachon boshqa gorutina almashtirgan.
+		return
+	}
+
+	if err := c.rotate(); err != nil {
+		// Xato faqat qayd etiladi: qaytadan urinish siklini
+		// chaqiruvchi boshqaradi va bu yerda to'xtash node'ni
+		// butunlay aloqasiz qoldirardi.
+		c.log.Warn("keyingi CP ga o'tib bo'lmadi", "err", err)
+		return
+	}
+	c.log.Info("boshqa CP ga o'tildi", "manzil", c.Address())
+}
+
+// state — hozirgi ulanishning holati.
+func (c *Client) state() connectivity.State {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn.GetState()
+}
+
+// svc — hozirgi ulanishning klienti.
+//
+// Har chaqiruvda qayta o'qiladi: ulanish almashgan bo'lishi mumkin
+// va eski klientni ushlab qolgan gorutina o'lik nodega yozardi.
+func (c *Client) svc() cc01v1.ControlServiceClient {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.service
+}
+
+func (c *Client) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn.Close()
+}
+
+// SetRouter routerni ulaydi.
+//
+// Ro'yxatdan o'tish TUN va engine yaratishdan OLDIN bo'ladi (manzil
+// aynan o'shanda beriladi), router esa engine bilan birga tug'iladi —
+// shuning uchun u keyinroq ulanadi.
+func (c *Client) SetRouter(r *router.Router) { c.cfg.Router = r }
+
+// NodeID — CP bergan identifikator.
+func (c *Client) NodeID() string { return c.nodeID }
+
+// Register nodeni CP da ro'yxatga oladi va manzil oladi.
+//
+// Klasterda manzil berish RAFT YOZUVI, ya'ni uni faqat lider
+// bajara oladi. Follower "men lider emasman" deb javob beradi va
+// biz keyingi manzilga o'tamiz. Topilgan lider bilan ulanish
+// SAQLANADI: keyingi heartbeat va NetworkMap oqimi o'sha nodedan
+// boradi.
+func (c *Client) Register(ctx context.Context) (*Registration, error) {
+	var lastErr error
+
+	for range c.addrs {
+		registration, err := c.register(ctx)
+		if err == nil {
+			return registration, nil
+		}
+		if !isNotLeader(err) {
+			return nil, fmt.Errorf("control: ro'yxatdan o'tish: %w", err)
+		}
+
+		lastErr = err
+
+		// Bitta manzil bo'lsa aylanadigan joy yo'q — o'zimizga
+		// qayta ulanish behuda.
+		if len(c.addrs) == 1 {
+			break
+		}
+
+		c.log.Info("bu CP lider emas, keyingisiga o'tamiz",
+			"manzil", c.addrs[c.current])
+
+		if rotateErr := c.rotate(); rotateErr != nil {
+			return nil, rotateErr
+		}
+	}
+
+	return nil, fmt.Errorf(
+		"control: %d ta CP manzilining hech biri lider emas: %w",
+		len(c.addrs), lastErr)
+}
+
+// isNotLeader — CP "men lider emasman" dedimi.
+//
+// Sabab xato MATNIDAN emas, tuzilgan tafsilotdan o'qiladi: matn
+// o'zgarishi mumkin, `NOT_LEADER` esa shartnomaning bir qismi.
+func isNotLeader(err error) bool {
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.Unavailable {
+		return false
+	}
+
+	for _, detail := range st.Details() {
+		if info, ok := detail.(*errdetails.ErrorInfo); ok {
+			if info.GetReason() == notLeaderReason {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// notLeaderReason — `control/server` bilan bir xil bo'lishi shart.
+const notLeaderReason = "NOT_LEADER"
+
+func (c *Client) register(ctx context.Context) (*Registration, error) {
+	key := c.cfg.Identity.PublicKey()
+
+	endpoints := make([]string, 0, len(c.cfg.Endpoints))
+	for _, endpoint := range c.cfg.Endpoints {
+		endpoints = append(endpoints, endpoint.String())
+	}
+
+	// Oldingi manzilni so'raymiz (sticky): qayta ulanganda IP
+	// o'zgarmasligi uchun.
+	var preferred string
+	if c.address.IsValid() {
+		preferred = c.address.String()
+	}
+
+	response, err := c.svc().Register(ctx, &cc01v1.RegisterRequest{
+		PublicKey:        key[:],
+		Tenant:           c.cfg.Tenant,
+		Hostname:         c.cfg.Hostname,
+		Endpoints:        endpoints,
+		Tags:             c.cfg.Tags,
+		PreferredAddress: preferred,
+		AuthToken:        c.cfg.AuthToken,
+	})
+	if err != nil {
+		// ATAYLAB o'ralmaydi: chaqiruvchi gRPC statusini ko'rib
+		// "lider emas" ni ajratishi kerak.
+		return nil, err
+	}
+
+	address, err := netip.ParsePrefix(response.GetAddress())
+	if err != nil {
+		return nil, fmt.Errorf("control: CP noto'g'ri manzil berdi (%q): %w",
+			response.GetAddress(), err)
+	}
+
+	tenantCIDR, err := netip.ParsePrefix(response.GetTenantCidr())
+	if err != nil {
+		return nil, fmt.Errorf("control: CP noto'g'ri tenant CIDR berdi (%q): %w",
+			response.GetTenantCidr(), err)
+	}
+
+	c.nodeID = response.GetNodeId()
+	c.address = address
+
+	interval := time.Duration(response.GetHeartbeatIntervalS()) * time.Second
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+
+	c.log.Info("ro'yxatdan o'tildi",
+		"node", shortID(c.nodeID), "address", address, "tenant_cidr", tenantCIDR)
+
+	return &Registration{
+		NodeID:            c.nodeID,
+		Address:           address,
+		TenantCIDR:        tenantCIDR,
+		HeartbeatInterval: interval,
+	}, nil
+}
+
+// Run NetworkMap stream'ini kuzatadi va heartbeat yuboradi.
+//
+// `ctx` bekor qilinmaguncha ishlaydi. Stream uzilsa qayta ulanadi:
+// CP vaqtincha yiqilsa mesh ishlashda davom etadi (fail-static).
+func (c *Client) Run(ctx context.Context, heartbeat time.Duration) error {
+	go c.heartbeatLoop(ctx, heartbeat)
+
+	backoff := time.Second
+	const maxBackoff = 30 * time.Second
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil
+		}
+
+		err := c.watch(ctx)
+		if err == nil || ctx.Err() != nil {
+			return nil
+		}
+
+		c.log.Warn("NetworkMap stream uzildi, qayta ulanamiz",
+			"err", err, "backoff", backoff, "manzil", c.Address())
+
+		// Ulangan CP yiqilgan bo'lishi mumkin. Bitta manzilni
+		// cheksiz qayta chaqirsak, node butun klaster tirik
+		// bo'lsa ham aloqasiz qolardi.
+		c.rotateOnFailure()
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(backoff):
+		}
+
+		backoff = min(backoff*2, maxBackoff)
+	}
+}
+
+// watch bitta stream sessiyasini boshqaradi.
+func (c *Client) watch(ctx context.Context) error {
+	stream, err := c.svc().WatchNetworkMap(ctx, &cc01v1.WatchNetworkMapRequest{
+		NodeId:    c.nodeID,
+		AuthToken: c.cfg.AuthToken,
+		// Har doim 0: qayta ulanganda to'liq map olamiz. Stream
+		// uzilganda nima o'tkazib yuborganimizni bilmaymiz, shuning
+		// uchun to'liq holat xavfsizroq.
+		Since: 0,
+	})
+	if err != nil {
+		return err
+	}
+
+	for {
+		netmap, err := stream.Recv()
+		if err != nil {
+			return err
+		}
+		c.apply(netmap)
+	}
+}
+
+func (c *Client) heartbeatLoop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			endpoints := make([]string, 0, len(c.cfg.Endpoints))
+			for _, endpoint := range c.cfg.Endpoints {
+				endpoints = append(endpoints, endpoint.String())
+			}
+
+			_, err := c.svc().Heartbeat(ctx, &cc01v1.HeartbeatRequest{
+				NodeId:    c.nodeID,
+				Endpoints: endpoints,
+				AuthToken: c.cfg.AuthToken,
+			})
+			if err == nil || ctx.Err() != nil {
+				continue
+			}
+
+			// Heartbeat TTL ni uzaytiradi, ya'ni u Raft yozuvi va
+			// faqat liderda ishlaydi. Lider almashgan bo'lsa
+			// keyingi manzilga o'tamiz — aks holda node jimgina
+			// muddati o'tib, ro'yxatdan tushib ketardi.
+			if isNotLeader(err) {
+				// Bu yerda guard ISHLATILMAYDI: ulanishning o'zi
+				// sog', shunchaki lider boshqa nodeda.
+				c.log.Info("heartbeat: lider almashgan, keyingi CP ga o'tamiz",
+					"manzil", c.Address())
+				if len(c.addrs) > 1 {
+					if rotateErr := c.rotate(); rotateErr != nil {
+						c.log.Warn("keyingi CP ga o'tib bo'lmadi", "err", rotateErr)
+					}
+				}
+				continue
+			}
+
+			c.log.Debug("heartbeat muvaffaqiyatsiz", "err", err)
+		}
+	}
+}
+
+func shortID(id string) string {
+	if len(id) > 12 {
+		return id[:12]
+	}
+	return id
+}
+
+// transportCredentials kanalning himoyasini tanlaydi.
+//
+// Standart — TLS 1.3. Shifrlanmagan kanal FAQAT oshkora so'ralganda
+// ochiladi va bu haqda ogohlantiriladi: bu kanal orqali butun
+// NetworkMap (kim tarmoqda, qaysi manzilda) va autentifikatsiya
+// tokeni o'tadi.
+func transportCredentials(cfg Config, logger *slog.Logger) (credentials.TransportCredentials, error) {
+	if cfg.Insecure {
+		if len(cfg.Pins) > 0 {
+			return nil, errors.New(
+				"control: -cp-insecure va -cp-pin birga berilmaydi; qaysi biri kerakligini tanlang")
+		}
+
+		logger.Warn("CP KANALI SHIFRLANMAGAN — NetworkMap va token ochiq matnda uzatiladi; " +
+			"faqat lokal sinov uchun")
+		return insecure.NewCredentials(), nil
+	}
+
+	if len(cfg.Pins) == 0 {
+		// Pin bo'lmasa tizim ildiz sertifikatlariga tayanamiz. Bu
+		// ishlaydi, lekin self-signed CP uchun emas — shuning uchun
+		// aniq maslahat beramiz.
+		logger.Info("CP sertifikati tizim ildizlari bilan tekshiriladi",
+			"maslahat", "self-signed CP uchun -cp-pin bering")
+	}
+
+	config := tlsConfig(serverNameFor(cfg.Address), cfg.Pins)
+	if cfg.ClientCert != nil {
+		config.Certificates = []tls.Certificate{*cfg.ClientCert}
+	}
+
+	return credentials.NewTLS(config), nil
+}
+
+// serverNameFor manzildan TLS uchun host qismini ajratadi.
+func serverNameFor(address string) string {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return address
+	}
+	return host
+}

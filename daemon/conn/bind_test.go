@@ -175,3 +175,56 @@ func receiveWithTimeout(t *testing.T, bind *Bind, messages []Datagram) (int, err
 
 	return bind.Receive(messages)
 }
+
+// ═══════════════════════════════════════════════════════════════
+// Regressiya: dual-stack soket IPv4 peerni `::ffff:a.b.c.d`
+// ko'rinishida qaytaradi, konfiguratsiyadan kelgan manzil esa sof
+// `a.b.c.d` bo'ladi. netip.AddrPort sifatida ular TENG EMAS.
+//
+// Bu jimgina buzilishga olib kelgan edi: relay javobi kelardi, lekin
+// klient uni "kutilgan manzildan emas" deb tashlab yuborardi.
+// ═══════════════════════════════════════════════════════════════
+func TestReceive_NormalizesIPv4MappedAddresses(t *testing.T) {
+	receiver, err := Open(0)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer receiver.Close()
+
+	sender, err := Open(0)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer sender.Close()
+
+	// IPv4 loopback orqali yuboramiz — dual-stack soket uni
+	// v4-mapped ko'rinishida ko'radi.
+	target := netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), receiver.Port())
+
+	if err := sender.Send([]byte("v4"), target); err != nil {
+		t.Skipf("IPv4 loopback mavjud emas: %v", err)
+	}
+
+	messages := NewDatagrams(4, 2048)
+	count, err := receiveWithTimeout(t, receiver, messages)
+	if err != nil {
+		t.Fatalf("Receive: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("1 paket kutilgan, %d olindi", count)
+	}
+
+	from := messages[0].From
+	if from.Addr().Is4In6() {
+		t.Errorf("manzil normallashtirilmagan: %v", from)
+	}
+	if !from.Addr().Is4() {
+		t.Errorf("IPv4 kutilgan, %v olindi", from.Addr())
+	}
+
+	// Eng muhimi: sof IPv4 manzil bilan taqqoslash ISHLASHI kerak.
+	expected := netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), sender.Port())
+	if from != expected {
+		t.Errorf("%v kutilgan, %v olindi", expected, from)
+	}
+}

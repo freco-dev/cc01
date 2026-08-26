@@ -117,6 +117,7 @@ cc01/
 ├── core-server/     Go modul — tunnel serveri (event :4321, public :80, TLS :443)
 ├── cli-client/      Go modul — minimal klient; `replace` orqali core-server'ga bog'langan
 ├── daemon/          Go modul — mesh datapath (Faza 1 da boshlandi)
+├── control/         Go modul — Control Plane (Faza 1 da boshlandi)
 ├── access-server/   .NET solution — Account Plane
 └── docs/            ARCHITECTURE.md · DEV_SPEC.md · adr/
 ```
@@ -127,11 +128,14 @@ cc01/
 cc01/
 ├── go.work                    # core-server + cli-client
 ├── Makefile                   # build · test · lint · proto · dotnet
-├── proto/cc01/v1/             # ⭐ yagona kontrakt — Go va C# uchun generatsiya
-│   ├── tunnel.proto           #   gob o'rniga (events paketi)
-│   ├── access.proto           #   AP ↔ Edge ichki kontrakti
+├── proto/                     # ⭐ yagona kontrakt — ALOHIDA Go moduli
+│   ├── go.mod                 #   github.com/freco-dev/cc01/proto
+│   ├── cc01/v1/tunnel.proto   #   klient ↔ edge boshqaruv protokoli
+│   ├── cc01/v1/access.proto   #   AP ↔ Edge ichki kontrakti
+│   ├── cc01/v1/control.proto  #   node ↔ CP protokoli
+│   ├── gen/                   #   generatsiya qilingan Go kodi (commit qilinadi)
 │   └── buf.yaml · buf.gen.yaml
-├── core-server/ · cli-client/ · daemon/ · access-server/
+├── core-server/ · cli-client/ · daemon/ · control/ · access-server/
 ├── deploy/docker-compose.dev.yml   # postgres + redis + core + access
 └── test/contract/             # AP ↔ Edge kontrakt testlari
 ```
@@ -154,6 +158,15 @@ cc01/
 | `daemon/conn/` | `internal/daemon/conn/` | UDP transport, batch I/O |
 | `daemon/engine/` | `internal/daemon/engine/` | Datapath: TUN ↔ router ↔ noise ↔ UDP |
 | `daemon/cmd/cc01d/` | `cmd/cc01d/` | Daemon binari (hozircha statik peer konfiguratsiyasi) |
+| `control/ipam/` | `internal/control/ipam/` | IPv6 taqsimlagich, ijara hayot sikli, Store abstraksiyasi |
+| `control/registry/` | `internal/control/disco/` + `mapper/` | Node registri, NetworkMap, delta sync |
+| `control/server/` | `internal/control/` | ControlService gRPC implementatsiyasi |
+| `control/cmd/cc01-cp/` | `cmd/cc01-cp/` | Control Plane binari |
+| `daemon/control/` | `internal/daemon/engine/` | CP klienti: NetworkMap → router peerlari |
+| `daemon/stun/` | `internal/daemon/disco/` | STUN klienti (datapath soketi ustida) |
+| `daemon/relay/` | `internal/edge/relaysvc/` (server) + `internal/daemon/relay/` (klient) | Relay: ko'r uzatuvchi |
+| `daemon/path/` | `internal/daemon/disco/` | Yo'l holat mashinasi, disco ping/pong |
+| `control/stunserver/` | `internal/control/signal/` | STUN binding serveri |
 | `access-server/` | `access-server/` — **joyida qoladi** | .NET solution, Go workspace'dan tashqarida (ADR-009) |
 
 **Qoida:** har bir ko'chirish alohida PR; funksionallik o'zgarishi va joy o'zgarishi bitta PR'da aralashtirilmaydi.
@@ -240,7 +253,8 @@ cc01/
 │   ├── terraform/{pop-tas1, pop-fra1, cp-cluster}
 │   ├── ansible/roles/{edge, relay, bgp}
 │   ├── k8s/{cp-*.yaml}
-│   └── systemd/cc01d.service
+│   ├── packaging/                 #   nfpm → deb/rpm  ✅
+│   └── systemd/cc01d.service      #   ✅
 │
 ├── test/
 │   ├── integration/               #   Docker Compose: 3 node + CP + relay
@@ -402,24 +416,145 @@ ip -6 route add ::/0 dev cc0 table 51820
 #    fwmark 0xca01 → cc01d o'zi yuborayotgan paketlar (recursion oldini olish)
 ```
 
-**Reconciliation loop (deklarativ, imperativ emas):**
+**Reconciliation loop (deklarativ, imperativ emas)** — ✅ `daemon/route`:
 
 ```
-every 3s OR on NetworkMap change:
-    desired = build_routes(networkmap)      // set[Route]
-    actual  = netlink.RouteList(table=51820)
+on NetworkMap change (turtki)  OR  every 30s (zaxira):
+    desired = tenant_cidr + { peer.allowed_ips | base qamramagan }
+    actual  = netlink.RouteList(table=51820, oif=cc0, proto=static)
 
-    for r in desired - actual:  netlink.RouteAdd(r)     // yetishmayotganini qo'shish
-    for r in actual  - desired: netlink.RouteDel(r)     // ortiqchasini o'chirish
-    // ⚠️ Faqat proto=static va table=51820 bo'lgan marshrutlarga tegiladi.
-    //    Foydalanuvchi marshrutlariga HECH QACHON tegilmaydi.
+    for r in desired - actual:  netlink.RouteAdd(r)     // AVVAL qo'shish
+    for r in actual  - desired: netlink.RouteDel(r)     // KEYIN o'chirish
 
-on shutdown / panic:
-    cleanup_all(table=51820); ip rule del priority 5210,5211
-    // + systemd ExecStopPost hook, orphan holatlar uchun
+on Close():
+    cleanup_all(table=51820, proto=static); ip rule del priority 5210,5211
 ```
+
+Uchta qaror hujjatning dastlabki eskizidan farq qiladi:
+
+**Davriylik 3 s emas, 30 s.** Haqiqiy signal — NetworkMap o'zgarishi, va u
+turtki (`Poke`) bilan darhol keladi. Taymer faqat zaxira: yadro holati
+bizdan so'ramasdan o'zgargan holatlar uchun. 3 soniyalik netlink so'rovi
+hech narsa qo'shmaydi.
+
+**Tenant `/64` ichidagi peer `/128` lariga alohida marshrut yozilmaydi.**
+Ular bazaviy prefiks bilan allaqachon qamralgan; har bir peer uchun yozuv
+qo'shish jadvalni node soniga chiziqli o'stiradi va birorta marshrutlash
+qarorini o'zgartirmaydi. `cp-demo` da uch node bo'lsa ham jadvalda bitta
+yozuv turadi.
+
+**Qo'shish o'chirishdan oldin.** Teskari tartibda marshrut almashtirilayotgan
+paytda trafik uchun marshrutsiz oyna ochiladi.
+
+⚠️ **Uchta filtr ham majburiy.** `proto=static` bo'lmasa, ajratilgan jadvalga
+qo'lda qo'shilgan marshrut "ortiqcha" ko'rinadi va o'chib ketadi — `ip route
+add` sukut bo'yicha `RTPROT_BOOT` qo'yadi, biz `RTPROT_STATIC` yozamiz. Buni
+`TestSetRoutes_LeavesForeignRoutesAlone` qo'riqlaydi.
 
 **Konflikt aniqlash:** agar tenant `/64` foydalanuvchining LAN prefiksi bilan kesishsa (kam ehtimol IPv6'da, lekin ULA'da mumkin) — daemon `WARN` chiqaradi va marshrutni qo'shmaydi; `cc01 status` konfliktni ko'rsatadi.
+
+### 3.3.1 Control Plane klasteri (Raft)
+
+**`Store` interfeysi Raft uchun tayyor emas ekan.** U
+`Update(ctx, func(*State) error)` ko'rinishida edi va izohda "Raft
+implementatsiyasida bu `raft.Apply` bo'ladi" deb yozilgandi. Ikkita
+sabab bilan bu amalga oshmaydi:
+
+1. Raft jurnalga **baytlar** yozadi va ularni har bir replikada qayta
+   o'qiydi. Funksiyani serializatsiya qilib bo'lmaydi.
+2. Jiddiyroq: qaror o'sha funksiya **ichida** qabul qilinardi va u
+   `crypto/rand` hamda `time.Now` ishlatardi. Har bir replika boshqa
+   prefiks va boshqa muddat tanlab, holat jimgina ajralib ketardi.
+
+**Yechim: qarorni lider qabul qiladi.** Buyruq jurnalga tushganda
+allaqachon to'liq aniqlangan bo'ladi — prefiks, ijara ID'si, vaqt va
+TTL ham. `State.Apply` sof: ichida na soat o'qiladi, na tasodifiy son
+olinadi.
+
+TTL ham buyruqda keladi. Bu ortiqcha ko'rinadi, lekin konstantadan
+o'qilsa, konstanta o'zgargandan keyin **eski jurnal boshqacha
+qo'llanib** replikalarni ajratib yuborardi.
+
+**Taklif poyga tug'diradi.** Lider qarorni holatning nusxasi bo'yicha
+qabul qiladi, jurnal esa buyruqlarni ketma-ket qo'llaydi — oradagi
+boshqa buyruq prefiksni band qilishi mumkin. Shuning uchun `Apply`
+bandlikni **qayta** tekshiradi va `ErrPrefixTaken` qaytaradi; taklif
+qiluvchi 5 martagacha qayta urinadi.
+
+⚠️ Idempotentlik tekshiruvi bandlik tekshiruvidan **oldin** turishi
+shart. Aks holda Raft takroriy yetkazgan buyruq o'zining ijarasini
+"band" deb ko'rib, taklif qiluvchi allaqachon bajarilgan ishni qayta
+urinardi.
+
+**O'qish mahalliy.** `View` quorum aylanishisiz javob beradi, ya'ni
+ortda qolgan replika eski holatni ko'rsatishi mumkin. Bu
+taqsimlashning to'g'riligiga ta'sir qilmaydi: buyruq jurnalga
+tushgach, u eski yozuvlardan keyin qo'llanadi va bandlik yangilangan
+holat bo'yicha tekshiriladi. "O'z yozganingni o'qish" kerak bo'lgan
+joylar uchun `Barrier` bor.
+
+**Taymerlar.** Standart Raft qiymatlari 5 soniyalik DoD ga yetmaydi,
+shuning uchun `HeartbeatTimeout` va `ElectionTimeout` 500 ms ga,
+`LeaderLeaseTimeout` 250 ms ga tushirilgan.
+
+`make raft-demo` uchta replikani ko'taradi va o'lchaydi:
+
+| Tekshiruv | Natija |
+| --- | --- |
+| Lider tanlash | bitta lider, split-brain yo'q |
+| Lider failover | **0.9–1.0 s** (DoD: < 5 s) |
+| Ijara saqlanishi | o'sha kalit yangi liderdan **aynan o'sha manzilni** oladi |
+| Kvorum yo'qolishi | qolgan node liderlikdan voz kechadi, yozuv rad etiladi |
+| Liderni topish | node uchala manzildan liderni **o'zi** topadi |
+| Node ro'yxati | failover'dan keyin peerlar saqlanadi (qayta ro'yxatdan o'tmasdan) |
+
+**Liderni topish.** Yozuvni faqat lider bajara oladi. Follower
+`UNAVAILABLE` qaytaradi va xatoga `ErrorInfo{Reason: "NOT_LEADER"}`
+tafsilotini biriktiradi — klient sababni xato MATNIDAN emas, shu
+tafsilotdan biladi.
+
+Klientga bitta emas, **bir nechta CP manzili** beriladi
+(`-cp a:8443,b:8443,c:8443`) va u `NOT_LEADER` javobida keyingisiga
+o'tadi. Lider topilgach ulanish o'sha nodeda QOLADI: registry
+replikatsiya qilinmaydi, ya'ni heartbeat va NetworkMap oqimi
+manzilni bergan node bilan bir joyda bo'lishi kerak.
+
+⚠️ Liderning Raft manzili klientga ATAYLAB yuborilmaydi. `raft.Leader()`
+Raft transporti portini qaytaradi (`:7000`), klient esa gRPC portiga
+(`:8443`) ulanadi — o'sha manzilni bersak, klient ulanolmaydigan joyga
+borardi. Manzillar ro'yxati bu nomuvofiqlikni butunlay chetlab o'tadi.
+
+`make raft-demo` buni ataylab eng og'ir tartibda sinaydi: ro'yxat
+follower'dan boshlanadi, failover'dan keyin esa nodega yangi lider
+kim ekani UMUMAN aytilmaydi.
+
+**Nima replikatsiya qilinadi.**
+
+| Holat | Replikatsiya | Sabab |
+| --- | --- | --- |
+| IPAM ijaralari | ✅ | manzil failover'da yo'qolmasligi kerak |
+| node↔sertifikat bog'lanishi | ✅ | aks holda himoya birinchi nosozlikdayoq yo'qolardi |
+| Node ro'yxati (registry) | ✅ | yangi lider peerlarni bilishi kerak |
+| Relaylar | ❌ | har CP o'zining ichki relay'ini e'lon qiladi |
+| O'zgarishlar jurnali | ❌ | faqat delta uchun; bo'sh jurnal to'liq map beradi |
+
+Node ro'yxatini o'zgartirish YAGONA yo'l — `registry.Apply`.
+O'zgartiruvchi metodlar eksport qilinmagan, ya'ni servis registry'ni
+to'g'ridan-to'g'ri o'zgartira olmaydi: bunday o'zgarish faqat bitta
+replikada qolib, failover'da yo'qolardi.
+
+⚠️ **Vaqt va TTL liderda hal qilinadi** va buyruqqa yoziladi.
+`Apply` ichida `time.Now()` ni o'qish yoki TTL ni konstantadan
+olish replikalarni ajratib yuborardi — konstanta o'zgarsa eski
+jurnal boshqacha qo'llanardi.
+
+⚠️ **Muddat tekshiruvi saralanadi.** U map bo'ylab yuradi, Go'da
+esa map tartibi tasodifiy. Saralamasak, bir xil versiya har
+replikada boshqa nodega tegib qolardi. Buni yakuniy holatni
+solishtirib topib bo'lmaydi (u baribir bir xil) — ajralish faqat
+klientning `since` versiyasi partiya O'RTASIGA tushganda ko'rinadi.
+`TestFSM_RegistryIsDeterministic` aynan shuni tekshiradi va
+saralash olib tashlanganda haqiqatan yiqiladi.
 
 ### 3.4 Public IPv6 taqsimlash protokoli
 
@@ -501,6 +636,83 @@ message AllocateResponse {
 | `cgroup_sock` | `BPF_PROG_TYPE_CGROUP_SOCK_ADDR` | `/sys/fs/cgroup/cc01` | — | Ilova darajasidagi bind cheklovi (v1.1) |
 | `sk_lookup` | `BPF_PROG_TYPE_SK_LOOKUP` | net namespace | — | Bitta portni bir nechta socket'ga taqsimlash (v1.2) |
 
+**Hozirgi holat.** Skelet qurilgan va haqiqiy yadroda tekshirilgan:
+yuklash, native→generic fallback, blocklist bosqichi, dry-run va
+hisoblagichlar. Rate limit, conntrack va policy trie (§4.2, §4.3)
+shu asos ustiga qo'shiladi.
+
+| Qism | Holat |
+| --- | --- |
+| `xdp_filter` yuklash + biriktirish | ✅ `daemon/xdp` — native rejimda tekshirilgan |
+| Blocklist bosqichi | ✅ paket rostdan tashlanadi |
+| Dry-run (`F_ENFORCE`) | ✅ hisoblaydi, tashlamaydi |
+| Hisoblagichlar (per-CPU) | ✅ |
+| Rate limit (token bucket, manba /64) | ✅ auto-blocklist bilan |
+| Conntrack (hukm keshi) | ✅ avlod raqami bilan |
+| Policy (zero-trust ACL) | ✅ `daemon/tcpolicy` — `tc_ingress`, deny-by-default |
+| Ring buffer hodisalari | ✅ ikkala dastur uchun |
+| Amplifikatsiya portlari | ✅ opt-in |
+| AF_XDP yo'naltirish | ✅ map + redirect; AF_XDP soketi ⏳ |
+| SYN cookie | ❌ **mustaqil ishlamaydi** — quyiga qarang |
+| `tc_ingress` | ✅ policy |
+| `tc_egress` | ✅ policy + MSS clamp + DSCP |
+
+**Tezlik cheklovi haqida ikkita majburiy tanlov.**
+
+`bpf_spin_lock` — token chelagi "o'qi-hisobla-yoz" ketma-ketligi va u
+bir nechta yadrodan bir vaqtda bajariladi. Per-CPU map bu yerda
+yaramaydi: cheklov global bo'lishi kerak, aks holda u yadrolar soniga
+bo'linib ketardi va bitta oqim (RSS tufayli bitta yadroga tushib)
+chegaraning faqat N-dan bir qismini olardi.
+
+Lekin yadro `bpf_spin_lock` ni **LRU_HASH'da qabul qilmaydi** (`map
+create: operation not supported`) — faqat HASH va ARRAY. Ya'ni
+avtomatik evikatsiya yo'q va chelaklarni **userspace tozalaydi**
+(`Filter.Sweep`, 30 s da bir marta). Tozalanmasa map to'lib qoladi.
+
+Map to'lganda **fail-open**: paket o'tkaziladi va `rl_map_full`
+hisoblagichi oshadi. Fail-closed xavfliroq bo'lardi — soxta manbalar
+bilan map to'ldirilsa hamma yangi manba tashlanib, hujumchi butun
+xizmatni o'chirib qo'yardi.
+
+**Blocklist endi ma'noli.** Ilgari uni hech narsa to'ldirmasdi.
+Chegaradan `auto_block_after` marta oshgan manba XDP ning **o'zi**
+tomonidan blocklist'ga qo'shiladi — keyingi paketlar token chelagini
+hisoblamasdan, eng arzon yo'lda tashlanadi.
+
+**O'lchangan** (`make bpf-verify`, native rejim):
+
+| Tekshiruv | Natija |
+| --- | --- |
+| 5 pps chegarasi, 200 paket | 185 tasi tashlandi |
+| Chegara ostidagi trafik | tegilmadi |
+| Takroriy buzg'unchi | avtomatik bloklandi |
+| Dry-run | 195 paket "tashlangan bo'lardi", ping ishladi |
+| Tozalagich | faol chelakka tegmaydi, eskirganini o'chiradi |
+
+**Build quvuri.** `.o` fayl repoga **commit qilinadi** (protobuf
+generatsiyasi kabi): demonni qurish uchun clang kerak emas va ishga
+tushirishda tashqi fayl qidirilmaydi — u `//go:embed` bilan binarga
+kiradi.
+
+    make bpf         clang konteynerda kompilyatsiya qiladi
+    make bpf-verify  haqiqiy yadro verifier'iga yuklab ko'radi
+
+⚠️ `bpf-verify` testlar HAQIQATAN bajarilganini alohida tekshiradi.
+Muhit yaroqsiz bo'lsa Go testlari `SKIP` bo'ladi va bu o'tgan testga
+o'xshaydi — ya'ni verifier umuman ishlamagan bo'lsa ham ko'k rang
+ko'rinardi.
+
+⚠️ **Ikki dasturning sozlamasi ALOHIDA tuzilma.** Ilgari ular
+bittasini ulashardi va tc uchun maydon qo'shilganda XDP tomonidagi
+Go nusxasi jimgina mos kelmay qoldi. Dasturlar mustaqil
+rivojlanadi — sozlamalari ham mustaqil.
+
+**Tuzilmalar ikki tomonda takrorlanadi.** C va Go nusxalari bayt-bayt
+mos kelishi shart; mos kelmasa yadro xato bermaydi, u baytlarni
+boshqacha talqin qiladi va filtr jimgina noto'g'ri ishlaydi. O'lchamlar
+va maydon siljishlari `daemon/xdp/layout_test.go` da qulflangan.
+
 **Yuklash strategiyasi:**
 
 ```
@@ -513,6 +725,356 @@ message AllocateResponse {
    → daemon restart bo'lsa ham filtrlash uzilmaydi (fail-static)
 5. Program pin + link pin (BPF_LINK) → avtomatik detach'dan himoya
 ```
+
+#### `cc01 firewall` — CLI va kichik kompilyator
+
+`--src` va `--dst` **yo'nalishni tanlaydi**, ikkalasi birga
+berilmaydi:
+
+| Bayroq | Yo'nalish | Savol |
+| --- | --- | --- |
+| `--src CIDR` | kirish | kim **bizga** murojaat qilyapti |
+| `--dst CIDR` | chiqish | biz **kimga** murojaat qilyapmiz |
+
+"Manbadan maqsadga" shaklidagi qoidani hozirgi kalit sxemasi
+ifodalay olmaydi (guruh faqat bir tomondagi prefiksdan olinadi), va
+buni jimgina bir tomonga aylantirish operatorni aldardi — shuning
+uchun buyruq xato qaytaradi.
+
+**Guruh raqami avtomatik ajratiladi.** Operator CIDR bilan
+ishlaydi, yadro esa raqam bilan; almashtirishni demon bajaradi
+(`IdentityFor`). Bu — kichik policy kompilyatori. Uni CLI ga
+qoldirish har bir chaqiruvchida takrorlanardi.
+
+**`firewall test` yadroga paket yubormaydi**: qidiruv tartibi
+userspace'da AYNAN takrorlanadi. Operator qoidani yozgandan keyin
+uni ishlab chiqarish trafigini kutmasdan sinab ko'rishi kerak.
+
+⚠️ Tartib C dagi `lookup_verdict` bilan bir xil bo'lishi shart —
+farq qilsa buyruq yolg'on gapiradi va bu qoidani noto'g'ri yozishga
+olib keladi. Buni test qo'riqlaydi: simulyatsiya natijasi haqiqiy
+paket natijasi bilan solishtiriladi.
+
+**Dry-run har joyda aytiladi.** `add`, `test` va `list` rejimni
+ko'rsatadi: qoida yozilgan, lekin qo'llanmayotgan holat eng
+chalg'ituvchi holat.
+
+**`flush` `--force` talab qiladi**: deny-by-default siyosatida
+tozalash butun overlay trafigini kesadi.
+
+#### CP dan tarqatish
+
+Qoidalar manbai — CP ga beriladigan **ACL fayli** (`-policy`).
+`SIGHUP` bilan qayta o'qiladi.
+
+Fayl kuzatuvchisi (inotify) ATAYLAB ishlatilmadi: tahrirlash paytida
+fayl bir necha marta yozilishi mumkin va yarim yozilgan ACL ni
+qo'llash butun trafikni kesib qo'yardi. `SIGHUP` esa operator
+"tayyor" deganini bildiradi.
+
+Ishga tushishda yaroqsiz ACL — **halokatli xato**. Qayta yuklashda
+esa emas: eski qoidalar amalda qoladi, chunki yaroqsiz fayl tufayli
+ishlab turgan policy'ni yo'qotish xavfliroq.
+
+**Kompilyatsiya CP da.** Node hech qachon tag yoki guruhni o'zi
+yechmaydi. Sabab xavfsizlik emas, **izchillik**: har bir node tagni
+mustaqil yechsa, ular turli paytda turli natijaga kelardi va policy
+tarmoq bo'ylab bir xil bo'lmasdi — buni tashxislash deyarli imkonsiz.
+
+#### Tag asosidagi mikrosegmentatsiya
+
+ACL da `tag:web` yozilganda u **shu paytda** o'sha tag'ga ega
+nodelarning manzillariga aylanadi. Manzillarni IPAM beradi va ular
+o'zgaradi — operator ularni bilishi shart emas.
+
+    cc01d -tags web,prod        node o'z tag'larini e'lon qiladi
+    { "src": "tag:web", ... }   ACL tag bilan murojaat qiladi
+
+Tag'lar `tag:` prefiksi bilan saqlanadi. Prefiks nodeda qo'shiladi,
+shunda ACL va registry **bir xil kalitni** ishlatadi va ular ajralib
+ketmaydi.
+
+⚠️ **Bo'sh tag xato EMAS.** Tag'ga ega node hali ulanmagan bo'lishi
+mumkin. Xato qaytarsak, birinchi node ulanmaguncha butun ACL yaroqsiz
+bo'lardi va bu tarmoqni butunlay kesib qo'yardi.
+
+**Qoidalar node a'zoligi bilan o'zgaradi.** Kompilyatsiya registry
+versiyasiga bog'langan: node qo'shilganda yoki ketganda qoidalar
+qayta hisoblanadi va yangi versiya nodelarga tarqaladi. Versiya
+o'zgarmasa qayta kompilyatsiya qilinmaydi — u har bir NetworkMap
+uchun bajarilsa CP ni behuda yuklardi.
+
+**O'lchangan** (`make cp-demo`) — Faza 2 ning "lateral movement
+bloklanadi" mezoni:
+
+| Manba | Tag | node-1 ga ICMPv6 |
+| --- | --- | --- |
+| node-2 | `web` | **o'tdi** — ACL ruxsat berdi |
+| node-3 | `db` | **to'xtatildi** — deny-by-default |
+
+ACL da uchta qoida bor edi, ular ikkita `web` nodega yechilib olti
+qoidaga aylandi.
+
+**Versiya mazmundan hisoblanadi**, hisoblagich emas. Bir xil hujjat
+qayta yuklansa versiya o'zgarmaydi va nodelar qoidalarga tegmaydi.
+Hisoblagich bo'lsa har `SIGHUP` da nodelar policy map'ini behuda
+qayta yozib, hukm keshini eskirtirardi. Buning sharti —
+kompilyatsiya deterministik bo'lishi; test buni qo'riqlaydi.
+
+⚠️ **Policy o'zgarishi NetworkMap oqimida alohida tekshiriladi.**
+`netmap.Empty()` faqat peerlar o'zgarganini biladi. Faqat unga
+qarasak, policy o'zgargan-u peerlar o'zgarmagan holatda node yangi
+qoidalarni **hech qachon olmasdi** — va buni sezish juda qiyin
+bo'lardi, chunki mesh o'zi ishlab turaveradi.
+
+**Qoidalar Raft'da EMAS.** Ular manbai fayl, ya'ni har bir CP
+replikasida mustaqil va bir xil hisoblanadi. Jurnal orqali tarqatish
+bir xil ma'lumotni ikki marta ko'chirish bo'lardi.
+
+**Lokal va CP qoidalari yonma-yon yashaydi**, identifikator
+diapazoni bilan ajratilgan: CP qoidalari `1 000 000` dan boshlanadi.
+CP yangilanishida faqat o'z diapazoni almashtiriladi — aks holda
+operator qo'lda qo'ygan qoida "o'z-o'zidan yo'qolardi".
+
+Almashtirishda avval qo'shiladi, keyin ortiqchasi o'chiriladi:
+teskari tartibda ruxsat berilgan trafik uchun qoidasiz oyna
+ochilardi va deny-by-default uni kesardi.
+
+**O'lchangan** (`make cp-demo`):
+
+    rejim: dry-run   avlod: 4
+    ID       YO'L  HUKM   PREFIKS              PORT  PROTO   URISH
+    1000001  in    deny   fd00:cc01:c0de::/64  22    tcp     0
+    1000002  in    allow  fd00:cc01:c0de::/64  any   icmpv6  2
+    1000003  out   allow  fd00:cc01:c0de::/64  any   icmpv6  2
+
+⚠️ **eBPF uchun `CAP_BPF` va `CAP_PERFMON` kerak**, `CAP_NET_ADMIN`
+yetarli emas. Bundan tashqari `bpf` sistemaviy chaqiruvi
+`@privileged` guruhida va systemd'ning `@system-service` to'plamiga
+**kirmaydi** — uni oshkora ruxsat berish shart. Ikkalasi ham
+`deploy/systemd/cc01d.service` da bor; ularsiz filtr `operation not
+permitted` bilan yuklanmasdi.
+
+#### Policy qayerda qo'llanadi — hal qilingan
+
+§4.1 policy qo'llashni `tc_ingress` ga (`cc0`) qo'yardi, §4.3 dagi
+psevdokod esa XDP ichiga. **To'g'risi — `tc_ingress`**, va sabab
+paketlarning o'zida:
+
+| Hook | Nimani ko'radi |
+| --- | --- |
+| XDP (`eth0`) | SHIFRLANGAN tashqi paket; ichi ko'rinmaydi |
+| `tc_ingress` (`cc0`) | cc01d deshifrlab yozgan ICHKI paket |
+
+Zero-trust ACL ichki overlay manzillari bo'yicha yoziladi ("node A
+node B ning 443-portiga kira oladi"), ya'ni u faqat `cc0` da
+ma'noga ega. §4.3 psevdokodidagi policy bosqichi shu sababdan
+qurilmadi.
+
+⚠️ **`cc0` — TUN, ya'ni L2 sarlavhasi YO'Q.** Dastur paketni
+to'g'ridan-to'g'ri IPv6 sarlavhasidan o'qiydi va biriktirishda
+interfeys turi tekshiriladi (`ARPHRD_NONE`). L2 qurilmada u
+Ethernet baytlarini IPv6 sarlavhasi deb talqin qilib, **jimgina
+noto'g'ri hukm** chiqarardi.
+
+Go'ning `net.Interface.HardwareAddr` maydoni bu tekshiruv uchun
+yetarli emas: `lo` uchun u bo'sh qaytadi. Yadroning o'z qiymati
+o'qiladi — `/sys/class/net/<nom>/type`.
+
+#### Kalit sxemasi — ikki bosqich
+
+§4.2 dagi birlashtirilgan LPM kaliti (`src||dst||dport||proto`)
+ishlamaydi: LPM prefiksi kalitning **boshidan** sanaydi, ya'ni src
+bitlarini tashlab dst ga o'tib bo'lmaydi — "istalgan src, aniq dst"
+qoidasini ifodalab bo'lmaydi.
+
+Buning o'rniga:
+
+    1. LPM trie:  manba prefiksi         → identity (u32)
+    2. Hash:      (identity, port, proto) → hukm
+
+Bu N ta prefiks va M ta port qoidasi uchun **N+M** yozuv beradi,
+birlashtirilgan kalitdagi N×M o'rniga. Hukm qidiruvi uch bosqichda,
+aniqroqdan umumiyroqqa: `(id, port, proto)` → `(id, 0, proto)` →
+`(id, 0, 0)`.
+
+**O'lchangan** (`make bpf-verify`, haqiqiy TUN qurilmasi):
+
+| Tekshiruv | Natija |
+| --- | --- |
+| Qoidasiz paket | tashlanadi (deny-by-default) |
+| Mos qoida | o'tkaziladi, hisoblagich to'ladi |
+| Uzunroq prefiks | ustunlik qiladi (`/128` > `/64`) |
+| Aniqroq qoida | ustunlik qiladi (proto > any) |
+| Dry-run | hisoblaydi, tashlamaydi |
+| L2 interfeysga biriktirish | rad etiladi |
+| Hodisa | manba, maqsad, port, protokol, qoida ID va sabab |
+
+#### SYN cookie — nima uchun qurilmadi
+
+§4.3 dagi psevdokod `xdp_syn_cookie_reply` ni ko'rsatadi. U **qurildi
+va sinaldi**, keyin **olib tashlandi**. Nima aniqlangani:
+
+| Bosqich | Natija |
+| --- | --- |
+| Verifier | qabul qildi (paketni 60 baytga kengaytirgandan keyin) |
+| SYN-ACK yasash | ishladi, `bpf_tcp_raw_gen_syncookie_ipv6` bilan |
+| Klient qabul qildimi | **ha** — checksum xatosi yo'q, RST yo'q, ACK yubordi |
+| Qo'l siqish tugadimi | **yo'q** — yadro ACK ga RST javob berdi |
+
+Sabab yadroda. `cookie_v6_check` ishlashdan oldin
+`tcp_synq_no_recent_overflow(sk)` tekshiruvidan o'tadi: yadro
+cookie'ni faqat **o'zi** cookie rejimiga o'tgan bo'lsa qabul qiladi.
+Bizning SYN yadroga umuman yetib bormagani uchun o'sha bayroq hech
+qachon qo'yilmaydi. Natijada `SyncookiesRecv` va `SyncookiesFailed`
+hisoblagichlarining **ikkalasi ham nol** bo'lib qoladi — ya'ni
+tekshiruv umuman boshlanmaydi.
+
+Yadroning o'z selftest'i (`xdp_synproxy`) ham buni mustaqil
+ishlatmaydi: u netfilter SYNPROXY bilan juftlanadi va qo'l siqishni
+o'sha tugatadi.
+
+⚠️ **Ishlamaydigan himoyani yoqib qo'yish himoyasizlikdan yomonroq**:
+operator o'zini himoyalangan deb hisoblardi, TCP esa butunlay ishlamay
+qolardi. Shuning uchun kod saqlanmadi. Uni qaytarish uchun netfilter
+SYNPROXY integratsiyasi kerak — bu alohida ish.
+
+#### XDP ning qolgan bosqichlari
+
+**Amplifikatsiya portlari** (53/123/1900/11211) — ataylab
+**o'chirilgan** holatda keladi. Bu portlardan kelgan paket odatiy node
+uchun haqiqiy javob bo'lishi mumkin (masalan DNS javobi) va uni
+tashlash node'ning nom yechishini butunlay buzardi. Bayroq faqat
+edge/PoP mashinalari uchun.
+
+**AF_XDP yo'naltirish** — `XSKMAP` va `bpf_redirect_map` qurildi.
+Map bo'sh bo'lsa fallback `XDP_PASS` ishlaydi va paket odatdagi yadro
+steki orqali cc01d ning UDP soketiga boradi. Shu sababdan bu yo'lni
+yoqish **xavfsiz**: AF_XDP soketi ulanmagan bo'lsa hech narsa
+o'zgarmaydi. Userspace tomonidagi AF_XDP soketi — keyingi ish.
+
+**XDP hodisalari** — tc dagidan alohida tur: XDP boshqa sabablarni
+ko'radi (blocklist, tezlik cheklovi, amplifikatsiya) va ularda qoida
+ID yoki identity yo'q.
+
+#### Chiqish yo'li (`tc_egress`)
+
+Ikkala yo'nalish **bitta obyektda** quriladi va map'larni ulashadi.
+Alohida obyekt bo'lsa map'larni pin qilish kerak bo'lardi va ular
+ajralib ketishi mumkin edi.
+
+Yagona farq qaysi manzil bo'yicha identity qidirilishida:
+
+| Yo'nalish | Identity qayerdan | Savol |
+| --- | --- | --- |
+| Kirish | **manba** prefiksi | kim bizga murojaat qilyapti |
+| Chiqish | **maqsad** prefiksi | biz kimga murojaat qilyapmiz |
+
+Qoidalar ham bitta map'da yashaydi va faqat `direction` maydoni bilan
+ajraladi. Bu maydon ilgari `_pad` bo'lgan joyni egallaydi — kalit
+o'lchami o'zgarmadi.
+
+Chiqish filtri buzilgan node tarmoqqa erkin murojaat qilishining
+oldini oladi; kirish filtri buni qila olmaydi.
+
+**MSS clamp** — chiquvchi TCP SYN paketlaridagi MSS chegaralanadi.
+
+Nega kerak: overlay MTU 1280 (IPv6 minimumi), uchlar esa yo'lni 1500
+deb hisoblab kattaroq MSS kelishib oladi. Segmentlar sig'maydi va
+PMTU aniqlash ICMPv6 "Packet Too Big" ga tayanadi — u esa ko'pincha
+filtrlangan. Oqibat: **ulanish o'rnatiladi, lekin katta uzatmalar
+qotib qoladi**. Bu tashxislash eng qiyin nosozliklardan biri.
+
+Standart qiymat 1220 = 1280 − 40 (IPv6) − 20 (TCP).
+
+⚠️ Checksum **avval** tuzatiladi: `bpf_skb_store_bytes` `data` va
+`data_end` ni yaroqsiz qiladi va undan keyin paketga murojaat qilib
+bo'lmaydi.
+
+**DSCP** — IPv6'da sarlavha checksum'i yo'q, ya'ni faqat baytlarni
+yozish yetarli. ECN bitlariga **tegilmaydi**: ular tiqilinlik
+nazorati uchun va ularni o'chirish TCP ni sekinlashtirardi.
+
+**O'lchangan** (MTU 1500 li haqiqiy TUN, haqiqiy TCP ulanishi):
+
+| Tekshiruv | Natija |
+| --- | --- |
+| MSS clamp | 1440 → **1220** |
+| Chegara ostidagi MSS | tegilmaydi |
+| Chiqish qoidasi yo'q | tashlanadi |
+| Kirish/chiqish qoidalari | aralashmaydi |
+| DSCP | qo'yiladi; sozlanmagan bo'lsa tegilmaydi |
+
+#### Hukm keshi — va uni eskirtirish
+
+Birinchi paket to'liq qidiruvdan o'tadi (LPM + 3 tagacha hash),
+keyingilari bitta hash qidiruvi bilan cheklanadi. O'lchangan: bir
+oqimning 5 paketidan **4 tasi keshdan**.
+
+⚠️ **Bu hukm keshi, holat kuzatuvchisi EMAS.** §4.2 dagi eskizda
+`state` maydoni bor (NEW / ESTABLISHED / CLOSING). Haqiqiy TCP holat
+mashinasini yadroda to'g'ri qurish qiyin va uni **yarim qurish
+xavfli**: "ESTABLISHED" deb belgilangan, lekin aslida tekshirilmagan
+oqim filtrni chetlab o'tish yo'liga aylanardi. Shuning uchun bu yerda
+faqat hukm keshlanadi.
+
+**Eskirtirish — avlod raqami orqali.** Keshlangan hukm qoida
+o'zgargandan keyin ham amal qilib qolsa, taqiqlangan oqim ochiq
+qolardi va buni sezish deyarli imkonsiz: filtr ishlayotgandek
+ko'rinadi.
+
+Butun map'ni tozalash O(N) va uni har bir qoida o'zgarishida bajarib
+bo'lmaydi. Buning o'rniga sozlamada **avlod** raqami turadi; har bir
+yozuv o'zi yaratilgan avlodni eslab qoladi va avlodlar mos kelmasa
+yadro yozuvni o'tkazib yuboradi.
+
+Avlod **avtomatik** oshadi — `AddRule`, `RemoveRule`, `SetIdentity`
+va `RemoveIdentity` ning ichida. Chaqiruvchiga qoldirilsa uni unutish
+juda oson bo'lardi, va unutilgan holat aynan yuqoridagi jimgina
+teshikni ochardi.
+
+**Taqiqlar ham keshlanadi.** Hujum paytida ular eng ko'p uchraydigan
+holat va ularni har safar qayta hisoblash eng qimmat yo'l bo'lardi.
+LRU yozuvlarni o'zi siqib chiqaradi, ya'ni bu yerda userspace
+tozalagichi kerak emas (tezlik cheklovidan farqli — u yerda
+`bpf_spin_lock` LRU'ni taqiqlaydi).
+
+| Tekshiruv | Natija |
+| --- | --- |
+| Bir oqimning 5 paketi | 4 tasi keshdan |
+| Qoida olib tashlandi | eskirgan hukm **amal qilmaydi** |
+| Identity o'zgardi | eskirgan hukm **amal qilmaydi** |
+| Taqiqlar | ular ham keshlanadi |
+
+#### Hodisalar: nima uchun tashlandi
+
+Hisoblagichlar "nechta" ni aytadi, hodisa esa "qaysi manzil, qaysi
+qoida, qaysi port" ni. Nosozlikni tekshirishda aynan shu kerak:
+*"deny-by-default hamma narsani tashlayapti"* foydasiz, *"node X
+5432-portga urinyapti va unga qoida yo'q"* esa harakatga chorlaydi.
+
+Namuna chiqish:
+
+    fd00:cc01:7c01::2 → fd00:cc01:7c01::1 port=0 proto=58
+      identity=0: tashlandi (qoida yo'q)
+
+⚠️ **Har bir tashlash uchun hodisa yuborilmaydi.** Deny-by-default
+siyosatida qoidalar to'liq yozilmagan bo'lsa **hamma** paket
+tashlanadi — har biri uchun hodisa yuborish ring bufferni to'ldirib,
+CPU ni yeb qo'yardi, ya'ni kuzatuv vositasi xizmatni o'chirish
+vositasiga aylanardi. Standart holatda har 16 tashlashdan bittasi
+yuboriladi (`EventSample`).
+
+Namuna olish hisoblagichi sifatida **per-CPU tashlash hisoblagichi**
+ishlatiladi — alohida map kerak emas va u shundoq ham oshirilgan.
+
+Ring buffer to'lsa hodisa **yo'qoladi** va `event_lost` hisoblagichi
+oshadi. Filtrlash to'xtamaydi: kuzatuv hech qachon himoyadan
+muhimroq emas (§4.5).
+
+Userspace tomonda ham xuddi shunday: iste'molchi ulgurmasa hodisa
+tashlanadi. Bloklansak, ring buffer to'lib **yadro tomonda yana
+ko'proq** hodisa yo'qolardi.
 
 ### 4.2 BPF map strukturalari
 
@@ -771,13 +1333,16 @@ NetworkMap / Policy o'zgardi
 
 ### 5.1 CLI buyruqlar daraxti
 
+`✅` — amalga oshirilgan, `⏳` — rejalashtirilgan:
+
 ```
 cc01
-├── up [--auth-key KEY] [--accept-routes] [--exit-node NODE] [--hostname NAME]
-├── down                                     # mesh'dan uzilish (daemon ishlaydi)
-├── status [--json] [--peers] [--watch]
-├── doctor                                   # preflight/diagnostika hisoboti
-├── version
+├── up [--auth-key KEY] [--accept-routes] [--exit-node NODE] [--hostname NAME]   ✅¹
+├── down                                     # mesh'dan uzilish (daemon ishlaydi)  ✅
+├── status [--json] [--watch]                                                    ✅
+├── doctor                                   # preflight/diagnostika hisoboti     ✅
+├── version                                                                      ✅
+│    ¹ bayroqlar hali yo'q: konfiguratsiya `cc01d` ga beriladi
 │
 ├── tunnel                                   # ── ngrok funksiyasi ──
 │   ├── http <port|url> [--subdomain S] [--domain D] [--auth user:pass]
@@ -791,10 +1356,10 @@ cc01
 │   └── inspect <tunnel-id>                  # so'rovlar oqimi (ngrok inspector analogi)
 │
 ├── peer                                     # ── mesh boshqaruvi ──
-│   ├── list [--json] [--online]
-│   ├── ping <node|ipv6> [--count N] [--path direct|relay]
-│   ├── route <node>                         # joriy yo'lni ko'rsatish (traceroute-like)
-│   └── forget <node>
+│   ├── list [--json] [--online]                                                 ✅
+│   ├── ping <node|ipv6> [--count N] [--path direct|relay]                       ⏳
+│   ├── route <node>                         # joriy yo'lni ko'rsatish            ⏳
+│   └── forget <node>                                                            ⏳
 │
 ├── ip                                       # ── IPv6 ──
 │   ├── show                                 # joriy GUA/ULA, lease TTL, anchor PoP
@@ -802,12 +1367,13 @@ cc01
 │   └── subnet advertise <cidr>              # subnet router rejimi
 │
 ├── firewall                                 # ── eBPF policy ──
-│   ├── add   --allow|--deny --src CIDR --dst CIDR --proto tcp --port 443 [--comment C]
-│   ├── del   <rule-id>
-│   ├── list  [--json] [--stats]             # hit counterlar bilan
-│   ├── test  --src A --dst B --proto tcp --port 443   # qaysi qoida ishlaydi?
-│   ├── mode  enforce|dry-run|panic
-│   └── flush [--force]
+│   ├── add   --allow|--deny (--src CIDR | --dst CIDR) [--proto tcp] [--port N]  ✅
+│   ├── del   <rule-id>                                                          ✅
+│   ├── list  [--json] [--in|--out]          # hit counterlar bilan              ✅
+│   ├── test  (--src ADDR | --dst ADDR) [--proto tcp] [--port N]                 ✅
+│   ├── mode  enforce|dry-run                                                    ✅²
+│   └── flush --force                                                            ✅
+│    ² panic rejimi qurilmagan — buyruq buni aniq aytadi
 │
 ├── relay
 │   ├── list                                 # mavjud relaylar + RTT
@@ -862,56 +1428,68 @@ $ cc01 firewall add --deny --src ::/0 --dst 2a0X:1234:1::4c1a/128 --proto tcp --
 | Windows | Named pipe `\\.\pipe\cc01` |
 | Kuzatuv | `WatchStatus` — server-streaming (real-time TUI uchun) |
 
-**`proto/cc01/v1/daemon.proto`:**
+**`proto/cc01/v1/daemon.proto` — hozirgi holat.** Faqat *o'qish* buyruqlari
+amalga oshirilgan: ular ishlab turgan demonni ko'rish imkonini beradi va
+yozish operatsiyalaridan farqli o'laroq holatni o'zgartirmaydi, shuning
+uchun ular birinchi bo'lib qurildi.
 
 ```protobuf
-service Daemon {
-  rpc Up            (UpRequest)          returns (UpResponse);
-  rpc Down          (DownRequest)        returns (DownResponse);
-  rpc GetStatus     (StatusRequest)      returns (StatusResponse);
-  rpc WatchStatus   (StatusRequest)      returns (stream StatusResponse);
-  rpc Doctor        (DoctorRequest)      returns (DoctorResponse);
+service DaemonService {
+  rpc Up          (UpRequest)          returns (UpResponse);              // ✅
+  rpc Down        (DownRequest)        returns (DownResponse);            // ✅
+  rpc Status      (StatusRequest)      returns (StatusResponse);          // ✅
+  rpc WatchStatus (WatchStatusRequest) returns (stream WatchStatusResponse); // ✅
+  rpc Peers       (PeersRequest)       returns (PeersResponse);           // ✅
+  rpc Doctor      (DoctorRequest)      returns (DoctorResponse);          // ✅
 }
+```
 
-service Tunnels {
+**`Up` va `Down` ning shartnomasi assimetrik**, va bu ataylab:
+
+`Down` ikkinchi marta chaqirilsa **xato emas** — "tushirilgan bo'lsin" degan
+talab allaqachon bajarilgan. Javobdagi `already_down` bayrog'i hech narsa
+o'zgarmaganini aytadi. `Up` esa allaqachon ko'tarilgan mesh'da
+`ALREADY_EXISTS` qaytaradi: konfiguratsiya farq qilishi mumkin va uni
+jimgina e'tiborsiz qoldirish yanglish bo'lardi.
+
+Demon endi mesh'dan uzoqroq yashaydi: IPC soketi mesh ko'tarilishidan
+**oldin** ochiladi, shunda nosozlikni aynan kerak bo'lgan paytda —
+ulanish qurilmayotganda — `cc01 status` va `cc01 doctor` bilan ko'rish
+mumkin. `cc01d -down` bayrog'i mesh'ni ko'tarmasdan ishga tushiradi.
+
+`StatusResponse` mesh holatini beradi (`connected`, `node_id`, `address`,
+`interface`, `listen_port`, `endpoints`, `control_plane`, `relay_id`,
+`peer_count`, `uptime_seconds`). `PeerStatus` har bir peer uchun **yo'l
+holatini** ochadi — `path` (`direct`/`relay`/`none`), `path_state`
+(ARCHITECTURE.md §6.2 holat mashinasi) va `rtt_micros`. Bu maydonlarsiz
+relay→direct ko'tarilishini tashqaridan kuzatib bo'lmaydi.
+
+`Check.remediation` — xato bo'lganda "nima qilishim kerak" degan savolga
+javob; §3.1 talabi.
+
+**Hali qurilmagan** — ikkalasi ham o'z quyi tizimini kutadi:
+
+```protobuf
+service Tunnels {                                   // ⏳ §5.3 bilan birga
   rpc Open   (OpenTunnelRequest)  returns (TunnelInfo);
   rpc Close  (CloseTunnelRequest) returns (CloseTunnelResponse);
   rpc List   (ListTunnelsRequest) returns (ListTunnelsResponse);
   rpc Inspect(InspectRequest)     returns (stream RequestTrace);
 }
 
-service Firewall {
-  rpc AddRule  (AddRuleRequest)  returns (RuleResponse);
-  rpc DelRule  (DelRuleRequest)  returns (RuleResponse);
+service Firewall {                                  // ⏳ §4 (eBPF) bilan birga
+  rpc AddRule  (AddRuleRequest)   returns (RuleResponse);
+  rpc DelRule  (DelRuleRequest)   returns (RuleResponse);
   rpc ListRules(ListRulesRequest) returns (ListRulesResponse);
-  rpc TestRule (TestRuleRequest) returns (TestRuleResponse);
-  rpc SetMode  (SetModeRequest)  returns (SetModeResponse);
-}
-
-message OpenTunnelRequest {
-  enum Proto { HTTP = 0; TCP = 1; UDP = 2; TLS = 3; }
-  Proto  proto          = 1;
-  string local_addr     = 2;   // "127.0.0.1:8080"
-  string subdomain      = 3;
-  string custom_domain  = 4;
-  uint32 remote_port    = 5;   // 0 = avtomatik
-  string region         = 6;   // "tas1"
-  TlsMode tls_mode      = 7;   // EDGE_TERMINATE | PASSTHROUGH | E2E_REENCRYPT
-  repeated string ip_allowlist = 8;
-  AuthConfig auth       = 9;   // basic | oauth | none
-  uint32 max_conns      = 10;
-}
-
-message TunnelInfo {
-  string tunnel_id   = 1;
-  string public_url  = 2;
-  string local_addr  = 3;
-  string region      = 4;
-  int64  created_at  = 5;
-  TunnelStats stats  = 6;   // conns, bytes_in/out, p50/p95 latency, error_rate
-  CertInfo cert      = 7;
+  rpc TestRule (TestRuleRequest)  returns (TestRuleResponse);
+  rpc SetMode  (SetModeRequest)   returns (SetModeResponse);
 }
 ```
+
+**Soket yo'li uzunligi.** `sockaddr_un.sun_path` qat'iy o'lchamda —
+Linux'da 108 bayt, macOS/BSD'da 104. Chegaradan oshsa yadro
+`invalid argument` qaytaradi va sababni ko'rsatmaydi, shuning uchun
+`ipc.Listen` yo'lni oldindan o'lchaydi va tushunarli xato beradi.
 
 **Xato kodlari (gRPC status → CLI exit code):**
 
@@ -924,6 +1502,138 @@ message TunnelInfo {
 | `RESOURCE_EXHAUSTED` | 13 | Tarif limiti (tunnel soni / bandwidth) |
 | `FAILED_PRECONDITION` | 14 | Mesh'ga ulanmagan (`cc01 up` kerak) |
 | `INVALID_ARGUMENT` | 2 | Noto'g'ri parametr |
+
+### 5.1.1 Control Plane kanalining himoyasi
+
+Kanal orqali butun NetworkMap o'tadi — kim tarmoqda, qaysi manzilda,
+qaysi kalit bilan — va nodelarning autentifikatsiya tokeni. Ochiq
+qoldirilsa tarmoqni kuzatuvchi buni to'liq ko'radi va tokenni qayta
+ishlatadi.
+
+**Hozirgi holat: TLS 1.3 + SPKI pinning.** Ikkala tomon ham TLS 1.3 dan
+past versiyaga tushmaydi: bu kanal faqat bizning klientlarimizga xizmat
+qiladi, ya'ni moslik uchun chegirma qilishning hojati yo'q.
+
+**Nega pin, CA emas.** CP sertifikati self-signed bo'lishi mumkin va uni
+ommaviy CA tasdiqlamaydi. Pin esa kuchliroq kafolat beradi — u aniq
+bitta ochiq kalitga bog'lanadi, ya'ni buzilgan yoki aldangan CA ham
+yordam bermaydi.
+
+Pin formati CP↔node shartnomasi:
+
+```
+sha256/<base64(SHA-256(sertifikat SPKI))>
+```
+
+Xesh **SPKI ustidan** olinadi, sertifikatning o'zi ustidan emas: shunda
+sertifikat yangilanganda kalit o'zgarmasa pin ham o'zgarmaydi va
+nodelarni qayta sozlash kerak bo'lmaydi. Prefiks oshkora yozilgan —
+keyin boshqa algoritmga o'tilsa eski pinlar jimgina noto'g'ri talqin
+qilinmaydi.
+
+Bir nechta pin qabul qilinadi (vergul bilan): kalit almashtirilayotganda
+eski va yangisi bir vaqtda amal qilishi kerak, aks holda almashtirish
+butun parkni bir zumda uzib qo'yardi.
+
+Format ikkala modulda alohida yozilgan — klient serverning moduliga
+bog'lanmasligi kerak. Ular ajralib ketmasligi uchun **bir xil sinov
+vektori** ikkala paketda ham qulflangan
+(`daemon/control/pin_test.go`, `control/cptls/cert_test.go`).
+
+| Tomon | Bayroq |
+| --- | --- |
+| CP | `-tls-cert` / `-tls-key`, yoki bo'sh — vaqtinchalik sertifikat |
+| CP | `-tls-hosts` — sertifikatga yoziladigan nomlar/IP'lar |
+| Node | `-cp-pin` (`CC01_CP_PIN`) — kutilayotgan pin(lar) |
+| Ikkalasi | `-insecure` / `-cp-insecure` — **faqat lokal sinov** |
+
+⚠️ Sertifikat berilmasa CP uni xotirada yaratadi: qayta ishga
+tushirilganda pin O'ZGARADI va hamma nodelarni qayta sozlash kerak
+bo'ladi. Ishlab chiqarishda `-tls-cert`/`-tls-key` majburiy.
+
+#### Node autentifikatsiyasi
+
+Token **umumiy sir** edi: hamma nodeda bir xil, ya'ni bitta node
+buzilsa o'sha token bilan boshqa nodening o'rniga o'tib bo'lardi.
+
+Endi ikki bosqichli model (Tailscale'dagi auth key bilan bir xil
+g'oya):
+
+| Bosqich | Nima talab qilinadi |
+| --- | --- |
+| **Ro'yxatga olish** | token + node sertifikati; sertifikat `node_id` ga bog'lanadi |
+| **Keyingi ulanish** | AYNAN o'sha sertifikat; token qabul qilinmaydi |
+
+Ya'ni o'g'irlangan token bilan **yangi** node qo'shish mumkin, lekin
+**mavjud** nodening o'rniga o'tib bo'lmaydi. Buni `cp-demo` alohida
+tekshiradi: node-1 ning kaliti va haqiqiy token bilan, lekin boshqa
+sertifikat bilan ulanishga urinish rad etiladi.
+
+**Bog'lanish replikatsiya qilinadi** (§3.3.1 dagi Raft jurnali orqali).
+Faqat liderning xotirasida qolsa, birinchi failover'dayoq yo'qolib,
+hamma node qaytadan token bilan ro'yxatdan o'tishi kerak bo'lardi —
+ya'ni himoya bir nosozlikda tugardi.
+
+**Mavjud bog'lanish jimgina almashtirilmaydi.** Node boshqa sertifikat
+bilan kelsa `PERMISSION_DENIED` qaytadi va CP ogohlantirish yozadi:
+yo node kalitini yo'qotgan, yo kimdir uning o'rniga o'tmoqchi —
+ikkalasi ham operator aralashuvini talab qiladi.
+
+**Nega Ed25519, Noise kaliti emas.** Nodening asosiy identifikatori —
+Curve25519 (X25519) Noise kaliti. U ECDH uchun, imzo uchun emas; TLS
+klient sertifikati esa imzo talab qiladi. X25519 dan Ed25519 ga
+xavfsiz o'tish standart emas, shuning uchun alohida kalit yaratiladi
+(`daemon/nodecert`) va u `node_id` ga CP tomonida bog'lanadi.
+
+⚠️ **Klient sertifikati TLS qatlamida tekshirilmaydi** —
+`RequestClientCert`, `RequireAndVerifyClientCert` emas. Nodelar
+o'z-o'zini imzolagan sertifikat ishlatadi va ularni tasdiqlaydigan CA
+yo'q. Tekshiruv yuqori qatlamda: sertifikat aynan shu `node_id` ga
+bog'langani solishtiriladi. Bu CA dan kuchliroq — sertifikat kimdir
+tomonidan imzolangani emas, AYNAN o'sha node ekani muhim.
+
+**Hali qurilmagani.** Sertifikatni almashtirish (rotation) va bekor
+qilish (revocation) uchun operator interfeysi yo'q: node kalitini
+yo'qotsa, bog'lanishni qo'lda o'chirish kerak bo'ladi.
+
+### 5.2.1 O'rnatish va systemd
+
+`make package` bitta tavsifdan (`deploy/packaging/nfpm.yaml`) `amd64` va
+`arm64` uchun `deb` va `rpm` quradi. nfpm tanlandi, chunki
+`dpkg-buildpackage` va `rpmbuild` ikki xil host muhitini talab qiladi —
+nfpm esa konteynerda ishlaydi va paketni macOS'dan ham qurish mumkin.
+
+Paket nima o'rnatadi:
+
+| Fayl | Vazifasi |
+| --- | --- |
+| `/usr/bin/cc01d`, `/usr/bin/cc01` | demon va CLI |
+| `/lib/systemd/system/cc01d.service` | unit (S-5, S-6 hardening) |
+| `/etc/cc01/cc01d.env` | konfiguratsiya, `0600`, yangilanishda **saqlanadi** |
+| `/usr/lib/sysusers.d/cc01.conf` | `cc01` guruhi |
+| `/usr/lib/tmpfiles.d/cc01.conf` | `/run/cc01` papkasi |
+| `/usr/lib/cc01/cc01-cleanup` | `ExecStopPost` — halokatdan keyingi tozalash |
+
+**Demon ataylab avtomatik yoqilmaydi.** Unga node kaliti va CP manzili
+kerak, ular esa o'rnatishdan keyin hali bo'sh — avtomatik yoqilsa
+foydalanuvchi faqat xato logini olardi. `postinstall` keyingi qadamlarni
+ko'rsatadi.
+
+**Soket egaligi.** `0660` ning o'zi yetarli emas: soket `root:root`
+bo'lib qolsa, `cc01` guruhidagi foydalanuvchi ham ulana olmaydi va CLI
+bergan "demon guruhiga qo'shiling" maslahati ishlamaydi. Demon soketni
+`cc01` guruhiga o'tkazadi; guruh bo'lmasa (konteyner, paketsiz
+o'rnatish) buni logga yozadi va faqat root ulana oladi.
+
+**Root shart emas.** `CAP_NET_ADMIN` bilan demon `uid≠0` da ham TUN
+yaratadi va marshrut qo'yadi — konteynerda `setcap cap_net_admin+ep`
+va oddiy foydalanuvchi bilan tekshirilgan. `cc01 doctor` aynan shu
+maslahatni beradi.
+
+`make package-verify` paketni toza Debian konteyneriga o'rnatib
+tekshiradi: fayllar joyidami, guruh yaratildimi, `systemd-analyze
+verify` unit'dan norozimi, demon ishlamayotganda CLI 10-kod
+qaytaradimi, o'chirishdan keyin konfiguratsiya saqlanadimi.
 
 ### 5.3 Tunnel data plane protokoli
 
@@ -1270,12 +1980,12 @@ Subdomain qoidalari hozir `core-server/utils.go` da (uzunlik 3–38, `^[a-z\d](?
 | --- | --- |
 | S-1 | Private kalitlar hech qachon diskka aniq matnda yozilmaydi; TPM/Keychain bo'lsa u ishlatiladi |
 | S-2 | Kalitlar `memguard` bilan `mlock` qilinadi, swap'ga tushmaydi |
-| S-3 | Barcha CP aloqasi mTLS 1.3, sertifikat pinning bilan |
+| S-3 | Barcha CP aloqasi mTLS 1.3, sertifikat pinning bilan — ✅ ikki tomonlama: server SPKI pin, node klient sertifikati |
 | S-4 | Cryptokey routing (`inner_src ∈ peer.allowed_ips`) — chetlab o'tib bo'lmaydi |
-| S-5 | Daemon `CAP_NET_ADMIN`+`CAP_BPF` bilan ishlaydi, to'liq root emas (`AmbientCapabilities`) |
-| S-6 | systemd hardening: `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`, `RestrictSUIDSGID` |
+| S-5 | Daemon `CAP_NET_ADMIN`+`CAP_BPF` bilan ishlaydi, to'liq root emas (`AmbientCapabilities`) — ✅ `CAP_NET_ADMIN` uchun tekshirilgan |
+| S-6 | systemd hardening: `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`, `RestrictSUIDSGID` — ✅ |
 | S-7 | Supply chain: `go.sum` verify, SBOM (CycloneDX), Sigstore bilan imzolangan relizlar |
-| S-8 | Reproducible builds (`-trimpath`, `CGO_ENABLED=0` mumkin bo'lganda) |
+| S-8 | Reproducible builds (`-trimpath`, `CGO_ENABLED=0` mumkin bo'lganda) — ✅ `make package` |
 | S-9 | Har bir reliz oldidan `govulncheck` — HIGH/CRITICAL bo'lsa bloklanadi |
 | S-10 | Audit log tamper-evident (hash chain), ClickHouse'ga append-only |
 | S-11 | AP ↔ Edge kanali mTLS; AP `/internal/*` listeneri public interfeysga bind qilinmaydi |
@@ -1404,13 +2114,20 @@ Faza 0 dan farqli — bu yerda haqiqiy overlay boshlanadi. Foundation ishlari (T
 | Crypto router (cryptokey routing) | `inner_src ∈ peer.allowed_ips` — 100% drop | ✅ `daemon/router` |
 | UDP transport (batch I/O) | `recvmmsg`/`sendmmsg` Linux'da | ✅ `daemon/conn` |
 | Datapath engine (goroutine'lar, handshake, keepalive, rekey) | Ikki node o'rtasida shifrlangan `ping6` | ✅ `daemon/engine` |
-| Control Plane: register, NetworkMap, Raft KV | 3 replika, leader failover < 5 s | ⏳ |
-| IPAM: `/128` allocate/renew/release | 1000 node, double-allocation 0 | ⏳ |
-| STUN + UDP hole punching | Full/Restricted cone NAT'da P2P ≥ 90% muvaffaqiyat | ⏳ |
-| Relay servisi + fallback | Symmetric NAT'da 100% ulanish, switch < 300 ms | ⏳ |
-| Marshrut sinxronizatsiyasi (reconciliation) | `cc01 down` keyin 0 orphan marshrut | ⏳ |
-| CLI: `up`, `down`, `status`, `peer list/ping` | UX review o'tgan | ⏳ |
-| Linux paketlar (deb/rpm) + systemd unit | Toza VM'da 1 buyruq bilan o'rnatish | ⏳ |
+| Control Plane: register, NetworkMap | Tenant izolyatsiyasi, delta sync | ✅ `control/registry` + `control/server` |
+| `cc01d` CP rejimi | Peerlar qo'lda emas, CP dan avtomatik | ✅ `daemon/control` |
+| Control Plane: Raft KV | 3 replika, leader failover < 5 s | ✅ `control/cluster` — o'lchangan 0.9–1.0 s |
+| IPAM: `/128` allocate/renew/release | 1000 node, double-allocation 0 | ✅ `control/ipam` |
+| STUN: public manzilni aniqlash | NAT ortidagi node ikki tomonlama ulanadi | ✅ `daemon/stun` + `control/stunserver` |
+| UDP hole punching (cone NAT) | Ikkala tomon ham relaydan `direct-active` ga o'tadi | ✅ `make punch-demo` |
+| UDP hole punching (symmetric NAT) | Birthday-paradox punching; symmetric↔cone `direct-active` | ✅ `make punch-sym-demo` |
+| Relay servisi + fallback | Symmetric NAT'da ulanish; relay yukni ocha olmaydi | ✅ `make relay-demo` |
+| Yo'l tanlash + avtomatik fallback | Relay-first, P2P-upgrade; degradatsiyada relayga qaytish | ✅ `daemon/path` |
+| Marshrut sinxronizatsiyasi (reconciliation) | Peer ketganda marshruti ham ketadi; `Close()` dan keyin 0 orphan | ✅ `daemon/route` |
+| CLI ↔ demon IPC (UNIX soket, gRPC) | `SO_PEERCRED`, `0660`, exit kodlari §5.2 | ✅ `daemon/ipc` |
+| CLI: `status`, `peer list`, `doctor` | Ishlab turgan mesh'da yo'l holati ko'rinadi | ✅ `make cp-demo` |
+| CLI: `up`, `down` (demon hayot sikli) | `down` → 0 marshrut, `up` → o'sha manzil qaytadi | ✅ `daemon/session` |
+| Linux paketlar (deb/rpm) + systemd unit | Toza konteynerda o'rnatiladi, `make package-verify` | ✅ `deploy/packaging` |
 | AP: `Plan`, `Subscription`, kvota modeli | Tarif o'zgarishi 60 s ichida edge'da kuchga kiradi | ⏳ |
 | **MVP demo** | 3 shahar, 3 node, o'zaro ping < 50 ms, public IPv6 internetdan erishiladi | ⏳ |
 
@@ -1428,8 +2145,193 @@ Faza 0 dan farqli — bu yerda haqiqiy overlay boshlanadi. Foundation ishlari (T
 Marshrutlash va xavfsizlik tekshiruvi kripto ustiga **o'lchanadigan yuk qo'shmadi** —
 qidiruv 46 ns, shifrlash esa 2.4 µs.
 
-**Uchidan uchiga tekshirilgan** (`make mesh-demo`): ikkita konteyner, har biri
-o'z tarmoq namespace'ida, haqiqiy TUN va UDP bilan:
+**IPAM unumdorligi** (`control/ipam`). Dastlabki implementatsiya har bir
+taqsimlashda butun holatni nusxalardi; bu 100 000 tenant maqsadida (§8)
+ishlamas edi:
+
+| Bosqich | Vaqt | Xotira | Ajratmalar |
+| --- | --- | --- | --- |
+| Butun holatni nusxalash | 1.47 ms | 3.1 MB | 5121 |
+| `ByParent` indeksi + nusxalashsiz | 239 µs | 1.7 KB | 14 |
+| Tozalashni faqat pool to'lganda | **3.3 µs** | 1.8 KB | 14 |
+
+Ikkita qaror shundan kelib chiqdi:
+
+1. **`Store.Update` xatoda avtomatik orqaga qaytarmaydi.** Butun holatni
+   nusxalash `O(N)`. Buning o'rniga kelishuv: `fn` avval tekshiradi,
+   keyin o'zgartiradi. Raft'da ham xuddi shunday — `Apply` allaqachon
+   commit qilingan buyruqni qo'llaydi. Sticky tiklashdagi yagona
+   istisno oshkora qo'lda qaytariladi.
+2. **Muddati o'tgan ijaralarni tozalash faqat pool to'lgandek
+   ko'ringanda ishlaydi**, har bir taqsimlashda emas. Odatiy yo'l
+   `O(1)`, kamdan-kam uchraydigan yo'l `O(N)` to'laydi.
+
+**Delta sync o'lchovi** (`control/registry`, 500 peerli tenant). Hujjatdagi
+bashorat (§3.1.2: "to'liq map ~200 KB, delta odatda < 2 KB") tasdiqlandi:
+
+| So'rov | Vaqt | Xotira |
+| --- | --- | --- |
+| To'liq map (500 peer) | 99 µs | 159 KB |
+| Delta (o'zgarishsiz) | **139 ns** | **384 B** |
+
+Uchta xatti-harakat alohida qo'riqlanadi:
+
+- **Heartbeat versiyani oshirmaydi**, agar endpointlar o'zgarmagan bo'lsa.
+  Aks holda har 30 sekundda butun tenantga delta yuborilardi.
+- **Bir nodening ketma-ket o'zgarishlari deltada bir marta** ko'rinadi —
+  klientga oraliq holatlar kerak emas, faqat oxirgisi.
+- **Jurnal kesilganda to'liq map** qaytariladi. Juda orqada qolgan klient
+  o'zgarishlarni jimgina o'tkazib yubormasligi kerak.
+
+**Relay orqali ulanish** (`make relay-demo`). Ikkita node, **har biri
+o'z NAT'i ortida** — ular bir-birini to'g'ridan-to'g'ri ko'ra olmaydi:
+
+```
+net-public  172.34.0.0/24   cp + stun + relay, gw-a, gw-b
+net-a       172.34.1.0/24   node-1  → gw-a (172.34.0.2)
+net-b       172.34.2.0/24   node-2  → gw-b (172.34.0.3)
+
+node-1: "public manzil aniqlandi" 172.34.0.2:51820
+node-1: "relayga ulandi" relay-1
+node-2: "relayga ulandi" relay-1
+
+node-1 → node-2:  0% yo'qotish, ~1.4 ms
+node-2 → node-1:  0% yo'qotish, ~1.1 ms
+
+sessiya: via=relay
+```
+
+node-1 node-2 ning NAT manziliga to'g'ridan-to'g'ri yubora olmaydi:
+gw-b da mos conntrack yozuvi yo'q. Yagona yo'l — relay, va datapath
+unga **avtomatik** o'tadi.
+
+CP relay ro'yxatini NetworkMap orqali tarqatadi (`relays[]`). Ro'yxat
+har bir javobda to'liq yuboriladi — u kichik va kamdan-kam o'zgaradi,
+ya'ni delta hisoblash ortiqcha murakkablik bo'lardi.
+
+**Yo'l tanlash** (`daemon/path`) — ADR-005: *relay-first, P2P-upgrade*.
+Ulanish darhol relaydan boshlanadi, to'g'ridan-to'g'ri yo'l esa fon
+rejimida sinaladi va tasdiqlangach unga o'tiladi.
+
+`§6.2` holat mashinasi to'liq amalga oshirilgan:
+
+```
+discovering → relay-active → probing → direct-active
+                                 ↑          ↓ 3 javobsizlik
+                                 └──────  degraded
+                                      5 javobsizlik
+```
+
+`§6.3` taymerlari:
+
+| Chegara | Qiymat | Nima uchun |
+| --- | --- | --- |
+| Tasdiqlangan yo'lni o'lchash | 5 s | Sifatni kuzatish |
+| Tasdiqlanmagan yo'lni sinash | **500 ms** | Quyida |
+| Javobsizlikdan keyin | 250 ms | Uzilishni tez aniqlash |
+| Degradatsiya | 3 javobsizlik (750 ms) | Hali direct'da qoladi |
+| Relayga qaytish | 5 javobsizlik (1250 ms) | Hot switch |
+| Upgrade sharti | 15% tez, 3 o'lchov | Flapping'ning oldini olish |
+
+**Dastlabki probe davri ataylab tezroq.** 5 soniyalik davrda tasdiqlash
+`3 × 5 = 15` soniya olardi — ya'ni foydalanuvchi shuncha vaqt relayda
+o'tirardi. Bu ADR-005 ning maqsadiga zid: relay **boshlanish** uchun,
+doimiy yo'l uchun emas. O'lchov: tasdiqlash **10.6 s → 1.53 s**.
+
+**Disco ping/pong** uchun yangi paket turi qo'shildi: `0x07`. Asl
+ro'yxat `0x01–0x06` edi; keepalive javob kutmagani uchun kechikishni
+o'lchay olmaydi. Xabar 9 bayt: tur + nonce. Vaqt tamg'asi yuborilmaydi —
+RTT ni jo'natuvchi o'zi o'lchaydi, ya'ni soatlar mos kelishi shart emas.
+
+**Relay orqali kelgan paketda endpoint O'RGANILMAYDI.** Manba manzili
+relayniki, peerniki emas; uni yozib qo'yish to'g'ridan-to'g'ri yo'lni
+buzardi. `acceptTransport` va handshake ishlovchilari `learnEndpoint`
+bayrog'ini oladi.
+
+**Relay** (`daemon/relay`). Ikki qatlamli shifrlash bilan:
+
+```
+[ node ↔ relay Noise sessiyasi           ]  ← relay ochadi
+    [ dst_node_id | peer↔peer shifr matn ]  ← relay OCHA OLMAYDI
+```
+
+Tashqi qatlam metadata'ni himoyalaydi: tarmoqni kuzatayotgan tomon kim
+kim bilan gaplashayotganini ko'rmaydi. Ichki qatlam esa relayning o'zidan
+himoyalaydi — u faqat `node_id` ni ko'radi (`ARCHITECTURE.md` §5.1 dagi
+kompromis radiusi jadvali aynan shuni va'da qiladi).
+
+Ikkita xususiyat alohida test bilan qo'riqlanadi:
+
+| Xususiyat | Nima uchun |
+| --- | --- |
+| Relay ichki yukni ocha olmaydi | Uning butun ma'nosi shu; test ochiq matn uzatilgan baytlarda yo'qligini tekshiradi |
+| Jo'natuvchini soxtalashtirib bo'lmaydi | `node_id` klient yuborgan qiymatdan emas, **autentifikatsiya qilingan sessiyadan** olinadi |
+
+`node_id` relay tomonidan Noise IK handshake'ida bilib olingan public
+kalitdan hisoblanadi — ya'ni boshqa nodening nomidan ro'yxatdan o'tish
+imkonsiz.
+
+**NAT ortidan ulanish** (`make nat-demo`). Docker'da MASQUERADE qiluvchi
+shlyuz orqali haqiqiy NAT simulyatsiya qilinadi:
+
+```
+net-public   172.33.0.0/24   cc01-cp, node-2, gw:eth0
+net-private  172.33.1.0/24   gw:eth1, node-1   ← default route → gw
+
+node-1: "public manzil aniqlandi" endpoint=172.33.0.2:51820   ← STUN
+node-2: "peer qo'shildi" node-1 endpoint=172.33.0.2:51820     ← CP orqali
+
+node-1 → node-2:  0% yo'qotish
+node-2 → node-1:  0% yo'qotish   ← NAT ICHIGA kirish
+```
+
+Ikkinchi yo'nalish muhimroq: u faqat STUN node-1 ning tashqi manzilini
+topgani va CP uni node-2 ga yetkazgani uchun ishlaydi. STUN'siz node-1
+o'zining `172.33.1.11` manzilini e'lon qilardi — unga tashqaridan
+erishib bo'lmaydi.
+
+**Ikkita qoida shu ishdan chiqdi:**
+
+1. **STUN datapath bilan AYNI soketdan** yuborilishi shart. NAT
+   bog'lanishi soketga bog'langan; boshqa soketdan so'ralgan manzil
+   overlay uchun yaroqsiz bo'ladi.
+2. **Engine ishga tushishidan oldingi o'qish sinxron bo'lishi shart.**
+   Dastlabki versiya alohida goroutine'da o'qirdi va u `Receive` da
+   bloklangan holda qolib ketardi — keyinchalik u datapath'ning
+   birinchi paketini (handshake initiation) o'g'irlab, mesh'ni
+   **jimgina** ishlamaydigan qilib qo'yardi. `stun.DiscoverOnce`
+   o'qishni chaqiruvchi goroutine'da bajaradi va regressiya testi
+   buni qo'riqlaydi.
+
+**Paketlarni ajratish aniq, ehtimolli emas.** STUN javoblari o'sha
+soketga keladi va ular `magic cookie` (0x2112A442) bo'yicha ajratiladi.
+cc01 sarlavhasida o'sha o'rinda `receiver_index` turadi — shuning uchun
+`noise.randomIndex()` mos keladigan yagona qiymatni (`0x42A41221`)
+ataylab chetlab o'tadi.
+
+**Avtomatik mesh** (`make cp-demo`): Control Plane va uchta node, hech
+qanday qo'lda peer konfiguratsiyasisiz. Har bir node faqat CP manzilini
+biladi:
+
+```
+cc01-cp  -tenant-net fd00:cc01:c0de::/64
+cc01d    -cp 172.32.88.5:8443            ← peer flaglari YO'Q
+
+CP:      node-1 → fd00:cc01:c0de:0:59c4:775:545c:3224/128
+         node-2 → fd00:cc01:c0de:0:c6ad:d1c:161d:9e3b/128
+         node-3 → fd00:cc01:c0de:0:987d:e17:dc4e:49b2/128
+
+node-1:  "peer qo'shildi" node-2 endpoint=172.32.88.12:51820
+         "peer qo'shildi" node-3 endpoint=172.32.88.13:51820
+
+ping6:   1→2, 1→3, 3→2 — hammasi 0% yo'qotish
+```
+
+Ketma-ketlik muhim: UDP soketi ochiladi (endpoint uchun port kerak) →
+CP da ro'yxatdan o'tiladi (manzil shu yerda beriladi) → TUN yaratiladi →
+engine ishga tushadi → CP stream'i peerlarni to'ldiradi.
+
+**Ikki node, statik konfiguratsiya bilan** (`make mesh-demo`):
 
 ```
 $ ping -6 -c 4 fd00:cc01:beef::2
@@ -1458,27 +2360,141 @@ handshake) begona manzildan yozmoqchi bo'ladi va rad etiladi.
 
 ### Faza 2 — eBPF Security Layer (6 hafta)
 
-| Deliverable | Acceptance criteria |
-| --- | --- |
-| `xdp_filter` Stage 0–5 to'liq | `BPF_PROG_TEST_RUN` testlari 100% o'tadi |
-| Policy compiler (ACL → LPM trie) | 10k qoida < 500 ms kompilyatsiya |
-| `cc01 firewall` buyruqlari + dry-run | `firewall test` to'g'ri qoidani ko'rsatadi |
-| Ring buffer event pipeline | 100k event/s yo'qotishsiz |
-| Anti-DDoS: rate limit + SYN cookie | 14.8 Mpps flood, legit trafik SLO ichida |
-| Mikrosegmentatsiya (tag-based) | Lateral movement testi bloklanadi |
+| Deliverable | Acceptance criteria | Holat |
+| --- | --- | --- |
+| `xdp_filter` Stage 0–5 to'liq | `BPF_PROG_TEST_RUN` testlari 100% o'tadi | ✅ `daemon/xdp` |
+| Policy compiler (ACL → LPM trie) | 10k qoida < 500 ms kompilyatsiya | ✅ o'lchandi: **6 ms** |
+| `cc01 firewall` buyruqlari + dry-run | `firewall test` to'g'ri qoidani ko'rsatadi | ✅ `daemon/cmd/cc01` |
+| Ring buffer event pipeline | 100k event/s yo'qotishsiz | ✅ o'lchandi: **≈255k/s**, yadro tomonda 0 yo'qotish |
+| Anti-DDoS: rate limit + SYN cookie | 14.8 Mpps flood, legit trafik SLO ichida | ⚠️ qisman — quyida |
+| Mikrosegmentatsiya (tag-based) | Lateral movement testi bloklanadi | ✅ `make cp-demo` (node-3 `db` bloklanadi) |
+
+**Anti-DDoS qatori nega qisman.** Ikki sabab bor va ikkalasi ham
+o'lchovga taalluqli:
+
+1. **14.8 Mpps o'lchanmagan.** Bu 10G interfeysning liniya tezligi va
+   uni haqiqiy temirda, native XDP bilan o'lchash kerak. macOS ustidagi
+   Docker'da (veth, generic XDP) chiqadigan raqam liniya tezligini
+   emas, virtualizatsiya narxini ko'rsatardi. Token chelagining o'zi
+   `TestProgTest_XDPRateLimits` va `TestProgTest_XDPAutoBlocks` bilan
+   sinalgan — ya'ni mantiq to'g'ri, tezlik esa hali tasdiqlanmagan.
+2. **SYN cookie umuman qurilmagan** — sababi quyida.
+
+**SYN cookie nega yo'q.** XDP dan cookie yuborish ishlamaydi: qaytgan
+ACK ni `cookie_v6_check` tekshiradi va u `tcp_synq_no_recent_overflow(sk)`
+ga bog'liq — yadro faqat O'ZI chiqargan cookie'ni tan oladi. Ya'ni XDP
+chiqargan SYN-ACK ga kelgan ACK ga yadro RST bilan javob beradi
+(`SyncookiesRecv=0` va `SyncookiesFailed=0` — ya'ni hisoblagichgacha
+ham yetib bormaydi). To'g'ri yechim — netfilter `SYNPROXY`; u alohida
+ish sifatida qoldirildi. Yarim ishlaydigan himoyani ishlaydi deb
+ko'rsatishdan ko'ra yo'qligini aytish xavfsizroq.
+
+**Hodisa oqimi paketga emas, OQIMGA bog'langan.** `emit_event` faqat
+hukm keshi o'tkazib yuborilganda chaqiriladi, ya'ni bitta manbadan
+kelgan million paket bitta hodisa beradi. Flood paytida jurnal emas,
+hisoblagich o'sadi. O'lchov shuning uchun har safar boshqa manba
+portidan yuboradi (`TestProgTest_EventThroughput`), yo'qotish
+hisoblagichining o'zi esa alohida test bilan isbotlangan
+(`TestProgTest_EventLossIsReported`: iste'molchisiz 60k oqimdan
+~56k hodisa yo'qoladi).
 
 ### Faza 3 — Tunneling / ngrok parity (6 hafta)
 
-| Deliverable | Acceptance criteria |
+| Deliverable | Acceptance criteria | Holat |
+| --- | --- | --- |
+| Edge ingress: SNI router + TLS terminatsiya | 50k concurrent tunnel/node | ✅ SNI ✅, 50k o'lchanmagan |
+| ACME avtomatizatsiyasi (wildcard + on-demand) | Sertifikat < 30 s, avto-renew | ⚠️ on-demand ✅, wildcard ❌ (quyida) |
+| `tunnel http/tcp/udp/tls` | ngrok bilan funksional paritet (asosiy stsenariylar) | ⚠️ http ✅, tcp ✅, udp/tls ❌ |
+| QUIC transport + stream mux | HTTP p95 overhead < 8 ms | ❌ |
+| Traffic inspector (`:4040`) | So'rov/javob real vaqtda ko'rinadi | ✅ `cli-client/inspect` |
+| Custom domain + basic/OAuth auth | Dokumentatsiya bilan | ⚠️ custom domain ✅, auth ❌ |
+| AP: `CustomDomain` + TXT verifikatsiya oqimi | Domen tasdiqlangach ACME avtomatik ishga tushadi | ❌ |
+| AP: billing integratsiyasi + usage hisob-kitobi | Oylik hisob usage bilan mos keladi | ❌ |
+
+#### TLS: SNI bo'yicha sertifikat tanlash
+
+Edge bir vaqtda ikki xil nomga xizmat qiladi: `*.cc01.uz`
+subdomainlariga va mijozlarning o'z domenlariga. Qaysi biri
+kerakligi faqat SNI dan ma'lum, shuning uchun sertifikat fayldan
+emas, `tls.Config.GetCertificate` orqali tanlanadi
+(`core-server/tlsmgr`).
+
+Qoidalar:
+
+| SNI | Sertifikat |
 | --- | --- |
-| Edge ingress: SNI router + TLS terminatsiya | 50k concurrent tunnel/node |
-| ACME avtomatizatsiyasi (wildcard + on-demand) | Sertifikat < 30 s, avto-renew |
-| `tunnel http/tcp/udp/tls` | ngrok bilan funksional paritet (asosiy stsenariylar) |
-| QUIC transport + stream mux | HTTP p95 overhead < 8 ms |
-| Traffic inspector (`:4040`) | So'rov/javob real vaqtda ko'rinadi |
-| Custom domain + basic/OAuth auth | Dokumentatsiya bilan |
-| AP: `CustomDomain` + TXT verifikatsiya oqimi | Domen tasdiqlangach ACME avtomatik ishga tushadi |
-| AP: billing integratsiyasi + usage hisob-kitobi | Oylik hisob usage bilan mos keladi |
+| yo'q | **rad etiladi** |
+| `X.cc01.uz` | wildcard |
+| `cc01.uz` | apex (wildcard uni QOPLAMAYDI) |
+| `a.b.cc01.uz` | **rad etiladi** — wildcard bitta yorliqni qoplaydi |
+| tirik tunneli bor custom domain | ACME |
+| boshqa har qanday nom | **rad etiladi** |
+
+⚠️ **Nega noma'lum nom rad etiladi.** Bu ACME dagi eng jiddiy
+suiiste'mol yo'li: kimdir o'z domenining DNS'ini bizga qaratsa va
+biz har bir SNI ga sertifikat chiqaraversak, Let's Encrypt
+limitlariga urilib, HAQIQIY mijozlarga sertifikat chiqara olmay
+qolardik. Shuning uchun custom domain faqat **tirik tunneli
+bo'lsa** xizmat oladi; egalikni esa access-server tunnel
+ochilishidan oldin tekshiradi.
+
+⚠️ **Resolver keshlamaydi** va bu ataylab. certmagic sertifikatni
+fon rejimida yangilaydi, ya'ni bizdagi nusxa eskirib qolardi.
+Keshsiz ruxsat har bir qo'l siqishida qaytadan tekshiriladi —
+tunnel yopilishi bilan sertifikat berish darhol to'xtaydi.
+
+⚠️ **Wildcard ACME dan olinmaydi.** `*.cc01.uz` uchun DNS-01 sinovi
+kerak, u esa DNS provayderining kalitlarini talab qiladi. Shuning
+uchun wildcard operator tomonidan fayl sifatida beriladi
+(`CC01_TLS_CERT`/`CC01_TLS_KEY`), ACME esa faqat custom
+domainlarga ishlaydi — ular HTTP-01/TLS-ALPN-01 bilan hal bo'ladi
+va DNS kaliti kerak emas.
+
+`acme-tls/1` `NextProtos` ga qo'shiladi: usiz ACME serveri
+TLS-ALPN-01 sinovini boshlay olmaydi va sertifikat hech qachon
+chiqmaydi — server esa hech qanday xato ko'rsatmasdi.
+
+`make tunnel-demo` buni uchidan uchiga sinaydi: tunnel ochiladi,
+subdomain HTTP va HTTPS orqali javob beradi, begona domenga esa
+qo'l siqishi rad etiladi.
+
+#### Traffic inspector
+
+`cc01-tunnel -inspect 127.0.0.1:4040` tunneldan o'tgan HTTP
+so'rov/javoblarini ko'rsatadi (`cli-client/inspect`). Sahifa
+jonli yangilanadi — Server-Sent Events orqali; WebSocket kerak
+emas, chunki oqim bir tomonlama.
+
+⚠️ **Manzil LOOPBACK bo'lishi shart** va bu tekshiruvni chetlab
+o'tib bo'lmaydi (`ErrNotLoopback`). Sahifada so'rovlarning to'liq
+sarlavhalari va tanalari ko'rinadi — ular ichida `Authorization`,
+cookie va parollar bo'ladi. Uni tarmoqqa chiqarish tunneldan
+o'tgan hamma sirni ochib qo'yardi.
+
+⚠️ **Kuzatuv PASSIV.** Baytlar `io.TeeReader` orqali nusxalanadi
+va oqimning o'zi hech qachon o'zgartirilmaydi. Bundan tashqari
+yozuvchi xatolarni YUTADI (`safeWriter`): parser to'xtaganda
+quvur yopiladi, `io.TeeReader` esa yozuv xatosini O'QISH xatosi
+deb yuqoriga uzatardi — va tunnel uzilardi. Inspector qulaylik
+vositasi; uning yiqilishi trafikni to'xtatmasligi kerak.
+
+Boshqa qarorlar:
+
+- **Faqat HTTP.** TCP tunnelida baytlarni izohlab bo'lmaydi va
+  ularni "so'rov" deb ko'rsatish yolg'on ma'lumot berardi.
+- **Tana chegaralanadi** (64 KB): inspector xotirada ishlaydi va
+  katta fayl yuklash jarayonni yeb qo'yardi. Qirqilgani sahifada
+  oshkora belgilanadi.
+- **Halqasimon bufer** (200 ta almashuv): eng eskilari tashlanadi.
+- **Sekin obunachi o'tkazib yuboriladi**: jonli oqim kanali
+  to'lgan bo'lsa yozuv tashlanadi, aks holda brauzer tabi
+  tunnelni sekinlashtirardi.
+- **Javobsiz so'rov ham yoziladi**: ulanish uzilgan so'rovlar
+  aynan eng qiziqlari.
+
+`http.ReadResponse` ga so'rov BERILADI: usiz `HEAD` va `204`
+javoblarida tananing bor-yo'qligini aniqlab bo'lmaydi va parser
+oqimni noto'g'ri o'qib, keyingi barcha almashuvlarni buzardi.
 
 ### Faza 4 — Edge Transit & TasIX (5 hafta)
 

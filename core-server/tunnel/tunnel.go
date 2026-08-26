@@ -9,8 +9,8 @@ import (
 	"sync"
 
 	"github.com/freco-dev/cc01/core-server/events"
-	cc01v1 "github.com/freco-dev/cc01/core-server/gen/cc01/v1"
 	"github.com/freco-dev/cc01/core-server/server"
+	cc01v1 "github.com/freco-dev/cc01/proto/gen/cc01/v1"
 )
 
 type Tunnel interface {

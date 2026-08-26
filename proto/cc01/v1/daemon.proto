@@ -1,0 +1,315 @@
+syntax = "proto3";
+
+package cc01.v1;
+
+option go_package = "github.com/freco-dev/cc01/proto/gen/cc01/v1;cc01v1";
+option csharp_namespace = "Cc01.V1";
+
+// Daemon — CLI (`cc01`) va demon (`cc01d`) o'rtasidagi mahalliy
+// protokol (DEV_SPEC §5.2).
+//
+// Transport: UNIX domain socket. Tarmoq orqali ochilmaydi — bu
+// mahalliy boshqaruv interfeysi va u autentifikatsiyani soket
+// ruxsatlariga tayanadi.
+
+service DaemonService {
+  // Up — mesh'ni ko'taradi: CP da ro'yxatdan o'tish, TUN, marshrutlar.
+  rpc Up (UpRequest) returns (UpResponse);
+
+  // Down — mesh'ni tushiradi. Demon ishlashda davom etadi.
+  rpc Down (DownRequest) returns (DownResponse);
+
+  // Status — demonning joriy holati.
+  rpc Status (StatusRequest) returns (StatusResponse);
+
+  // WatchStatus — real vaqtdagi holat (TUI uchun).
+  rpc WatchStatus (WatchStatusRequest) returns (stream WatchStatusResponse);
+
+  // Peers — peerlar ro'yxati va ular bilan qaysi yo'l ishlatilayotgani.
+  rpc Peers (PeersRequest) returns (PeersResponse);
+
+  // Doctor — muhit tekshiruvi: yadro, imtiyozlar, qurilmalar.
+  rpc Doctor (DoctorRequest) returns (DoctorResponse);
+}
+
+// FirewallService — eBPF policy boshqaruvi (DEV_SPEC §5.1, §5.2).
+//
+// Qoidalar YADRODA yashaydi va demon qayta ishga tushganda
+// yo'qoladi. Doimiy saqlash Control Plane vazifasi: u qoidalarni
+// tarqatadi va node ularni qayta qo'llaydi.
+service FirewallService {
+  // AddRule qoida qo'shadi yoki mavjudini yangilaydi.
+  rpc AddRule (AddRuleRequest) returns (AddRuleResponse);
+
+  // DelRule qoidani identifikatori bo'yicha o'chiradi.
+  rpc DelRule (DelRuleRequest) returns (DelRuleResponse);
+
+  // ListRules barcha qoidalarni hisoblagichlari bilan qaytaradi.
+  rpc ListRules (ListRulesRequest) returns (ListRulesResponse);
+
+  // TestRule paket qaysi qoidaga tushishini hisoblaydi.
+  //
+  // Yadroga paket yubormaydi: qidiruv tartibi userspace'da
+  // takrorlanadi. Operator qoidani yozgandan keyin uni ishlab
+  // chiqarish trafigini kutmasdan sinab ko'rishi kerak.
+  rpc TestRule (TestRuleRequest) returns (TestRuleResponse);
+
+  // SetMode enforce yoki dry-run rejimiga o'tkazadi.
+  rpc SetMode (SetModeRequest) returns (SetModeResponse);
+
+  // Flush barcha qoidalarni o'chiradi.
+  rpc Flush (FlushRequest) returns (FlushResponse);
+}
+
+// FirewallDirection — qoida qaysi yo'nalishga tegishli.
+enum FirewallDirection {
+  FIREWALL_DIRECTION_UNSPECIFIED = 0;
+
+  // INGRESS — bizga kirayotgan paketlar; guruh MANBA prefiksidan.
+  FIREWALL_DIRECTION_INGRESS = 1;
+
+  // EGRESS — bizdan chiqayotgan paketlar; guruh MAQSAD prefiksidan.
+  FIREWALL_DIRECTION_EGRESS = 2;
+}
+
+// FirewallVerdict — qoida hukmi.
+enum FirewallVerdict {
+  FIREWALL_VERDICT_UNSPECIFIED = 0;
+  FIREWALL_VERDICT_DROP        = 1;
+  FIREWALL_VERDICT_ALLOW       = 2;
+}
+
+message AddRuleRequest {
+  FirewallDirection direction = 1;
+
+  // Prefix — manba (kirishda) yoki maqsad (chiqishda) prefiksi,
+  // masalan "2a0e:1::/64". Guruh raqami avtomatik ajratiladi.
+  string prefix = 2;
+
+  // Port — 0 = istalgan port.
+  uint32 port = 3;
+
+  // Proto — IP protokol raqami (6=TCP, 17=UDP, 58=ICMPv6).
+  // 0 = istalgan.
+  uint32 proto = 4;
+
+  FirewallVerdict verdict = 5;
+
+  // RuleId — 0 bo'lsa demon keyingi bo'sh raqamni beradi.
+  uint32 rule_id = 6;
+
+  // Comment — audit uchun izoh. Yadroda saqlanmaydi.
+  string comment = 7;
+}
+
+message AddRuleResponse {
+  FirewallRule rule = 1;
+}
+
+message DelRuleRequest {
+  uint32 rule_id = 1;
+}
+
+message DelRuleResponse {
+  FirewallRule rule = 1;
+}
+
+message ListRulesRequest {
+  // OnlyDirection — bo'sh bo'lmasa faqat shu yo'nalish.
+  FirewallDirection only_direction = 1;
+}
+
+message ListRulesResponse {
+  repeated FirewallRule rules = 1;
+
+  // Enforce — hukm qo'llanyaptimi yoki dry-run.
+  bool enforce = 2;
+
+  // Generation — qoidalar to'plamining avlodi.
+  uint32 generation = 3;
+}
+
+message FirewallRule {
+  FirewallDirection direction = 1;
+  string            prefix    = 2;
+  uint32            identity  = 3;
+  uint32            port      = 4;
+  uint32            proto     = 5;
+  FirewallVerdict   verdict   = 6;
+  uint32            rule_id   = 7;
+
+  // Hits — nechta paket shu qoida bo'yicha o'tgan yoki tashlangan.
+  uint64 hits = 8;
+}
+
+message TestRuleRequest {
+  FirewallDirection direction = 1;
+
+  // Addr — manba (kirishda) yoki maqsad (chiqishda) manzili.
+  string addr  = 2;
+  uint32 port  = 3;
+  uint32 proto = 4;
+}
+
+message TestRuleResponse {
+  // Matched — qoida topildimi. false bo'lsa deny-by-default.
+  bool matched = 1;
+
+  FirewallRule    rule    = 2;
+  FirewallVerdict verdict = 3;
+
+  // Identity — manzil qaysi guruhga tushdi.
+  uint32 identity = 4;
+
+  // Prefix — o'sha guruhning prefiksi.
+  string prefix = 5;
+
+  // Enforce — hukm HAQIQATDA qo'llanadimi.
+  bool enforce = 6;
+}
+
+message SetModeRequest {
+  // Enforce — true bo'lsa hukm qo'llanadi, false bo'lsa dry-run.
+  bool enforce = 1;
+}
+
+message SetModeResponse {
+  bool enforce = 1;
+}
+
+message FlushRequest {}
+
+message FlushResponse {
+  uint32 removed = 1;
+}
+
+message UpRequest {}
+
+message UpResponse {
+  // Status — ko'tarilgandan keyingi holat.
+  StatusResponse status = 1;
+}
+
+message DownRequest {}
+
+message DownResponse {
+  // AlreadyDown — mesh allaqachon tushirilgan edi, hech narsa
+  // o'zgarmadi.
+  bool already_down = 1;
+}
+
+message StatusRequest {}
+
+message WatchStatusRequest {
+  // IntervalSeconds — yangilanish davri. 0 bo'lsa har o'zgarishda.
+  uint32 interval_seconds = 1;
+}
+
+// Stream'da yuboriladigan holat.
+message WatchStatusResponse {
+  StatusResponse status = 1;
+}
+
+message StatusResponse {
+  // Connected — mesh'ga ulanganmi.
+  bool connected = 1;
+
+  // NodeId, PublicKey — shu nodening identifikatori.
+  string node_id    = 2;
+  string public_key = 3;
+
+  string hostname   = 4;
+  string tenant     = 5;
+
+  // Address — overlay manzili, masalan "fd00:cc01::b7f2/128".
+  string address    = 6;
+
+  // Interface — TUN interfeysi nomi.
+  string interface  = 7;
+
+  // ListenPort — overlay UDP porti.
+  uint32 listen_port = 8;
+
+  // Endpoints — e'lon qilingan underlay manzillar.
+  repeated string endpoints = 9;
+
+  // ControlPlane — CP manzili; bo'sh bo'lsa statik rejim.
+  string control_plane = 10;
+
+  // RelayId — ulangan relay; bo'sh bo'lsa relay yo'q.
+  string relay_id = 11;
+
+  // PeerCount — mesh'dagi peerlar soni.
+  uint32 peer_count = 12;
+
+  // UptimeSeconds — demon qancha vaqtdan beri ishlayapti.
+  uint64 uptime_seconds = 13;
+
+  string version = 14;
+}
+
+message PeersRequest {
+  // OnlineOnly — faqat sessiyasi bor peerlarni qaytarish.
+  bool online_only = 1;
+}
+
+message PeersResponse {
+  repeated PeerStatus peers = 1;
+}
+
+message PeerStatus {
+  string node_id    = 1;
+  string public_key = 2;
+  string hostname   = 3;
+
+  // Addresses — peerning allowed_ips i.
+  repeated string addresses = 4;
+
+  // Path — qaysi yo'l ishlatilyapti: "direct", "relay" yoki "none".
+  string path = 5;
+
+  // PathState — yo'l holat mashinasidagi holat
+  // (ARCHITECTURE.md §6.2): "relay-active", "probing",
+  // "direct-active", "degraded".
+  string path_state = 6;
+
+  // Endpoint — hozirgi underlay manzil.
+  string endpoint = 7;
+
+  // RttMicros — o'lchangan kechikish. 0 — hali o'lchanmagan.
+  uint64 rtt_micros = 8;
+
+  // Online — peer bilan sessiya bormi.
+  bool online = 9;
+
+  // SessionAgeSeconds — sessiya qancha vaqtdan beri ochiq.
+  uint64 session_age_seconds = 10;
+}
+
+message DoctorRequest {}
+
+message DoctorResponse {
+  repeated Check checks = 1;
+
+  // Healthy — barcha majburiy tekshiruvlar o'tdimi.
+  bool healthy = 2;
+}
+
+// Check — bitta muhit tekshiruvi.
+message Check {
+  string name   = 1;
+  Status status = 2;
+  string detail = 3;
+
+  // Remediation — muammoni qanday tuzatish. Xato bo'lganda
+  // to'ldiriladi: foydalanuvchi "nima qilishim kerak" degan savolga
+  // javobni shu yerdan oladi (DEV_SPEC §3.1).
+  string remediation = 4;
+
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_OK          = 1;
+    STATUS_WARN        = 2;
+    STATUS_FAIL        = 3;
+  }
+}

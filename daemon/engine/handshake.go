@@ -16,9 +16,11 @@ func (e *Engine) beginHandshake(peer *router.Peer) {
 		return
 	}
 
-	endpoint, ok := peer.Endpoint()
-	if !ok {
-		e.log.Debug("handshake o'tkazib yuborildi: endpoint yo'q", "peer", peer.PublicKey)
+	// Handshake ham yo'l tanlashdan o'tadi: to'g'ridan-to'g'ri yo'l
+	// hali tasdiqlanmagan bo'lsa u relay orqali ketadi va ulanish
+	// darhol boshlanadi (ADR-005).
+	if _, _, ok := e.pathFor(peer).tracker.Best(); !ok {
+		e.log.Debug("handshake o'tkazib yuborildi: yo'l yo'q", "peer", peer.PublicKey)
 		return
 	}
 
@@ -44,13 +46,15 @@ func (e *Engine) beginHandshake(peer *router.Peer) {
 		return
 	}
 
-	if err := e.bind.Send(initiation, endpoint); err != nil {
+	if err := e.sendVia(peer, initiation); err != nil {
 		e.abandonHandshake(peer.PublicKey)
 		e.log.Debug("initiation yuborilmadi", "peer", peer.PublicKey, "err", err)
 		return
 	}
 
-	e.log.Debug("handshake boshlandi", "peer", peer.PublicKey, "endpoint", endpoint)
+	kind, endpoint, _ := e.pathFor(peer).tracker.Best()
+	e.log.Debug("handshake boshlandi",
+		"peer", peer.PublicKey, "via", kind, "endpoint", endpoint)
 }
 
 func (e *Engine) abandonHandshake(key noise.PublicKey) {
@@ -61,7 +65,7 @@ func (e *Engine) abandonHandshake(key noise.PublicKey) {
 
 // handleInitiation — responder tomoni: kelgan handshake so'roviga javob
 // beradi va sessiyani o'rnatadi.
-func (e *Engine) handleInitiation(packet []byte, from netip.AddrPort) {
+func (e *Engine) acceptInitiation(packet []byte, from netip.AddrPort, learnEndpoint bool) {
 	handshake, err := noise.StartResponder(e.identity)
 	if err != nil {
 		e.log.Error("responder yaratilmadi", "err", err)
@@ -91,15 +95,27 @@ func (e *Engine) handleInitiation(packet []byte, from netip.AddrPort) {
 
 	// Endpointni javob yuborishdan OLDIN yangilaymiz: peer NAT ortida
 	// bo'lishi va manzili o'zgargan bo'lishi mumkin.
-	peer.SetEndpoint(from)
+	if learnEndpoint {
+		peer.SetEndpoint(from)
+	}
 
-	if err := e.bind.Send(response, from); err != nil {
-		e.log.Debug("javob yuborilmadi", "peer", initiator, "err", err)
+	// Javob AYNAN kelgan yo'l orqali qaytadi: relay orqali kelgan
+	// handshake'ga to'g'ridan-to'g'ri javob berish ishlamaydi —
+	// peer NAT ortida bo'lishi mumkin.
+	var sendErr error
+	if learnEndpoint {
+		sendErr = e.bind.Send(response, from)
+	} else {
+		sendErr = e.sendViaRelay(peer, response)
+	}
+	if sendErr != nil {
+		e.log.Debug("javob yuborilmadi", "peer", initiator, "err", sendErr)
 		return
 	}
 
 	e.router.BindSession(peer, session)
-	e.log.Info("sessiya o'rnatildi (responder)", "peer", initiator, "endpoint", from)
+	e.log.Info("sessiya o'rnatildi (responder)",
+		"peer", initiator, "via", viaLabel(learnEndpoint), "endpoint", from)
 
 	// Bu tomonda ham kutayotgan paketlar bo'lishi mumkin.
 	e.flushQueue(peer)
@@ -107,7 +123,7 @@ func (e *Engine) handleInitiation(packet []byte, from netip.AddrPort) {
 
 // handleResponse — initiator tomoni: javobni qabul qilib, sessiyani
 // o'rnatadi va navbatdagi paketlarni yuboradi.
-func (e *Engine) handleResponse(packet []byte, from netip.AddrPort) {
+func (e *Engine) acceptResponse(packet []byte, from netip.AddrPort, learnEndpoint bool) {
 	header, err := noise.ParseHeader(packet)
 	if err != nil {
 		return
@@ -147,9 +163,23 @@ func (e *Engine) handleResponse(packet []byte, from netip.AddrPort) {
 		return
 	}
 
-	peer.SetEndpoint(from)
+	if learnEndpoint {
+		peer.SetEndpoint(from)
+	}
 	e.router.BindSession(peer, session)
-	e.log.Info("sessiya o'rnatildi (initiator)", "peer", key, "endpoint", from)
+	e.log.Info("sessiya o'rnatildi (initiator)",
+		"peer", key, "via", viaLabel(learnEndpoint), "endpoint", from)
 
 	e.flushQueue(peer)
+}
+
+// viaLabel handshake qaysi yo'l orqali kelganini bildiradi.
+//
+// Relay orqali kelgan paketda `from` bo'sh bo'ladi (endpoint
+// o'rganilmaydi), va logda bo'sh manzil chalkash ko'rinardi.
+func viaLabel(direct bool) string {
+	if direct {
+		return "direct"
+	}
+	return "relay"
 }

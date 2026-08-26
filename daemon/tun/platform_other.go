@@ -15,3 +15,15 @@ func configure(string, Config) error {
 }
 
 func cleanup(string) error { return nil }
+
+func listRoutes(string) ([]netipPrefix, error) {
+	return nil, ErrRoutesNotEnumerable
+}
+
+func addRouteFor(string, netipPrefix) error {
+	return fmt.Errorf("tun: %s qo'llab-quvvatlanmaydi", runtime.GOOS)
+}
+
+func delRouteFor(string, netipPrefix) error {
+	return fmt.Errorf("tun: %s qo'llab-quvvatlanmaydi", runtime.GOOS)
+}

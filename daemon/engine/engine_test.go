@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"io"
 	"log/slog"
+	"net"
 	"net/netip"
 	"strings"
 	"sync"
@@ -14,7 +15,9 @@ import (
 
 	"github.com/freco-dev/cc01/daemon/conn"
 	"github.com/freco-dev/cc01/daemon/noise"
+	"github.com/freco-dev/cc01/daemon/path"
 	"github.com/freco-dev/cc01/daemon/router"
+	pion "github.com/pion/stun/v3"
 )
 
 // node — sinov uchun to'liq jihozlangan mesh a'zosi.
@@ -435,4 +438,374 @@ func (c *logCapture) sawSpoofWarning() bool {
 		}
 	}
 	return false
+}
+
+// STUN javoblari datapath bilan bir xil soketga keladi. Ular
+// bir-birini buzmasligi kerak: STUN paketlari cc01 sifatida
+// parse qilinmasin, cc01 paketlari esa STUN klienti tomonidan
+// yutib yuborilmasin.
+func TestEngine_StunSharesSocketWithDatapath(t *testing.T) {
+	alice := newNode(t, "2a0e:1234:1::/64")
+	bob := newNode(t, "2a0e:1234:2::/64")
+	link(t, alice, bob)
+
+	stunServer := startTestStunServer(t)
+
+	// Avval trafik oqsin — sessiya o'rnatilsin.
+	alice.device.inject(ipv6Packet("2a0e:1234:1::1", "2a0e:1234:2::1", 'a'))
+	expectPacket(t, bob, 5*time.Second)
+
+	// Endi o'sha soketdan STUN so'raymiz.
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	mapped, err := alice.engine.DiscoverPublicEndpoint(ctx, stunServer)
+	if err != nil {
+		t.Fatalf("DiscoverPublicEndpoint: %v", err)
+	}
+
+	// STUN server bizning soketimizning manzilini ko'rishi kerak.
+	if mapped.Port() != alice.bind.Port() {
+		t.Errorf("port %d kutilgan, %d olindi", alice.bind.Port(), mapped.Port())
+	}
+
+	// STUN'dan keyin datapath ishlashda davom etishi kerak.
+	alice.device.inject(ipv6Packet("2a0e:1234:1::1", "2a0e:1234:2::1", 'b'))
+	if got := expectPacket(t, bob, 5*time.Second); got[40] != 'b' {
+		t.Errorf("STUN'dan keyingi paket: %q", got[40])
+	}
+}
+
+// startTestStunServer minimal STUN javob beruvchi ishga tushiradi.
+func startTestStunServer(t *testing.T) netip.AddrPort {
+	t.Helper()
+
+	socket, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv6loopback})
+	if err != nil {
+		t.Fatalf("STUN soketi: %v", err)
+	}
+	t.Cleanup(func() { _ = socket.Close() })
+
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			n, from, err := socket.ReadFromUDPAddrPort(buf)
+			if err != nil {
+				return
+			}
+
+			request := &pion.Message{Raw: append([]byte(nil), buf[:n]...)}
+			if request.Decode() != nil {
+				continue
+			}
+
+			response, err := pion.Build(request, pion.BindingSuccess,
+				&pion.XORMappedAddress{
+					IP:   net.IP(from.Addr().AsSlice()),
+					Port: int(from.Port()),
+				})
+			if err != nil {
+				continue
+			}
+			_, _ = socket.WriteToUDPAddrPort(response.Raw, from)
+		}
+	}()
+
+	return socket.LocalAddr().(*net.UDPAddr).AddrPort()
+}
+
+// ═══════════════ Yo'l tanlash ═══════════════
+
+// Probe javoblari kelgach to'g'ridan-to'g'ri yo'l tasdiqlanishi kerak
+// (ADR-005 dagi "P2P-upgrade" qismi).
+func TestEngine_ConfirmsDirectPathThroughProbes(t *testing.T) {
+	alice := newNode(t, "2a0e:1234:1::/64")
+	bob := newNode(t, "2a0e:1234:2::/64")
+	link(t, alice, bob)
+
+	// Sessiya o'rnatilsin.
+	alice.device.inject(ipv6Packet("2a0e:1234:1::1", "2a0e:1234:2::1", 'x'))
+	expectPacket(t, bob, 5*time.Second)
+
+	// Probe'lar taymer orqali yuboriladi; UpgradeSamples ta javob
+	// kerak.
+	deadline := time.After(15 * time.Second)
+	for {
+		state, rtt, ok := alice.engine.PathState(bob.identity.PublicKey())
+		if ok && state == path.StateDirectActive {
+			if rtt <= 0 {
+				t.Errorf("RTT o'lchanishi kerak edi: %v", rtt)
+			}
+			return
+		}
+
+		select {
+		case <-deadline:
+			t.Fatalf("to'g'ridan-to'g'ri yo'l tasdiqlanmadi: %v", state)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// Disco paketlari TUN'ga chiqmasligi kerak — ular yo'l o'lchash
+// uchun, foydali yuk emas.
+func TestEngine_DiscoPacketsDoNotReachTUN(t *testing.T) {
+	alice := newNode(t, "2a0e:1234:1::/64")
+	bob := newNode(t, "2a0e:1234:2::/64")
+	link(t, alice, bob)
+
+	alice.device.inject(ipv6Packet("2a0e:1234:1::1", "2a0e:1234:2::1", 'x'))
+
+	// Birinchi paket — bizniki.
+	if got := expectPacket(t, bob, 5*time.Second); got[40] != 'x' {
+		t.Fatalf("kutilmagan paket: %q", got[40])
+	}
+
+	// Probe'lar oqib turgan bo'lsa ham TUN'ga boshqa hech narsa
+	// chiqmasligi kerak.
+	select {
+	case packet := <-bob.device.inbound:
+		t.Fatalf("TUN'ga ortiqcha paket chiqdi: %x", packet[:min(48, len(packet))])
+	case <-time.After(2 * time.Second):
+	}
+}
+
+// Yo'l holati `cc01 status` uchun ochiq bo'lishi kerak.
+func TestEngine_ReportsPathState(t *testing.T) {
+	alice := newNode(t, "2a0e:1234:1::/64")
+	bob := newNode(t, "2a0e:1234:2::/64")
+	link(t, alice, bob)
+
+	// Noma'lum peer uchun holat bo'lmasligi kerak.
+	var unknown noise.PublicKey
+	unknown[0] = 0xaa
+	if _, _, ok := alice.engine.PathState(unknown); ok {
+		t.Error("noma'lum peer uchun holat qaytarildi")
+	}
+
+	alice.device.inject(ipv6Packet("2a0e:1234:1::1", "2a0e:1234:2::1", 'x'))
+	expectPacket(t, bob, 5*time.Second)
+
+	if _, _, ok := alice.engine.PathState(bob.identity.PublicKey()); !ok {
+		t.Error("peer uchun holat kutilgan edi")
+	}
+}
+
+// Disco pong AYNAN ping kelgan manzilga qaytishi kerak — "eng yaxshi"
+// yo'lga emas.
+//
+// Bu hole punching'ning sharti. NAT ortidagi peer bizga o'zining
+// public manzilidan yozadi; javobni relay orqali yuborsak, u
+// to'g'ridan-to'g'ri probe'ni TASDIQLAMAYDI va yo'l abadiy `probing`
+// holatida qoladi. Xatoning o'zi ham jim edi: hech qanday xato
+// chiqmasdi, shunchaki yo'l hech qachon ko'tarilmasdi.
+func TestEngine_PongReturnsToProbeSource(t *testing.T) {
+	alice := newNode(t, "2a0e:1234:1::/64")
+	bob := newNode(t, "2a0e:1234:2::/64")
+	link(t, alice, bob)
+
+	// Sessiya kerak: disco shu sessiya kaliti bilan shifrlanadi.
+	alice.device.inject(ipv6Packet("2a0e:1234:1::1", "2a0e:1234:2::1", 'x'))
+	expectPacket(t, bob, 5*time.Second)
+
+	peer, ok := bob.engine.Router().Peer(alice.identity.PublicKey())
+	if !ok {
+		t.Fatal("bob alice'ni ko'rmayapti")
+	}
+	session := peer.Session()
+	if session == nil {
+		t.Fatal("sessiya o'rnatilmagan")
+	}
+
+	// Kuzatuvchi soket — ping "shu yerdan kelgan" bo'ladi. U alice'ning
+	// ro'yxatdagi manzili EMAS, xuddi NAT ortidagi peer kabi.
+	observer, err := conn.Open(0)
+	if err != nil {
+		t.Fatalf("kuzatuvchi soket: %v", err)
+	}
+	defer observer.Close()
+
+	observerAddr := netip.AddrPortFrom(netip.IPv6Loopback(), observer.Port())
+
+	// Bob'ning yo'l kuzatuvchisiga relay qo'yamiz: shundan keyin
+	// `Best()` relayni qaytaradi va eski xatti-harakat pongni o'sha
+	// yoqqa yuborardi.
+	relayAddr := netip.AddrPortFrom(netip.IPv6Loopback(), 9)
+	state := bob.engine.pathFor(peer)
+	state.tracker.SetRelay(relayAddr, time.Now())
+
+	nonce, err := path.NewNonce()
+	if err != nil {
+		t.Fatalf("nonce: %v", err)
+	}
+
+	bob.engine.handleDisco(peer, session, path.EncodeDisco(path.Ping, nonce), observerAddr)
+
+	buf := make([]byte, 2048)
+	n, from, err := observer.ReceiveOne(buf, time.Now().Add(3*time.Second))
+	if err != nil {
+		t.Fatalf("pong kuzatuvchi soketga kelmadi: %v", err)
+	}
+	if n == 0 {
+		t.Fatal("bo'sh pong")
+	}
+
+	// Javob bob'dan kelgan bo'lishi kerak.
+	if from.Port() != bob.bind.Port() {
+		t.Errorf("pong %v dan keldi, bob'ning porti %d", from, bob.bind.Port())
+	}
+
+	// Va u haqiqatan ham o'sha nonce bilan pong bo'lishi kerak.
+	header, err := noise.ParseHeader(buf[:n])
+	if err != nil {
+		t.Fatalf("sarlavha: %v", err)
+	}
+	if header.Type != noise.TypeDisco {
+		t.Fatalf("paket turi %v, disco kutilgan edi", header.Type)
+	}
+}
+
+// Peer ketganda uning yo'l holati va ajratilgan soketi tozalanishi
+// kerak.
+//
+// Peerlarni Control Plane router orqali olib tashlaydi va engine bu
+// haqda xabar olmaydi — shuning uchun u davriy solishtiradi. Har bir
+// ajratilgan soket ochiq deskriptor va goroutine, ya'ni tozalanmasa
+// ular to'planib boraveradi.
+func TestEngine_ReapsStateOfDepartedPeers(t *testing.T) {
+	alice := newNode(t, "2a0e:1234:1::/64")
+	bob := newNode(t, "2a0e:1234:2::/64")
+	link(t, alice, bob)
+
+	alice.device.inject(ipv6Packet("2a0e:1234:1::1", "2a0e:1234:2::1", 'x'))
+	expectPacket(t, bob, 5*time.Second)
+
+	key := bob.identity.PublicKey()
+
+	// Yo'l holati paydo bo'lsin.
+	if _, _, ok := alice.engine.PathState(key); !ok {
+		t.Fatal("yo'l holati yaratilmagan")
+	}
+
+	// Peerga ajratilgan soket ham qo'shamiz — u ham yopilishi kerak.
+	extra, err := conn.Open(0)
+	if err != nil {
+		t.Fatalf("soket: %v", err)
+	}
+	alice.engine.adoptSocket(key, extra)
+
+	if alice.engine.bindFor(key) != extra {
+		t.Fatal("ajratilgan soket ishlatilmayapti")
+	}
+
+	alice.engine.Router().RemovePeer(key)
+
+	deadline := time.After(5 * time.Second)
+	for {
+		_, _, ok := alice.engine.PathState(key)
+		if !ok && alice.engine.bindFor(key) == alice.bind {
+			return // holat tozalandi
+		}
+
+		select {
+		case <-deadline:
+			t.Fatal("ketgan peerning holati tozalanmadi")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+// Ajratilgan soket bo'lmasa asosiy soket ishlatiladi.
+func TestEngine_FallsBackToMainSocket(t *testing.T) {
+	alice := newNode(t, "2a0e:1234:1::/64")
+	bob := newNode(t, "2a0e:1234:2::/64")
+	link(t, alice, bob)
+
+	if got := alice.engine.bindFor(bob.identity.PublicKey()); got != alice.bind {
+		t.Errorf("asosiy soket kutilgan edi, olindi: %v", got)
+	}
+}
+
+// Engine yopilganda ajratilgan soketlar ham yopilishi kerak.
+func TestEngine_CloseReleasesPeerSockets(t *testing.T) {
+	alice := newNode(t, "2a0e:1234:1::/64")
+	bob := newNode(t, "2a0e:1234:2::/64")
+	link(t, alice, bob)
+
+	extra, err := conn.Open(0)
+	if err != nil {
+		t.Fatalf("soket: %v", err)
+	}
+	alice.engine.adoptSocket(bob.identity.PublicKey(), extra)
+
+	if err := alice.engine.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Yopilgan soketga yozish xato berishi kerak.
+	err = extra.Send([]byte("x"), netip.AddrPortFrom(netip.IPv6Loopback(), 9))
+	if err == nil {
+		t.Error("ajratilgan soket ochiq qoldi")
+	}
+}
+
+// Teshik ochish urinishlari orasidagi tanaffus eksponensial o'sishi
+// kerak: birinchi takrorlashlar tez (bir bosqichning ehtimoli ~87%,
+// ya'ni ikki-uch urinishda natija bo'ladi), keyin esa tarmoqni
+// behuda yuklamaslik uchun siyraklashadi.
+func TestCooldownFor_GrowsThenCaps(t *testing.T) {
+	cases := []struct {
+		attempts int
+		want     time.Duration
+	}{
+		{1, 5 * time.Second},
+		{2, 10 * time.Second},
+		{3, 20 * time.Second},
+		{4, 40 * time.Second},
+		{5, 80 * time.Second},
+		{20, punchCooldownMax},
+		{1000, punchCooldownMax},
+	}
+
+	for _, tc := range cases {
+		if got := cooldownFor(tc.attempts); got != tc.want {
+			t.Errorf("cooldownFor(%d) = %v, kutilgan %v", tc.attempts, got, tc.want)
+		}
+	}
+}
+
+// Birinchi urinish darhol bo'lishi kerak — tanaffus faqat
+// muvaffaqiyatsizlikdan KEYIN qo'llaniladi.
+func TestCooldownFor_NeverZero(t *testing.T) {
+	for attempts := range 10 {
+		if got := cooldownFor(attempts); got < punchCooldownMin {
+			t.Errorf("cooldownFor(%d) = %v, minimumdan kichik", attempts, got)
+		}
+	}
+}
+
+// Yopilgandan keyin kelgan g'olib soket qabul qilinmasligi va
+// yopilishi kerak — aks holda uni hech kim yopmasdi.
+//
+// Teshik ochish bosqichi engine yopilishi bilan bir vaqtda tugashi
+// mumkin, ya'ni bu holat tasodifiy emas.
+func TestEngine_RejectsSocketAfterClose(t *testing.T) {
+	alice := newNode(t, "2a0e:1234:1::/64")
+	bob := newNode(t, "2a0e:1234:2::/64")
+	link(t, alice, bob)
+
+	if err := alice.engine.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	late, err := conn.Open(0)
+	if err != nil {
+		t.Fatalf("soket: %v", err)
+	}
+
+	alice.engine.adoptSocket(bob.identity.PublicKey(), late)
+
+	if err := late.Send([]byte("x"), netip.AddrPortFrom(netip.IPv6Loopback(), 9)); err == nil {
+		t.Error("kech kelgan soket ochiq qoldi")
+	}
 }

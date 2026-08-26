@@ -108,16 +108,60 @@ Bu hujjat **maqsadli** arxitekturani tasvirlaydi. Repozitoriyda hozir mavjud kod
 | AP ↔ Edge avtorizatsiyasi (§3.4.3) | `core-server/access/` — gRPC klient, kesh, fail-static | ✅ ishlaydi; mTLS Faza 1 da |
 | Klient daemon `cc01d` + CLI `cc01` | `cli-client/` — 173 qatorli `flag` asosidagi klient | Daemon, IPC, holat mashinasi, buyruq daraxti yo'q |
 | Account Plane (`access-server`) | `access-server/` — auth, OAuth (GitHub/Google), API token, subdomain egaligi, tunnel avtorizatsiyasi | ✅ ishlaydi; billing va usage hisobi Faza 1/3 da |
-| Control Plane (idp/disco/ipam/signal/policy) | — | Butunlay yo'q |
+| Control Plane — `cc01-ipam` | `control/ipam/` — ijara hayot sikli, sticky taqsimlash, karantin | ✅ `Register` da manzil beradi; Raft store keyingi qadam |
+| Control Plane — `cc01-disco` | `control/registry/` + `control/server/` — registri, NetworkMap, delta sync, gRPC stream | ✅ `cc01d` peerlarni avtomatik oladi |
+| Control Plane — idp / policy | — | Hali yo'q |
 | Mesh VPN — kripto qatlami | `daemon/noise/` — Noise IK handshake, sessiya, rekey, replay oynasi | ✅ ishlaydi va sinalgan (UDP orqali ham) |
 | Mesh VPN — TUN qurilmasi | `daemon/tun/` — qurilma, manzil, ajratilgan routing jadvali (51820), policy qoidalari | ✅ Linux'da ICMPv6 aylanishi bilan tasdiqlangan; macOS fallback |
 | Mesh VPN — crypto router | `daemon/router/` — peer registri, `allowed_ips` LPM trie, cryptokey routing | ✅ soxtalashtirishga qarshi testlar bilan |
 | Mesh VPN — UDP transport va datapath | `daemon/conn/`, `daemon/engine/` — batch I/O, handshake, keepalive, rekey | ✅ ikki konteyner o'rtasida shifrlangan `ping6` |
-| Mesh VPN — ICE, hole punching, relay | — | Hali yo'q (Faza 1 davomi) |
-| eBPF/XDP pipeline | — | Butunlay yo'q |
+| Mesh VPN — STUN (`cc01-signal`) | `daemon/stun/` + `control/stunserver/` — public manzilni aniqlash | ✅ NAT ortidan ikki tomonlama ulanish |
+| Mesh VPN — relay (§3.3.2) | `daemon/relay/` — ko'r uzatuvchi, ikki qatlamli shifrlash; CP `relays[]` ni tarqatadi | ✅ symmetric NAT ortidagi nodelar ulanadi |
+| Mesh VPN — yo'l tanlash (§6.2) | `daemon/path/` — holat mashinasi, disco ping/pong, gisterezis | ✅ relay-first, P2P-upgrade |
+| Node autentifikatsiyasi | `daemon/nodecert` + CP bog'lanishi (Raft'da) | ✅ token faqat ro'yxatga olish uchun |
+| Control Plane — Raft klasteri | `control/cluster` — FSM, snapshot, lider tanlash | ✅ failover 0.9–1.0 s; klient liderni o'zi topadi |
+| Control Plane — registry replikatsiyasi | `control/cluster` — node ro'yxati FSM da | ✅ failover'da peerlar saqlanadi |
+| Mesh VPN — CP kanali (§5.1.1) | TLS 1.3 + SPKI pinning (server), node klient sertifikati | ✅ sertifikat almashtirish/bekor qilish ⏳ |
+| Mesh VPN — hole punching (cone NAT) | `daemon/engine` — disco pong AYNAN ping kelgan yo'l bilan qaytadi | ✅ `make punch-demo` |
+| Mesh VPN — hole punching (symmetric NAT) | `daemon/punch` — birthday paradoks, peerga xos soket | ✅ symmetric↔cone; symmetric↔symmetric imkonsiz |
+| Mesh VPN — to'liq ICE nomzod to'plami | — | Hali yo'q (`host`/`srflx` bor, `prflx` yo'q) |
+| eBPF/XDP pipeline | `daemon/xdp` — blocklist, tezlik cheklovi, avtomatik blok, hodisalar, AF_XDP redirect | ✅ SYN cookie ❌ (mustaqil ishlamaydi) |
+| Zero-trust policy (eBPF) | `daemon/tcpolicy` — ingress+egress, hukm keshi, MSS clamp, DSCP | ✅ |
+| Policy boshqaruvi | `cc01 firewall` + CP dan tarqatish (`control/policy`) | ✅ AP dan boshqarish ⏳ |
+| Mikrosegmentatsiya (tag) | `tag:web` → node manzillari; registry versiyasiga bog'langan | ✅ lateral movement bloklanadi |
+| Tunneling — SNI router + TLS | `core-server/tlsmgr` — SNI bo'yicha sertifikat, ACME | ✅ `make tunnel-demo`; wildcard fayldan (DNS-01) |
+| Tunneling — traffic inspector | `cli-client/inspect` — HTTP kuzatuvi, jonli oqim | ✅ faqat loopback |
 | Public IPv6 / BGP / TasIX PoP | — | Butunlay yo'q |
 
-**Xulosa:** tokenli, egalik qilingan subdomain bilan HTTP tunnel uchidan uchiga ishlaydi — bu §3.3 (Edge), §3.4 (Account Plane) va §4.4 (Tunneling) ning ibtidoiy, lekin **butun** kesimi. Mesh va eBPF qatlamlari (§3.2, §5) hali boshlanmagan. Amaliy ketma-ketlik `DEV_SPEC.md` §8 (Roadmap) da.
+> **Registry ham Raft orqali ketadi.** FSM uchta narsani
+> replikatsiya qiladi: IPAM ijaralari, node↔sertifikat bog'lanishi
+> va node ro'yxati (`control/cluster/fsm.go`). Node ro'yxatini
+> o'zgartirish faqat `registry.Apply` orqali — buyruq protobuf
+> shaklida jurnalga yoziladi, vaqt va TTL esa LIDER tomonida hal
+> qilinadi va buyruqqa yoziladi. Aks holda har bir replika o'z
+> soatini o'qib, boshqa `ExpiresAt` yozardi.
+>
+> ⚠️ Muddat tekshiruvi chiqariladigan nodelarni SARALAYDI. Go'da
+> map bo'ylab yurish tartibi tasodifiy, o'zgarishlar jurnali esa
+> har yozuvda versiyani oshiradi — saralamasak, bir xil versiya
+> har replikada boshqa nodega tegib qolardi. Buni yakuniy holatni
+> solishtirib topib bo'lmaydi (u baribir bir xil); ajralish faqat
+> klientning `since` versiyasi partiya o'rtasiga tushganda
+> ko'rinadi. `TestFSM_RegistryIsDeterministic` aynan shuni
+> tekshiradi.
+>
+> Relaylar esa REPLIKATSIYA QILINMAYDI: har bir CP o'zining ichki
+> relay'ini e'lon qiladi va ularni jurnalga yozsak, replikalar
+> bir-birining manzilini almashtirib turardi.
+
+**Xulosa:** overlay mesh (§3.2) va eBPF xavfsizlik qatlami (§5) ishlaydi:
+ikki node NAT ortidan ham to'g'ridan-to'g'ri shifrlangan kanal quradi,
+Control Plane Raft klasteri sifatida ishlaydi, trafik esa XDP da
+filtrlanadi va TC da deny-by-default siyosati bilan tekshiriladi.
+Tunneling (§4.4) hozircha ibtidoiy: tokenli, egalik qilingan subdomain
+bilan HTTP tunnel uchidan uchiga ishlaydi. Public IPv6, BGP va TasIX
+PoP (§3.5) hali boshlanmagan. Amaliy ketma-ketlik `DEV_SPEC.md` §8
+(Roadmap) da.
 
 ---
 
@@ -311,7 +355,62 @@ Prefiks **anchor** PoP bilan bog'lanadi: `tas1` PoP shu `/48`ni BGP orqali e'lon
 - **ICE candidate exchange** — CP'dagi gRPC stream orqali (SDP emas, o'zimizning kompakt protobuf).
 - **Endpoint discovery:** klient o'z nomzodlarini yig'adi: `host` (LAN IP), `srflx` (STUN orqali topilgan public), `relay` (TURN/DERP), `overlay` (mavjud IPv6 GUA).
 - **NAT type detection:** Full Cone / Restricted / Port-Restricted / Symmetric — birlashtirilgan STUN testlari orqali; natija cache'lanadi (10 min).
-- **Birthday-paradox punching:** symmetric NAT'da 256 ta portga parallel probe (~50% muvaffaqiyat), muvaffaqiyatsiz bo'lsa relay.
+- **Birthday-paradox punching:** ✅ `daemon/punch` — `make punch-sym-demo`.
+
+  Ikkita yarim, ikkalasi ham kerak. **Sepish:** N ta *vaqtinchalik*
+  soketdan peerning ma'lum manziliga yoziladi — har biri NAT'da alohida
+  yozuv ochadi. **Taxmin:** peerning IP'sida K ta tasodifiy portga
+  *asosiy* soketdan yoziladi.
+
+  ⚠️ Taxminlar aynan **asosiy** soketdan chiqishi shart. Peerning yozuvi
+  u bizga qaysi manzilga yozgan bo'lsa faqat o'shandan paket qabul
+  qiladi — bu esa STUN e'lon qilgan manzilimiz. Vaqtinchalik soketdan
+  yuborilgan taxmin boshqa tashqi portdan chiqadi va baribir rad
+  etiladi.
+
+  Bir bosqichning ehtimoli `1-exp(-N·K/64511)`; N=256, K=512 da ~87%.
+  Muvaffaqiyatsizlikdan keyingi tanaffus eksponensial o'sadi
+  (5 s → 5 min), chunki relay allaqachon ishlab turibdi.
+
+  G'olib soket peer bilan aloqani davom ettiradi: yo'l aynan o'sha NAT
+  yozuvi orqali ochilgan va boshqa soketdan yuborilgan paket boshqa
+  tashqi portdan chiqib rad etilardi. Shuning uchun engine peerga xos
+  soketni saqlaydi.
+
+| NAT juftligi | Natija |
+| --- | --- |
+| cone ↔ cone | oddiy teshik ochish — `make punch-demo` |
+| symmetric ↔ cone | birthday punching — `make punch-sym-demo` |
+| symmetric ↔ symmetric | **imkonsiz**, relay — `make relay-demo` |
+
+Oxirgi qator nega imkonsiz: taxmin qiluvchining o'z tashqi porti ham
+har oqimda o'zgaradi, ya'ni peerning yozuvi (u faqat bizning ma'lum
+manzilimizdan qabul qiladi) uni baribir rad etadi.
+
+**Teshik ochishning amaliy sharti** (`make punch-demo` da o'lchangan): disco
+**pong AYNAN ping kelgan manzilga** qaytishi kerak, "eng yaxshi" yo'lga emas.
+Aks holda relay orqali ketgan javob to'g'ridan-to'g'ri probe'ni tasdiqlamaydi
+va yo'l abadiy `probing` holatida qoladi — hech qanday xato chiqmasdan.
+
+**Cone va symmetric farqi o'lchangan.** Ikkala holat ham alohida demo
+bilan qoplangan:
+
+| NAT turi | Simulyatsiya | Natija |
+| --- | --- | --- |
+| Cone (endpoint-independent) | `MASQUERADE` | `direct-active`, ~400 ms — `make punch-demo` |
+| Symmetric (endpoint-dependent) | `MASQUERADE --random` | relayda qoladi — `make relay-demo` |
+
+`--random` bilan har bir oqim tasodifiy tashqi port oladi. Bitta node
+uchun o'lchangan: STUN → `57174`, relay → `19530`, peer → `5275`. STUN
+aytgan manzil faqat STUN oqimi uchun to'g'ri bo'lib qoladi.
+
+⚠️ **O'lchov paytidagi tuzoq.** Kutilmagan kiruvchi paket shlyuzda
+conntrack yozuvi hosil qilsa, o'sha yozuv keyin ichkaridan chiqadigan
+oqimga port tanlashga aralashadi va oddiy `MASQUERADE` ham symmetric
+kabi ko'rinib qoladi. Haqiqiy NAT bunday paketni mapping jadvaliga
+kiritmaydi, shuning uchun ikkala demo ham uni conntrack tasdiqlashidan
+oldin tashlaydi. Busiz o'lchov NAT'ning xatti-harakatini emas, shu
+nojo'ya ta'sirni ko'rsatadi.
 
 #### 3.1.5 `cc01-policy` — Zero-Trust Policy Engine
 
@@ -423,7 +522,12 @@ Paket formati (WireGuard-mos, kengaytmalar bilan):
 
  type: 0x01 handshake_init  0x02 handshake_resp  0x03 cookie
        0x04 data            0x05 keepalive       0x06 relay_wrap
+       0x07 disco
 ```
+
+> `0x07 disco` — yo'l sifatini o'lchash uchun ping/pong (§6.3).
+> Dastlabki ro'yxatga keyin qo'shilgan: keepalive javob kutmaydi,
+> ya'ni kechikishni o'lchash uchun yaroqsiz.
 
 `0x06 relay_wrap` — relay uchun tashqi konvert: `{dst_node_id (32B), inner_packet}`. Relay faqat `dst_node_id`ni ko'radi, ichkarisini deshifrlay olmaydi.
 
@@ -450,7 +554,7 @@ Har bir PoP quyidagi rollarni bajaradi:
                                        ▼
                         ┌──────────────────────────────────┐
                         │  Stage 1: XDP Scrubber           │
-                        │  · SYN cookie · rate limit       │
+                        │  · rate limit · SYN cookie (❌)   │
                         │  · blocklist · protocol sanity   │
                         └──────────────┬───────────────────┘
                           ┌────────────┼─────────────┐
@@ -809,7 +913,7 @@ Underlay MTU (Ethernet)          : 1500
 | **T**ampering | Tranzitda paket o'zgartirilishi | ChaCha20-Poly1305 AEAD, auth tag tekshiruvi |
 | **R**epudiation | Node harakatni inkor etadi | Append-only audit log, node cert bilan imzolangan control amallari |
 | **I**nfo disclosure | Relay/edge trafikni o'qiydi | E2E shifrlash; TLS passthrough rejimi; relay faqat `node_id` ko'radi |
-| **D**oS | Volumetric flood, SYN flood, handshake flood | XDP scrubber, SYN cookie, cookie-based handshake rate limit (WG MAC2) |
+| **D**oS | Volumetric flood, SYN flood, handshake flood | XDP scrubber (rate limit + blocklist + amplification filter), cookie-based handshake rate limit (WG MAC2). **SYN flood hozircha qoplanmagan** — SYN cookie XDP dan ishlamaydi, SYNPROXY kerak |
 | **E**levation | Kompromis qilingan node butun tarmoqqa kiradi | Zero-Trust ACL, mikrosegmentatsiya, qisqa TTL sertifikat, device posture |
 | **S**poofing (hisob) | Begona subdomainni egallash, o'g'irlangan token | AP'da subdomain egaligi majburiy; token faqat hash holida saqlanadi, bekor qilish darhol kuchga kiradi |
 | **E**levation (hisob) | Tarif kvotasini chetlab o'tish | Kvota edge'da majburlanadi (AP faqat qiymatni beradi); usage hisoboti bilan post-hoc tekshiruv |
@@ -844,8 +948,8 @@ Underlay MTU (Ethernet)          : 1500
    │   · token bucket per src /64 (pps + bps)                          │
    │   · limit oshsa → XDP_DROP + ringbuf event (auto-blocklist)       │
    ├───────────────────────────────────────────────────────────────────┤
-   │ Stage 3: ANTI-DDoS         map: cc01_synstate                     │
-   │   · TCP SYN → SYN cookie generatsiya (stateless)                  │
+   │ Stage 3: ANTI-DDoS                                                │
+   │   · TCP SYN → SYN cookie (❌ QURILMAGAN, quyiga qarang)            │
    │   · UDP amplification portlari (53,123,1900,11211) → filter       │
    │   · fragment flood → reassembly limit                             │
    ├───────────────────────────────────────────────────────────────────┤
@@ -864,6 +968,17 @@ Underlay MTU (Ethernet)          : 1500
    XDP_DROP     XDP_PASS      XDP_REDIRECT     XDP_TX      XDP_ABORTED
    (0 alloc,    (normal       (AF_XDP zero-    (reflect,   (bug →
     counter++)   stack)        copy → cc01d)    relay TX)   alert)
+
+> **SYN cookie nega qurilmagan.** XDP dan cookie'li SYN-ACK yuborish
+> mumkin, lekin qaytgan ACK ni yadro qabul qilmaydi: `cookie_v6_check`
+> `tcp_synq_no_recent_overflow(sk)` ga bog'liq, ya'ni yadro faqat
+> O'ZI chiqargan cookie'ni tan oladi. Amalda klient SYN-ACK'ni qabul
+> qilib ACK yuboradi, server esa RST bilan javob beradi —
+> `SyncookiesRecv=0` va `SyncookiesFailed=0`, ya'ni hisoblagichgacha
+> ham yetmaydi. Yana bir cheklov: veth `XDP_TX` ni faqat juftida
+> native XDP bo'lsa uzatadi. To'g'ri yechim — netfilter `SYNPROXY`
+> (u handshake'ni yadro nomidan yakunlaydi). Shu sababli Stage 3 da
+> faqat amplification filtri va tezlik cheklovi ishlaydi.
 
                     ╔═══════════════════════════════════════════╗
    TUN (cc0)  ───►  ║  TC INGRESS / EGRESS (clsact)              ║
