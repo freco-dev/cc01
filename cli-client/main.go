@@ -153,14 +153,12 @@ func serveTunnel(control net.Conn, serverHost, localAddr string, privatePort uin
 			return fmt.Errorf("hodisani o'qish: %w", err)
 		}
 
-		received := frame.GetConnectionReceived()
-		if received == nil {
-			// Kelajakdagi freym turlari eski klientni yiqitmasligi kerak.
-			continue
+		act, err := handleFrame(frame)
+		if err != nil {
+			// Ko'priklarni kutmaymiz: ularni edge o'zi yopadi.
+			return err
 		}
-
-		if received.GetRateLimited() {
-			log.Printf("ulanish rad etildi (limit): %s", net.IP(received.GetClientIp()))
+		if !act.bridge {
 			continue
 		}
 
@@ -170,8 +168,55 @@ func serveTunnel(control net.Conn, serverHost, localAddr string, privatePort uin
 			if err := bridgeConnection(serverHost, privatePort, localAddr, clientPort); err != nil {
 				log.Printf("ulanishni ko'prikda bog'lash muvaffaqiyatsiz: %v", err)
 			}
-		}(uint16(received.GetClientPort()))
+		}(act.clientPort)
 	}
+}
+
+// action — tunnel ochilgandan keyin kelgan bitta freymga javob.
+// Nol qiymat — freym e'tiborsiz qoldiriladi.
+type action struct {
+	// bridge — `clientPort` uchun ko'prik ochish kerak.
+	bridge     bool
+	clientPort uint16
+}
+
+// tunnelClosedError — server tunnelni ochilgandan KEYIN yopdi
+// (masalan TOKEN_REVOKED, PLAN_SUSPENDED). Kod mashina uchun,
+// xabar odam uchun.
+type tunnelClosedError struct {
+	Code string
+	Msg  string
+}
+
+func (e *tunnelClosedError) Error() string {
+	return fmt.Sprintf("tunnel yopildi: %s: %s", e.Code, e.Msg)
+}
+
+// handleFrame tunnel ochilgandan keyingi bitta freymni izohlaydi.
+//
+// `error_message` to'ldirilgan TunnelOpened — yopilish xabari:
+// `*tunnelClosedError` qaytariladi. Noma'lum freymlar (va xatosiz
+// TunnelOpened) e'tiborsiz qoldiriladi — kelajakdagi freym turlari
+// eski klientni yiqitmasligi kerak.
+func handleFrame(frame *cc01v1.Frame) (action, error) {
+	if opened := frame.GetTunnelOpened(); opened != nil && opened.GetErrorMessage() != "" {
+		return action{}, &tunnelClosedError{
+			Code: opened.GetErrorCode(),
+			Msg:  opened.GetErrorMessage(),
+		}
+	}
+
+	received := frame.GetConnectionReceived()
+	if received == nil {
+		return action{}, nil
+	}
+
+	if received.GetRateLimited() {
+		log.Printf("ulanish rad etildi (limit): %s", net.IP(received.GetClientIp()))
+		return action{}, nil
+	}
+
+	return action{bridge: true, clientPort: uint16(received.GetClientPort())}, nil
 }
 
 func bridgeConnection(serverHost string, privatePort uint16, localAddr string, clientPort uint16) error {
