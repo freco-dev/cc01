@@ -45,6 +45,11 @@ public sealed class AccessApiFactory(
         // Startup paytida o'qiladigan sozlamalar (qaysi OAuth sxemasi
         // ro'yxatga olinishi) u yerdan ko'rinmaydi — shuning uchun ular
         // qo'shimcha ravishda UseSetting orqali ham beriladi.
+        // Ulanish satri ham Program.cs tanasida o'qiladi. UseSetting'siz u
+        // appsettings.Development.json dagi dev bazaga (cc01_access) ulanib
+        // qolardi — testlar fixture bazasini emas, dev bazani ishlatardi.
+        builder.UseSetting("ConnectionStrings:Access", connectionString);
+
         foreach (var (key, value) in extraConfiguration ?? new Dictionary<string, string?>())
         {
             builder.UseSetting(key, value);

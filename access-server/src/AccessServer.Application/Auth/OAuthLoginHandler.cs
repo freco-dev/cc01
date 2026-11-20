@@ -1,5 +1,6 @@
 using AccessServer.Application.Abstractions;
 using AccessServer.Application.Common;
+using AccessServer.Application.Plans;
 using AccessServer.Domain.Entities;
 using AccessServer.Domain.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -80,8 +81,15 @@ public sealed class OAuthLoginHandler(
         {
             Slug = TenantSlug.Generate(),
             Name = fullName,
-            Plan = PlanCode.Free,
             Status = TenantStatus.Active,
+
+            // Ro'yxatdan o'tish bilan bir xil: aktiv Free obuna, bitta SaveChanges.
+            Subscription = new Subscription
+            {
+                Plan = await db.GetFreePlanAsync(cancellationToken),
+                Status = SubscriptionStatus.Active,
+                PeriodStart = now,
+            },
         };
 
         var user = new User
@@ -107,6 +115,15 @@ public sealed class OAuthLoginHandler(
         {
             // Tekshiruv bilan yozish orasida boshqa so'rov shu emailni
             // yozib ulgurgan. Qayta o'qib, bog'lab yuboramiz.
+            //
+            // EF muvaffaqiyatsiz SaveChanges'dan keyin holatlarni tiklamaydi:
+            // tenant, obuna va user hali ham `Added`. Ajratilmasa keyingi
+            // SaveChanges ularni QAYTA qo'shishga urinadi, yana unique
+            // indeksga uriladi va bu tiklanish yo'li hech qachon ishlamaydi.
+            db.Users.Entry(user).State = EntityState.Detached;
+            db.Subscriptions.Entry(tenant.Subscription).State = EntityState.Detached;
+            db.Tenants.Entry(tenant).State = EntityState.Detached;
+
             var raced = await db.Users
                 .Include(u => u.Tenant)
                 .SingleOrDefaultAsync(u => u.Email == email, cancellationToken);

@@ -1,4 +1,4 @@
-using AccessServer.Application.Subdomains;
+using AccessServer.Application.Plans;
 using AccessServer.Domain.Enums;
 
 namespace AccessServer.Application.Tunnels;

@@ -1,5 +1,6 @@
 using AccessServer.Application.Abstractions;
 using AccessServer.Application.Common;
+using AccessServer.Application.Plans;
 using AccessServer.Application.Validation;
 using AccessServer.Domain.Entities;
 using AccessServer.Domain.Enums;
@@ -11,7 +12,7 @@ public sealed record ReserveSubdomainCommand(int TenantId, string Name);
 
 public sealed record ReserveSubdomainResult(int Id, string Name, SubdomainStatus Status);
 
-public sealed class ReserveSubdomainHandler(IAccessDbContext db)
+public sealed class ReserveSubdomainHandler(IAccessDbContext db, EffectivePlanResolver planResolver)
 {
     public async Task<Result<ReserveSubdomainResult>> HandleAsync(
         ReserveSubdomainCommand command,
@@ -35,21 +36,36 @@ public sealed class ReserveSubdomainHandler(IAccessDbContext db)
             return SubdomainErrors.NotFound;
         }
 
+        var limits = (await planResolver.ResolveAsync(tenant.Id, cancellationToken)).Limits;
+
         var existing = await db.Subdomains
             .SingleOrDefaultAsync(s => s.Name == name, cancellationToken);
 
         if (existing is not null)
         {
-            // O'ziniki bo'lsa — idempotent muvaffaqiyat, begona bo'lsa — konflikt.
-            return existing.TenantId == command.TenantId
-                ? new ReserveSubdomainResult(existing.Id, existing.Name, existing.Status)
-                : SubdomainErrors.Taken;
+            if (existing.TenantId != command.TenantId)
+            {
+                return SubdomainErrors.Taken;
+            }
+
+            // O'ziniki va band — idempotent muvaffaqiyat.
+            if (existing.Status != SubdomainStatus.Released)
+            {
+                return new ReserveSubdomainResult(existing.Id, existing.Name, existing.Status);
+            }
+
+            // O'zi bo'shatgan nom — kvota ichida qaytarib olinadi (tunnel
+            // ochilishi bilan bir xil qoida, qarang SubdomainQuota).
+            if (!await db.Subdomains.TryReclaimAsync(existing, limits.MaxSubdomains, cancellationToken))
+            {
+                return SubdomainErrors.QuotaExceeded;
+            }
+
+            await db.SaveChangesAsync(cancellationToken);
+            return new ReserveSubdomainResult(existing.Id, existing.Name, existing.Status);
         }
 
-        var limits = PlanCatalog.For(tenant.Plan);
-        var owned = await db.Subdomains
-            .CountAsync(s => s.TenantId == command.TenantId
-                             && s.Status != SubdomainStatus.Released, cancellationToken);
+        var owned = await db.Subdomains.CountOwnedAsync(command.TenantId, cancellationToken);
 
         if (owned >= limits.MaxSubdomains)
         {

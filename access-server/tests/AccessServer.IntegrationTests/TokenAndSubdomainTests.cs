@@ -1,6 +1,8 @@
 using AccessServer.Application.Auth;
 using AccessServer.Application.Subdomains;
 using AccessServer.Application.Tokens;
+using AccessServer.Application.Plans;
+using AccessServer.Domain.Enums;
 using AccessServer.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -175,6 +177,28 @@ public sealed class TokenAndSubdomainTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task Pro_plan_allows_more_subdomains()
+    {
+        await using var scope = fixture.CreateScope();
+        var (_, tenantId) = await CreateVerifiedUserAsync(scope);
+
+        var db = scope.ServiceProvider.GetRequiredService<AccessDbContext>();
+        var slug = await db.Tenants.Where(t => t.Id == tenantId).Select(t => t.Slug).SingleAsync();
+        var changed = await scope.ServiceProvider.GetRequiredService<ChangePlanHandler>()
+            .HandleAsync(new ChangePlanCommand(slug, "pro", null, "test", null, null));
+        Assert.True(changed.IsSuccess);
+
+        var reserve = scope.ServiceProvider.GetRequiredService<ReserveSubdomainHandler>();
+
+        for (var i = 0; i < 3; i++)
+        {
+            var result = await reserve.HandleAsync(new ReserveSubdomainCommand(
+                tenantId, "app" + Guid.NewGuid().ToString("n")[..10]));
+            Assert.True(result.IsSuccess);
+        }
+    }
+
+    [Fact]
     public async Task Released_subdomain_frees_quota_but_keeps_record()
     {
         await using var scope = fixture.CreateScope();
@@ -196,5 +220,50 @@ public sealed class TokenAndSubdomainTests(PostgresFixture fixture)
         var second = await reserve.HandleAsync(new ReserveSubdomainCommand(
             tenantId, "app" + Guid.NewGuid().ToString("n")[..10]));
         Assert.True(second.IsSuccess);
+    }
+
+    [Fact]
+    public async Task Reserving_own_released_name_reclaims_it()
+    {
+        await using var scope = fixture.CreateScope();
+        var (_, tenantId) = await CreateVerifiedUserAsync(scope);
+        var reserve = scope.ServiceProvider.GetRequiredService<ReserveSubdomainHandler>();
+        var name = "app" + Guid.NewGuid().ToString("n")[..10];
+
+        var first = await reserve.HandleAsync(new ReserveSubdomainCommand(tenantId, name));
+        await scope.ServiceProvider.GetRequiredService<ReleaseSubdomainHandler>()
+            .HandleAsync(new ReleaseSubdomainCommand(tenantId, first.Value.Id));
+
+        // Avval bu "idempotent muvaffaqiyat" qaytarib, qatorni `Released`
+        // holida qoldirardi — nomni hech qachon qaytarib bo'lmasdi.
+        var again = await reserve.HandleAsync(new ReserveSubdomainCommand(tenantId, name));
+
+        Assert.True(again.IsSuccess);
+        Assert.Equal(first.Value.Id, again.Value.Id);
+        Assert.Equal(SubdomainStatus.Reserved, again.Value.Status);
+
+        var db = scope.ServiceProvider.GetRequiredService<AccessDbContext>();
+        Assert.Equal(SubdomainStatus.Reserved,
+            await db.Subdomains.AsNoTracking().Where(s => s.Id == first.Value.Id).Select(s => s.Status).SingleAsync());
+    }
+
+    [Fact]
+    public async Task Reserving_own_released_name_counts_quota()
+    {
+        await using var scope = fixture.CreateScope();
+        var (_, tenantId) = await CreateVerifiedUserAsync(scope);
+        var reserve = scope.ServiceProvider.GetRequiredService<ReserveSubdomainHandler>();
+        var name = "app" + Guid.NewGuid().ToString("n")[..10];
+
+        var first = await reserve.HandleAsync(new ReserveSubdomainCommand(tenantId, name));
+        await scope.ServiceProvider.GetRequiredService<ReleaseSubdomainHandler>()
+            .HandleAsync(new ReleaseSubdomainCommand(tenantId, first.Value.Id));
+        Assert.True((await reserve.HandleAsync(new ReserveSubdomainCommand(
+            tenantId, "app" + Guid.NewGuid().ToString("n")[..10]))).IsSuccess);
+
+        // Free: 1 nom, u allaqachon band.
+        var again = await reserve.HandleAsync(new ReserveSubdomainCommand(tenantId, name));
+
+        Assert.Equal(SubdomainErrors.QuotaExceeded.Code, again.Error!.Code);
     }
 }

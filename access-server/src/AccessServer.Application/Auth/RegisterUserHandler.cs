@@ -1,6 +1,7 @@
 using System.Net.Mail;
 using AccessServer.Application.Abstractions;
 using AccessServer.Application.Common;
+using AccessServer.Application.Plans;
 using AccessServer.Domain.Entities;
 using AccessServer.Domain.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -59,8 +60,16 @@ public sealed class RegisterUserHandler(
         {
             Slug = TenantSlug.Generate(),
             Name = fullName,
-            Plan = PlanCode.Free,
             Status = TenantStatus.Active,
+
+            // Har bir yangi tenant aktiv Free obuna bilan boshlanadi — xuddi
+            // shu SaveChanges ichida, yarim yaratilgan tenant qolmaydi.
+            Subscription = new Subscription
+            {
+                Plan = await db.GetFreePlanAsync(cancellationToken),
+                Status = SubscriptionStatus.Active,
+                PeriodStart = now,
+            },
         };
 
         var user = new User

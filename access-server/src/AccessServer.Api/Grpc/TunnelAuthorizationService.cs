@@ -1,3 +1,4 @@
+using AccessServer.Application.Plans;
 using AccessServer.Application.Tunnels;
 using Cc01.V1;
 using Grpc.Core;
@@ -7,7 +8,7 @@ namespace AccessServer.Api.Grpc;
 /// <summary>
 /// AP ↔ Edge ichki kontrakti (proto/cc01/v1/access.proto).
 ///
-/// Bu servis FAQAT ichki portda ochiladi (Program.cs dagi RequireHost) —
+/// Bu servis FAQAT ichki portda ochiladi (Program.cs dagi RequireInternalListener) —
 /// internetdan erishib bo'lmaydi. DEV_SPEC §6.4.
 /// </summary>
 public sealed class TunnelAuthorizationService(
@@ -25,17 +26,20 @@ public sealed class TunnelAuthorizationService(
                 request.Subdomain,
                 request.CustomDomain,
                 request.CliVersion,
-                request.ClientIp),
+                request.ClientIp,
+                request.Renewal),
             context.CancellationToken);
 
         if (!result.IsSuccess)
         {
             var denial = ToDenialCode(result.Error!.Code);
 
-            // To'liq token HECH QACHON log'ga yozilmaydi (§6.3).
+            // To'liq token HECH QACHON log'ga yozilmaydi (§6.3). Yangilanish
+            // rad etilsa edge ochiq tunnelni yopishi mumkin — shuning uchun
+            // renewal belgisi log'da ko'rinadi.
             logger.LogInformation(
-                "Tunnel rad etildi: {Denial} (subdomain={Subdomain}, ip={ClientIp})",
-                denial, request.Subdomain, request.ClientIp);
+                "Tunnel rad etildi: {Denial} (subdomain={Subdomain}, ip={ClientIp}, renewal={Renewal})",
+                denial, request.Subdomain, request.ClientIp, request.Renewal);
 
             return new AuthorizeTunnelResponse
             {
@@ -49,13 +53,21 @@ public sealed class TunnelAuthorizationService(
 
         var grant = result.Value;
 
+        if (request.Renewal)
+        {
+            // Har ochiq tunnel uchun ≤30 sekundda bir — Information'da shovqin bo'lardi.
+            logger.LogDebug(
+                "Lease yangilandi: {Subdomain} (tenant={Tenant}, plan={Plan}, renewal=true)",
+                grant.Subdomain, grant.TenantSlug, grant.Plan);
+        }
+
         return new AuthorizeTunnelResponse
         {
             Grant = new Grant
             {
                 UserId = grant.UserId,
                 TenantId = grant.TenantSlug,
-                Plan = grant.Plan.ToString().ToLowerInvariant(),
+                Plan = PlanCodeParser.ToWire(grant.Plan),
                 Subdomain = grant.Subdomain,
                 LeaseTtlS = (uint)grant.LeaseTtlSeconds,
                 Limits = new Limits

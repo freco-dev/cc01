@@ -1,7 +1,9 @@
+using AccessServer.Application.Abstractions;
 using AccessServer.Application.Auth;
 using AccessServer.Domain.Enums;
 using AccessServer.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
@@ -210,5 +212,81 @@ public sealed class OAuthLoginTests(PostgresFixture fixture)
         var user = await db.Users.SingleAsync(u => u.Email == email);
 
         Assert.Equal(email[..email.IndexOf('@', StringComparison.Ordinal)], user.FullName);
+    }
+
+    /// <summary>
+    /// Ikki parallel birinchi kirish (ikki tab, ikki marta bosish). Raqib
+    /// so'rov tekshiruvdan KEYIN, SaveChanges'dan OLDIN yozadi — interceptor
+    /// bu tartibni aniq majburlaydi. Yutqazgan so'rov raqib yaratgan hisobga
+    /// bog'lanib kirishi kerak, 500 emas.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]  // bir xil Google hisobi ikki marta
+    [InlineData(false)] // boshqa provayder, o'sha email
+    public async Task Concurrent_first_login_with_same_email_links_to_the_winner(bool sameIdentity)
+    {
+        var email = UniqueEmail();
+        var providerId = UniqueProviderId();
+        var racerProvider = sameIdentity ? OAuthProvider.Google : OAuthProvider.Github;
+        var racerId = sameIdentity ? providerId : UniqueProviderId();
+
+        string? racerSlug = null;
+        var race = new RaceBeforeFirstSave(async () =>
+        {
+            await using var racerScope = fixture.CreateScope();
+            var racer = await racerScope.ServiceProvider.GetRequiredService<OAuthLoginHandler>()
+                .HandleAsync(new OAuthLoginCommand(racerProvider, racerId, email, true, "Raqib"));
+            Assert.True(racer.IsSuccess);
+            racerSlug = racer.Value.TenantSlug;
+        });
+
+        var options = new DbContextOptionsBuilder<AccessDbContext>()
+            .UseNpgsql(fixture.ConnectionString)
+            .UseSnakeCaseNamingConvention()
+            .AddInterceptors(race)
+            .Options;
+
+        await using var scope = fixture.CreateScope();
+        await using var db = new AccessDbContext(options, TimeProvider.System);
+        var handler = new OAuthLoginHandler(
+            db, scope.ServiceProvider.GetRequiredService<IAccessTokenIssuer>(), TimeProvider.System);
+
+        var result = await handler.HandleAsync(new OAuthLoginCommand(
+            OAuthProvider.Google, providerId, email, EmailVerified: true, "Aziz"));
+
+        Assert.True(race.Fired);
+        Assert.True(result.IsSuccess, result.Error?.Code);
+        Assert.Equal(racerSlug, result.Value.TenantSlug);
+
+        await using var check = PostgresFixture.CreateContext(fixture.ConnectionString);
+        var user = await check.Users.Include(u => u.Tenant).SingleAsync(u => u.Email == email);
+        Assert.Equal(providerId, user.GoogleId);
+        Assert.Equal(racerSlug, user.Tenant.Slug);
+        if (!sameIdentity)
+        {
+            Assert.Equal(racerId, user.GithubId);
+        }
+
+        Assert.Equal(1, await check.Subscriptions.CountAsync(s => s.TenantId == user.TenantId));
+    }
+
+    /// <summary>Birinchi SaveChanges'dan oldin bir marta raqib yozuvini bajaradi.</summary>
+    private sealed class RaceBeforeFirstSave(Func<Task> racer) : SaveChangesInterceptor
+    {
+        public bool Fired { get; private set; }
+
+        public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (!Fired)
+            {
+                Fired = true;
+                await racer();
+            }
+
+            return result;
+        }
     }
 }

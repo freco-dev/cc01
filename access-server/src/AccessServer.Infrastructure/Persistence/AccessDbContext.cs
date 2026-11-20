@@ -24,6 +24,12 @@ public sealed class AccessDbContext : DbContext, IAccessDbContext
 
     public DbSet<UserVerificationToken> UserVerificationTokens => Set<UserVerificationToken>();
 
+    public DbSet<Plan> Plans => Set<Plan>();
+
+    public DbSet<Subscription> Subscriptions => Set<Subscription>();
+
+    public DbSet<AuditEvent> AuditEvents => Set<AuditEvent>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(AccessDbContext).Assembly);
