@@ -27,6 +27,51 @@ subdomain egaligi tekshirilmaydi. Faqat lokal ishlab chiqish uchun — server
 ishga tushganda ogohlantirish chiqaradi.
 
 `CC01_AUTH_MODE=required` (yoki bo'sh) + `CC01_ACCESS_ADDR` — standart holat.
+`CC01_ACCESS_ADDR` `host:port` ko'rinishida bo'lishi shart (port majburiy).
+
+### Edge ↔ access-server kanali: mTLS (`DEV_SPEC` S-11, A-S5)
+
+| O'zgaruvchi | Vazifa |
+| --- | --- |
+| `CC01_ACCESS_TLS_CA` | PEM to'plami — AP server sertifikatini tekshiradigan **yagona** ildizlar. Tizim ildizlari hech qachon ishlatilmaydi |
+| `CC01_ACCESS_TLS_CERT` | Edge klient sertifikati (PEM, ECDSA P-256 yoki RSA). Subject CN — edge identifikatori (AP allowlist'ida bo'lishi shart), `clientAuth` EKU majburiy. Oraliq CA bo'lsa zanjir shu faylga qo'shiladi |
+| `CC01_ACCESS_TLS_KEY` | Klient sertifikati kaliti (PEM: PKCS#8, PKCS#1 yoki SEC 1) |
+| `CC01_ACCESS_TLS_SERVER_NAME` | Ixtiyoriy. AP sertifikatida tekshiriladigan nom (DNS yoki IP SAN). Standart: `CC01_ACCESS_ADDR` ning host qismi |
+| `CC01_ACCESS_TLS_MIN` | Ixtiyoriy: `1.3` (sukut) yoki `1.2`. **`1.2` faqat loopback'dagi AP uchun** — macOS'da .NET server tomonda TLS 1.3 ni qo'llamaydi (SecureTransport), lokal `dotnet run` AP faqat TLS 1.2 da gaplashadi. Tarmoq manzilida `1.2` — ishga tushmaydi; `access.Dial` ham uni 1.3 ga ko'taradi |
+
+Qoidalar:
+
+- `CA`/`CERT`/`KEY` dan **birortasi** berilsa mTLS yoqiladi va unda
+  **uchalasi ham** majburiy. Fayllar ishga tushishda o'qiladi va
+  tekshiriladi: fayl yo'q, PEM noto'g'ri, kalit sertifikatga mos emas,
+  sertifikatda CN yoki `clientAuth` EKU yo'q, muddati tugagan — server ishga
+  tushmaydi, xato tegishli o'zgaruvchini nomlaydi. TLS 1.3 majburiy.
+- mTLS'siz (shifrsiz) ulanish **faqat loopback** `CC01_ACCESS_ADDR` uchun
+  ruxsat etiladi: `127.0.0.0/8`, `::1` yoki `localhost`. Boshqa har qanday
+  manzilda server ishga tushmaydi:
+  `CC01_ACCESS_ADDR loopback emas va mTLS sozlanmagan …`. `access.Dial` ham
+  buni ikkinchi marta tekshiradi.
+- `CC01_ACCESS_TLS_SERVER_NAME` yoki `CC01_ACCESS_TLS_MIN` yolg'iz (mTLS'siz)
+  berilsa — xato (chala sozlama).
+- `CC01_AUTH_MODE=disabled` da AP'ga ulanish yo'q — TLS o'zgaruvchilari
+  e'tiborsiz qoldiriladi.
+- AP edge'ni klient sertifikatining CN'i bo'yicha taniydi (allowlist) va
+  `clientAuth` EKU talab qiladi; edge tomonida boshqa sozlama yo'q.
+- **Sertifikatni almashtirish (rotation) uchun edge qayta ishga
+  tushiriladi** — fayllar faqat ishga tushishda o'qiladi (hot reload yo'q).
+  Klient sertifikati muddati ishga tushish log'ida ko'rinadi.
+
+Ishga tushishda bitta qator qaysi rejim faolligini aytadi:
+
+```
+[access] mTLS: CA=<fayl>, CN=<edge CN>, server_name=<nom>, TLS ≥ 1.3, sertifikat muddati <vaqt> (…)
+[access] plaintext (loopback): 127.0.0.1:5081
+```
+
+AP sertifikati tekshiruvdan o'tmasa (begona CA, nom mos emas) yoki AP edge
+sertifikatini rad etsa, bu **rad javobi emas**, tarmoq xatosi: yangi
+tunnellar fail-static yo'liga tushadi (`SERVICE_UNAVAILABLE` yoki kesh),
+ochiq tunnellar yopilmaydi (`[tunnel-renew-failed]`).
 
 ## Ixtiyoriy
 
@@ -140,6 +185,16 @@ CC01_DOMAIN=cc01.test \
 CC01_TLS_CERT=server/sample.crt CC01_TLS_KEY=server/sample.key \
 CC01_PUBLIC_PORT=8080 CC01_PUBLIC_TLS_PORT=8443 \
 CC01_ACCESS_ADDR=127.0.0.1:5081 \
+  go run .
+
+# access-server boshqa hostda — mTLS majburiy (make dev-certs → .dev-certs/)
+CC01_DOMAIN=cc01.test \
+CC01_TLS_CERT=server/sample.crt CC01_TLS_KEY=server/sample.key \
+CC01_PUBLIC_PORT=8080 CC01_PUBLIC_TLS_PORT=8443 \
+CC01_ACCESS_ADDR=localhost:5081 \
+CC01_ACCESS_TLS_CA=../.dev-certs/ca.pem \
+CC01_ACCESS_TLS_CERT=../.dev-certs/edge.pem \
+CC01_ACCESS_TLS_KEY=../.dev-certs/edge.key \
   go run .
 
 # avtorizatsiyasiz (faqat sinov uchun)

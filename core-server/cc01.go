@@ -182,9 +182,25 @@ func (j *CC01Server) initAuthorizer() error {
 		// keshdan ochilgan tunnel AP'dagi o'zgarishni LeaseTTL qadar
 		// kechikib ko'rardi. 0 (yangilash o'chiq) — chegara yo'q.
 		MaxFresh: j.config.AccessRenew,
+		// mTLS (DEV_SPEC S-11); nil — shifrsiz, config uni faqat loopback
+		// manzil uchun ruxsat etadi.
+		TLS: j.config.AccessTLS,
 	})
 	if err != nil {
 		return err
+	}
+
+	if info := j.config.AccessTLSInfo; info != nil {
+		log.Printf("[access] mTLS: CA=%s, CN=%s, server_name=%s, TLS ≥ %s, sertifikat muddati %s "+
+			"(almashtirish uchun qayta ishga tushirish kerak)",
+			info.CAFile, info.ClientCN, info.ServerName, info.MinVersion,
+			info.ClientNotAfter.UTC().Format(time.RFC3339))
+		if info.MinVersion != "1.3" {
+			log.Printf("[access] ⚠ TLS 1.2 ruxsat etilgan (CC01_ACCESS_TLS_MIN=%s) — faqat loopback dev uchun",
+				info.MinVersion)
+		}
+	} else {
+		log.Printf("[access] plaintext (loopback): %s", j.config.AccessAddr)
 	}
 
 	log.Printf("avtorizatsiya: access-server %s (grace %s)",
