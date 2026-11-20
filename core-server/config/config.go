@@ -47,7 +47,62 @@ type Config struct {
 	AccessAddr    string
 	AccessTimeout time.Duration
 	AccessGrace   time.Duration
+
+	// AccessRenew — ochiq tunnel ruxsatini AP'da qayta tekshirish oralig'i
+	// (lease yangilanishi). 0 — yangilash o'chirilgan (kill switch): ochiq
+	// tunnel ochilishdagi limitlar bilan qoladi. AuthMode=disabled bo'lsa
+	// doim 0.
+	AccessRenew time.Duration
+
+	// AccessRenewDeny — yangilashda qat'iy rad javobi kelganda nima
+	// qilinadi: tunnel yopiladi (close) yoki faqat log'ga yoziladi (log —
+	// dry run, rollout uchun).
+	AccessRenewDeny RenewDenyMode
 }
+
+// RenewDenyMode — yangilashdagi rad javobiga munosabat.
+type RenewDenyMode string
+
+const (
+	// RenewDenyClose — allowlist'dagi rad javobi ochiq tunnelni yopadi.
+	// Standart.
+	RenewDenyClose RenewDenyMode = "close"
+
+	// RenewDenyLog — rad javobi faqat log'ga yoziladi, tunnel yopilmaydi
+	// (dry run).
+	RenewDenyLog RenewDenyMode = "log"
+)
+
+const (
+	// DefaultAccessTimeout — AP chaqirig'i taymauti (CC01_ACCESS_TIMEOUT).
+	DefaultAccessTimeout = 3 * time.Second
+
+	// DefaultAccessRenew — ochiq tunnel yangilanish oralig'i
+	// (CC01_ACCESS_RENEW). Tarif o'zgarishi edge'ga ≤ R + taymaut =
+	// 30 + 3 = 33 s ichida yetib boradi (AP yiqilib qaytgandan keyin —
+	// ≤ 6 + 30 + 3 = 39 s).
+	DefaultAccessRenew = 30 * time.Second
+
+	// MinAccessRenew va MaxAccessRenew — CC01_ACCESS_RENEW ning ruxsat
+	// etilgan oralig'i (0 dan tashqari). Pastki chegara AP'ni ortiqcha
+	// yuklamaslik uchun. Yuqori chegaraning o'zi yetarli emas: 60 s
+	// kafolati CC01_ACCESS_TIMEOUT bilan birga tekshiriladi (AccessSLO).
+	MinAccessRenew = 1 * time.Second
+	MaxAccessRenew = 50 * time.Second
+
+	// AccessReconnectMax — AP qayta erishiladigan bo'lgandan edge→AP gRPC
+	// kanali qayta ulanguncha eng uzoq kutish (access.Dial'dagi cheklangan
+	// backoff: MinConnectTimeout 3 s + MaxDelay 2 s·1.2). AP yiqilib
+	// qaytgandan keyingi eng yomon holat shu qadar uzayadi.
+	AccessReconnectMax = 6 * time.Second
+
+	// AccessSLO — AP'dagi o'zgarish (tarif, bekor qilish, to'xtatish) ochiq
+	// tunnelga yetib borishining kafolatlangan chegarasi (DEV_SPEC §8).
+	// Eng yomon holat: AccessReconnectMax + R + CC01_ACCESS_TIMEOUT,
+	// R ≤ CC01_ACCESS_RENEW. Bu yig'indi undan QAT'IY kichik bo'lishi shart,
+	// aks holda server ishga tushmaydi.
+	AccessSLO = 60 * time.Second
+)
 
 func (c *Config) Load() error {
 	c.MaxConsPerTunnel = 24
@@ -151,11 +206,59 @@ func (c *Config) loadAuth() error {
 	}
 
 	var err error
-	if c.AccessTimeout, err = durationEnv("CC01_ACCESS_TIMEOUT", 3*time.Second); err != nil {
+	if c.AccessTimeout, err = durationEnv("CC01_ACCESS_TIMEOUT", DefaultAccessTimeout); err != nil {
 		return err
+	}
+	if c.AccessTimeout <= 0 {
+		return fmt.Errorf("CC01_ACCESS_TIMEOUT=%s ruxsat etilmagan: musbat bo'lishi kerak", c.AccessTimeout)
 	}
 	if c.AccessGrace, err = durationEnv("CC01_ACCESS_GRACE", 15*time.Minute); err != nil {
 		return err
+	}
+	return c.loadRenew()
+}
+
+// loadRenew ochiq tunnel yangilanishi sozlamalarini o'qiydi.
+//
+// ⚠️ Oraliq cheklangan: AP'dagi o'zgarish ochiq tunnelga ≤ R + taymaut
+// ichida (AP yiqilib qaytgandan keyin — ≤ AccessReconnectMax + R + taymaut)
+// yetib boradi va bu 60 s dan oshmasligi kerak. Shuning uchun kafolatni
+// buzadigan CC01_ACCESS_RENEW va CC01_ACCESS_TIMEOUT jimgina qabul
+// qilinmaydi — server ishga tushmaydi.
+func (c *Config) loadRenew() error {
+	var err error
+	if c.AccessRenew, err = durationEnv("CC01_ACCESS_RENEW", DefaultAccessRenew); err != nil {
+		return err
+	}
+	if c.AccessRenew != 0 && (c.AccessRenew < MinAccessRenew || c.AccessRenew > MaxAccessRenew) {
+		return fmt.Errorf(
+			"CC01_ACCESS_RENEW=%s ruxsat etilmagan: 0 (o'chirish) yoki %s..%s bo'lishi kerak "+
+				"— aks holda 60 s kafolati buziladi", c.AccessRenew, MinAccessRenew, MaxAccessRenew)
+	}
+
+	switch mode := RenewDenyMode(os.Getenv("CC01_ACCESS_RENEW_DENY")); mode {
+	case "", RenewDenyClose:
+		c.AccessRenewDeny = RenewDenyClose
+	case RenewDenyLog:
+		c.AccessRenewDeny = RenewDenyLog
+	default:
+		return fmt.Errorf("CC01_ACCESS_RENEW_DENY noma'lum: %q (close yoki log)", mode)
+	}
+
+	// Avtorizatsiya o'chirilgan rejimda yangilaydigan AP yo'q.
+	if c.AuthMode == AuthDisabled {
+		c.AccessRenew = 0
+	}
+
+	if c.AccessRenew != 0 {
+		if worst := AccessReconnectMax + c.AccessRenew + c.AccessTimeout; worst >= AccessSLO {
+			return fmt.Errorf(
+				"CC01_ACCESS_RENEW=%s va CC01_ACCESS_TIMEOUT=%s birga ruxsat etilmagan: "+
+					"eng yomon holat %s (qayta ulanish) + %s + %s = %s, %s dan kichik bo'lishi kerak "+
+					"— oraliqni yoki taymautni kamaytiring",
+				c.AccessRenew, c.AccessTimeout,
+				AccessReconnectMax, c.AccessRenew, c.AccessTimeout, worst, AccessSLO)
+		}
 	}
 	return nil
 }

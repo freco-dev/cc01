@@ -2,7 +2,7 @@ package tunnel
 
 import (
 	"fmt"
-	"io"
+	"net"
 
 	"github.com/freco-dev/cc01/core-server/server"
 )
@@ -12,9 +12,9 @@ type TCPTunnel struct {
 	publicServer server.TCPServer
 }
 
-func NewTCP(hostname string, eventWriter io.Writer, maxConsLimit int) (*TCPTunnel, error) {
+func NewTCP(hostname string, eventConn net.Conn, maxConsLimit int) (*TCPTunnel, error) {
 	t := &TCPTunnel{
-		tunnel: newTunnel(hostname, eventWriter, maxConsLimit),
+		tunnel: newTunnel(hostname, eventConn, maxConsLimit),
 	}
 	if err := t.privateServer.Init(0, "tcp_tunnel_private_server"); err != nil {
 		return t, fmt.Errorf("error init private server: %w", err)
@@ -38,7 +38,8 @@ func (t *TCPTunnel) Open() {
 	go t.privateServer.Start(t.privateConnectionHandler)
 }
 
+// Close ommaviy serverni to'xtatadi va qolganini ichki tunnel.Close ga
+// topshiradi (o'sha sync.Once ostida — qayta chaqirish xavfsiz).
 func (t *TCPTunnel) Close() {
-	t.publicServer.Stop()
-	t.tunnel.Close()
+	t.closeWith(func() { _ = t.publicServer.Stop() })
 }
