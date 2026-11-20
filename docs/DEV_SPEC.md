@@ -1908,18 +1908,64 @@ listener `Program.cs` da oshkora sozlanadi:
 | Listener | Protokol | Standart | Sozlash |
 | --- | --- | --- | --- |
 | Public | HTTP/1.1 + HTTP/2 | `0.0.0.0:5078` | `Public:Address`, `Public:Port` |
-| Internal | h2c (gRPC) | `127.0.0.1:5081` | `Internal:Address`, `Internal:Port` |
+| Internal | HTTP/2: **mTLS** (sozlansa) yoki h2c (faqat loopback) | `127.0.0.1:5081` | `Internal:Address`, `Internal:Port`, `Internal:Tls:*` |
 
-gRPC servisi va operator API `RequireInternalListener(port)` bilan ichki
-listener'ga qadalgan: `RequireHost` + `InternalListenerGuardMiddleware`. Guard
+gRPC servisi va operator API `RequireInternalListener()` bilan ichki
+listener'ga qadalgan (`InternalListenerGuardMiddleware`). Guard
 port raqamiga emas, **ulanish belgisiga** qaraydi: ichki listener'ning Kestrel
 connection middleware'i (`ListenOptions.MarkInternal()`) har bir ulanishga
 belgi qo'yadi (`IConnectionItemsFeature`), belgisiz ulanishdagi ichki endpoint
 — 404. Public portga kelgan so'rov — Host sarlavhasi soxtalashtirilgan bo'lsa
 ham — 404 oladi (A-S19). `Public:Port == Internal:Port` bo'lsa AP ishga
 tushmaydi. Ichki endpointlar OpenAPI hujjatiga (`/openapi/v1.json`) kirmaydi.
-`Internal:Address` loopback bo'lmasa AP ishga tushishda ogohlantiradi.
 Kubernetes'da qo'shimcha `NetworkPolicy` qo'yiladi.
+
+> ⚠️ `RequireHost("*:5081")` ATAYLAB ishlatilmaydi. U Host / `:authority`
+> sarlavhasiga qaraydi — uni klient yozadi, ya'ni himoya bermaydi (A-S19).
+> Ustiga-ustak u haqiqiy klientni sindirardi: grpc-go TLS'da `:authority`
+> sifatida **portsiz** `ServerName` ni yuboradi (`127.0.0.1`), va mTLS
+> orqali kelgan edge so'rovi 404 olardi. `make plan-demo` aynan shuni topgan.
+
+**mTLS (A-S5, S-11).** `Internal:Tls:CertPath` berilsa ichki listener
+HTTPS + HTTP/2 bo'ladi va klient sertifikatini **talab qiladi**:
+
+| Kalit | Vazifa |
+| --- | --- |
+| `Internal:Tls:CertPath`, `Internal:Tls:KeyPath` | AP server sertifikati va kaliti (PEM; ECDSA P-256 yoki RSA) |
+| `Internal:Tls:ClientCaPath` | Klient sertifikatlari uchun **yagona** ishonch ildizlari (PEM). Tizim ildizlari ishlatilmaydi |
+| `Internal:Tls:AllowedClients` | Subject CN allowlist: massiv yoki vergul bilan ajratilgan satr; katta-kichik harf farqlanadi |
+
+Tekshiruv TLS handshake ichida: zanjir faqat `ClientCaPath` ga
+(`CustomRootTrust`), `clientAuth` EKU (kengaytma bo'lsa), **bitta** Subject CN
+va u allowlist'da. Rad etilgan ulanish so'rovgacha yetmaydi; sababi, CN va
+SHA-256 barmoq izi Warning bilan log'lanadi. Revocation tekshirilmaydi —
+CRL/OCSP infratuzilmasi yo'q; sertifikatni bekor qilish = CN'ni allowlist'dan
+olib tashlash yoki CA'ni almashtirish. Sertifikat almashtirish — AP qayta
+ishga tushiriladi.
+
+Qoidalar (deny-by-default):
+
+- `CertPath` berilsa qolgan uchtasi ham majburiy; fayl yo'q, kalit mos emas,
+  CA bo'sh, allowlist bo'sh — AP ishga tushmaydi.
+- `CertPath` bo'sh, lekin boshqa `Internal:Tls:*` berilgan — ishga tushmaydi
+  ("qisman sozlangan": chala sozlama jimgina shifrsizga tushmasligi uchun).
+- mTLS'siz ichki listener **faqat loopback** `Internal:Address` da (127.0.0.0/8,
+  `::1`); boshqa manzilda AP ishga tushmaydi.
+- Admin kaliti (operator API) mTLS bilan birga saqlanadi: sertifikat "kim
+  ulanmoqda"ni, kalit "tarifni o'zgartirishga haqqi bor"ni tasdiqlaydi — edge
+  sertifikati sizib chiqsa ham tarif o'zgarmaydi.
+
+> ⚠️ **macOS'da TLS 1.3 yo'q.** .NET server tomonda Apple SecureTransport'dan
+> foydalanadi va u TLS 1.3 ni qo'llamaydi. Shuning uchun macOS'da ichki
+> listener TLS 1.2 + 1.3 ni yoqadi (amalda 1.2) va ishga tushishda
+> ogohlantiradi; Linux (prod) — faqat TLS 1.3. Mac'dagi dev AP bilan edge
+> `CC01_ACCESS_TLS_MIN=1.2` bilan ulanadi — bu edge'da faqat loopback AP
+> uchun ruxsat etiladi (`core-server/env.md`).
+
+Dev sertifikatlari: `make dev-certs` → `.dev-certs/` (ichki CA, `ap`,
+`edge` CN=edge-dev, `operator` CN=operator-dev va salbiy tekshiruv uchun
+begona CA). Operator: `CC01_ADMIN_CERT`, `CC01_ADMIN_CERT_KEY`,
+`CC01_ADMIN_CA` bilan `make ap-set-plan` HTTPS orqali ulanadi.
 
 > ⚠️ Endpointlar oshkora ko'rsatilgani uchun `ASPNETCORE_URLS` va
 > `launchSettings.json` dagi `applicationUrl` **e'tiborga olinmaydi** — bu
@@ -1971,7 +2017,7 @@ Orqaga qaytarish:
 | A-S2 | Login rate limit: IP bo'yicha va hisob bo'yicha; 5 ta muvaffaqiyatsiz urinish → progressiv kechikish, 10 → vaqtinchalik lockout |
 | A-S3 | API token faqat hash holida; solishtirish `CryptographicOperations.FixedTimeEquals` |
 | A-S4 | Email tasdiqlanmaguncha tunnel ochib bo'lmaydi (`EMAIL_NOT_VERIFIED`) |
-| A-S5 | `/internal/*` — mTLS majburiy; klient sertifikati CN allowlist bilan tekshiriladi |
+| A-S5 | `/internal/*` — mTLS majburiy; klient sertifikati CN allowlist bilan tekshiriladi — ✅ mTLS'siz faqat loopback (§6.4) |
 | A-S6 | Subdomain deny-list (`www`, `api`, `admin`, `cp`, `edge`, `relay`, `stun`, `mail`, …) va `core-server/utils.go` dagi format qoidalari bilan **bir xil** validatsiya — ikkala tomonda ham |
 | A-S7 | OAuth: `state` + PKCE (S256) majburiy; provider `sub` bo'yicha bog'lash, email bo'yicha emas (email o'zgarishi mumkin) |
 | A-S8 | Audit: token yaratish/bekor qilish, subdomain o'zgarishi, tarif o'zgarishi, login — hammasi `AuditEvent`ga |
@@ -2121,7 +2167,7 @@ Subdomain qoidalari hozir `core-server/utils.go` da (uzunlik 3–38, `^[a-z\d](?
 | S-8 | Reproducible builds (`-trimpath`, `CGO_ENABLED=0` mumkin bo'lganda) — ✅ `make package` |
 | S-9 | Har bir reliz oldidan `govulncheck` — HIGH/CRITICAL bo'lsa bloklanadi |
 | S-10 | Audit log tamper-evident (hash chain), ClickHouse'ga append-only |
-| S-11 | AP ↔ Edge kanali mTLS; AP `/internal/*` listeneri public interfeysga bind qilinmaydi |
+| S-11 | AP ↔ Edge kanali mTLS; AP `/internal/*` listeneri public interfeysga bind qilinmaydi — ✅ ikki tomonda ham: mTLS'siz loopback'dan boshqa manzil — ishga tushmaydi |
 | S-12 | AP uchun qo'shimcha talablar §6.5 (A-S1…A-S10) da — ular ham majburiy |
 
 ### 7.3 CI/CD pipeline
@@ -2199,7 +2245,7 @@ Maqsad: uchta mustaqil bo'lakni **bitta ishlaydigan mahsulotga** bog'lash — to
 | Subdomain egaligi (rezervatsiya) | Band nom boshqa tenantga berilmaydi; validatsiya §6.7 ga mos | ✅ |
 | OAuth: GitHub, Google (PKCE + state) | Yo'naltirish parametrlari va bog'lash mantiqi testlar bilan; callback qo'lda tekshiriladi | ✅ (§6.6) |
 
-Faza 0 yopilganda 83 ta test (unit + integration + HTTP) yashil edi; tarif modeli (Faza 1) bilan — **205 ta**. Testlash bo'yicha ikkita qaror:
+Faza 0 yopilganda 83 ta test (unit + integration + HTTP) yashil edi; tarif modeli (Faza 1) bilan — 205 ta, AP ↔ Edge mTLS bilan — **248 ta**. Testlash bo'yicha ikkita qaror:
 
 - **`Testcontainers` ishlatilmadi.** Bu mashinada docker konteksti masofaviy serverga qaratilgan bo'lishi mumkin va Testcontainers uni jimgina ishlatib yuborardi. O'rniga oshkora ulanish satri: `CC01_TEST_DB`. Har bir yugurish o'ziga alohida baza yaratadi va oxirida o'chiradi.
 - **HTTP darajasidagi testlar majburiy.** Handler'ni to'g'ridan-to'g'ri chaqiradigan testlar routing, JWT claim'lari va xato → status xaritasini ko'rmaydi. Amalda aynan shu qatlamda ikkita xato topildi (§6.5 A-S13, A-S14) — ikkalasi ham handler testlaridan bemalol o'tib ketgan edi.
@@ -2214,7 +2260,7 @@ Faza 0 yopilganda 83 ta test (unit + integration + HTTP) yashil edi; tarif model
 | Kvota majburlash: `max_conns_per_tunnel` | Hozirgi qattiq `24` o'rniga tarifdan keladigan qiymat | ✅ |
 | Avtorizatsiya deny-by-default | `CC01_ACCESS_ADDR` sozlanmagan bo'lsa server ishga tushmaydi | ✅ |
 | **Faza 0 demo** | Ro'yxatdan o'tish → token olish → tunnel ochish → brauzerdan ochilishi | ✅ |
-| mTLS: AP ↔ Edge | Klient sertifikati CN allowlist bilan | ⏳ Faza 1 |
+| mTLS: AP ↔ Edge | Klient sertifikati CN allowlist bilan | ✅ `Internal:Tls:*` + `CC01_ACCESS_TLS_*`; `make plan-demo` (sukut bo'yicha mTLS) — sertifikatsiz, begona CA va shifrsiz ulanish rad etiladi (§6.4) |
 | `ReportUsage` + `UsageRecord` | Bayt/ulanish hisobi dashboard'da ko'rinadi | ⏳ RPC bor, saqlash Faza 1 |
 | `test/contract/` — validatsiya pariteti | Go va .NET 40+ kirishda bir xil natija | ⏳ ikkala tomonda testlar bor, taqqoslash yo'q |
 
@@ -2624,8 +2670,8 @@ Boshqa qarorlar:
 
 **Ataylab qilinmagan:** billing va self-service, tarmoq tezligini
 cheklash, global `max_tunnels`, pastga tushirishda tunnel/nomlarni
-chiqarish, `ReportUsage` ni saqlash, admin kalitini aylantirish (mTLS A-S5
-kelguncha statik kalit). Pastga tushirishda kvotadan ortiq nomlardan
+chiqarish, `ReportUsage` ni saqlash, admin kalitini aylantirish (statik kalit;
+mTLS A-S5 endi uning oldida turadi). Pastga tushirishda kvotadan ortiq nomlardan
 qaysi biri ishlashda qolishi (masalan, "eng eski N nom" qoidasi) —
 mahsulot qarori bilan alohida.
 

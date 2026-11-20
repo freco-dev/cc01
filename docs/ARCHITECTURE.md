@@ -105,7 +105,7 @@ Bu hujjat **maqsadli** arxitekturani tasvirlaydi. Repozitoriyda hozir mavjud kod
 | Edge ingress (SNI router, QUIC, ACME) | `core-server/` — HTTP `Host:` header bo'yicha demux, TLS terminatsiya sertifikat fayldan | HTTP/1.1 gina; SNI routing, HTTP/2, WebSocket, ACME yo'q |
 | Tunnel data plane (QUIC stream mux) | `core-server/tunnel/` — public↔private TCP juftlash, port raqami bilan identifikatsiya | Xom TCP; multiplexing, backpressure, flow control yo'q |
 | CP ↔ node protokoli (gRPC/protobuf) | `core-server/events/` — protobuf freyming, magic+versiya preambulasi bilan | ✅ `gob` dan ko'chirildi; uzun yashovchi gRPC stream Faza 1 da |
-| AP ↔ Edge avtorizatsiyasi (§3.4.3) | `core-server/access/` — gRPC klient, kesh, fail-static; `core-server/renew.go` — ochiq tunnel lease yangilanishi | ✅ ishlaydi; mTLS Faza 1 da |
+| AP ↔ Edge avtorizatsiyasi (§3.4.3) | `core-server/access/` — gRPC klient, kesh, fail-static; `core-server/renew.go` — ochiq tunnel lease yangilanishi | ✅ ishlaydi; mTLS ✅ (A-S5, ichki CA + CN allowlist) |
 | Klient daemon `cc01d` + CLI `cc01` | `cli-client/` — 173 qatorli `flag` asosidagi klient | Daemon, IPC, holat mashinasi, buyruq daraxti yo'q |
 | Account Plane (`access-server`) | `access-server/` — auth, OAuth (GitHub/Google), API token, subdomain egaligi, tunnel avtorizatsiyasi, tarif katalogi + obuna + audit (`Application/Plans`), operator API | ✅ ishlaydi; tarif o'zgarishi ochiq tunnelga ≤ 33 s (`make plan-demo`: o'lchandi ≤ 29.7 s); billing va usage hisobi Faza 1/3 da |
 | Control Plane — `cc01-ipam` | `control/ipam/` — ijara hayot sikli, sticky taqsimlash, karantin | ✅ `Register` da manzil beradi; Raft store keyingi qadam |
@@ -667,7 +667,7 @@ AuditEvent            TenantId?, UserId?, Actor, Action, Target, Ip, Metadata
 
 #### 3.4.3 Edge/CP bilan kontrakt
 
-Transport — **gRPC**, kontrakt `proto/cc01/v1/access.proto` da (ADR-010: yagona manba protobuf). Servis hech qachon internetga ochilmaydi: **alohida listener va port**, sukut bo'yicha faqat loopback. mTLS Faza 1 da.
+Transport — **gRPC**, kontrakt `proto/cc01/v1/access.proto` da (ADR-010: yagona manba protobuf). Servis hech qachon internetga ochilmaydi: **alohida listener va port**, sukut bo'yicha faqat loopback. Kanal **mTLS** bilan himoyalangan (ichki CA, klient sertifikati CN allowlist bilan, TLS 1.3); mTLS'siz faqat loopback'da ishlaydi — boshqa manzilda AP ham, edge ham ishga tushmaydi (`DEV_SPEC.md` §6.4).
 
 | RPC | Chaqiruvchi | Qachon |
 | --- | --- | --- |

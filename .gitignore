@@ -9,6 +9,7 @@
 # Dev sertifikatlari bundan mustasno emas — ular ham commit qilinmaydi.
 *.pem
 *.key
+/.dev-certs/
 !core-server/server/sample.key
 
 # ── Build artefaktlari ────────────────────────────────────────
