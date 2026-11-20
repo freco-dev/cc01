@@ -14,6 +14,9 @@
 #      ichki CA sertifikati bilan ulanadi; sertifikatsiz yoki begona CA
 #      imzolagan sertifikat bilan ulanish TLS darajasida rad etiladi.
 #      MTLS=0 — eski h2c rejimi (faqat loopback'da ruxsat).
+#   6. Usage: tunnel trafigi edge'da sanaladi va GET /v1/usage da
+#      ko'rinadi; AP o'chiq paytdagi trafik navbatda kutib, AP qaytgach
+#      yetib boradi (CC01_USAGE_INTERVAL=10s — demoni tezlashtirish uchun).
 #
 # Talablar: Go, .NET SDK, curl, perl, openssl, Docker (faqat dev Postgres uchun).
 # Hamma narsa loopback'da; portlarni muhit o'zgaruvchilari bilan
@@ -58,6 +61,7 @@ fi
 TIMEOUT_S=3                   # CC01_ACCESS_TIMEOUT standarti
 BOUND_S=$((R_S + TIMEOUT_S))  # nazariy eng yomon holat
 SLO_S=60
+USAGE_S=10                    # CC01_USAGE_INTERVAL (sukut 60s; demo uchun qisqa)
 
 DOMAIN=cc01.test
 MTLS=${MTLS:-1}
@@ -211,6 +215,7 @@ env ${EDGE_TLS[@]+"${EDGE_TLS[@]}"} CC01_DOMAIN=$DOMAIN \
   CC01_EVENT_PORT="$EDGE_EVENT_PORT" \
   CC01_ACCESS_ADDR="127.0.0.1:$AP_INTERNAL_PORT" \
   CC01_ACCESS_RENEW="${R_S}s" \
+  CC01_USAGE_INTERVAL="${USAGE_S}s" \
   "$WORK/cc01-edge" >"$WORK/edge.log" 2>&1 &
 EDGE_PID=$!
 # Yangilash yoqilganini edge'ning o'zi aytishi kerak — aks holda o'lchov
@@ -350,6 +355,31 @@ if [ "$MTLS" = "1" ]; then
 fi
 
 echo
+echo "═══ usage: edge sanaydi → AP saqlaydi → GET /v1/usage ═══"
+# usage_field <maydon> — `totals` dagi qiymat (javobda totals daily'dan oldin).
+usage_json() { curl -sf "$AP_PUBLIC/v1/usage" -H "authorization: Bearer $JWT"; }
+usage_field() { json_field "$(usage_json)" "$1"; }
+# wait_usage <min connections> <sekund> — totals.connections shu qiymatga
+# yetguncha kutadi.
+wait_usage() {
+  local deadline=$(( $(now_ms) + $2 * 1000 )) c
+  while [ "$(now_ms)" -lt "$deadline" ]; do
+    c=$(usage_field connections); c=${c:-0}
+    [ "$c" -ge "$1" ] && return 0
+    sleep 1
+  done
+  return 1
+}
+wait_usage 1 $((3 * USAGE_S)) || fail "GET /v1/usage da ulanish ko'rinmadi: $(usage_json)"
+USAGE=$(usage_json)
+U1_CONN=$(json_field "$USAGE" connections)
+U1_OUT=$(json_field "$USAGE" bytesOut)
+[ "${U1_OUT:-0}" -gt 0 ] || fail "bytesOut 0: $USAGE"
+[ "$(json_field "$USAGE" bytesIn)" -gt 0 ] || fail "bytesIn 0: $USAGE"
+grep -qF "[usage-reported]" "$WORK/edge.log" || fail "edge [usage-reported] yozmadi"
+echo "  ✔ connections=$U1_CONN bytesIn=$(json_field "$USAGE" bytesIn) bytesOut=$U1_OUT tunnelHours=$(json_field "$USAGE" tunnelHours)"
+
+echo
 echo "═══ fail-static: AP o'chirildi ═══"
 kill "$AP_PID"; wait "$AP_PID" 2>/dev/null || true; AP_PID=
 DOWN_AT=$(now_ms)
@@ -374,6 +404,11 @@ UP_AT=$(now_ms)
 # yangilashni AP'ning Debug yozuvidan kutamiz.
 wait_log "$WORK/ap2.log" "Lease yangilandi: $SUB" 180 || fail "edge AP'ga qayta ulanmadi"
 echo "  ✔ AP qaytdi, edge $(secs $(( $(now_ms) - UP_AT ))) s da yangilashni tikladi"
+# AP o'chiq paytda o'tgan trafik navbatda kutgan bo'lishi kerak.
+grep -qF "[usage-report-failed]" "$WORK/edge.log" || fail "AP o'chiqligida [usage-report-failed] yo'q"
+wait_usage $((U1_CONN + 1)) $((3 * USAGE_S)) \
+  || fail "AP o'chiq paytdagi trafik usage'ga yetmadi: $(usage_json)"
+echo "  ✔ AP o'chiq paytdagi ulanish navbatdan yetib keldi: connections $U1_CONN → $(usage_field connections)"
 
 REV_AT=$(now_ms)
 curl -sf -X DELETE "$AP_PUBLIC/v1/tokens/$TOKEN_ID" -H "authorization: Bearer $JWT" \
@@ -407,4 +442,5 @@ echo
 echo "── natija ──"
 echo "  tarif o'zgarishi ochiq tunnelga eng ko'pi $(secs "$MAX_MS") s da yetdi (SLO ${SLO_S} s, chegara ${BOUND_S} s),"
 echo "  token bekor qilinishi $(secs "$REV_MS") s da tunnelni yopdi, AP'siz tunnel ishlashda davom etdi,"
-echo "  operator API va gRPC public portda soxta Host bilan 404"
+echo "  operator API va gRPC public portda soxta Host bilan 404,"
+echo "  usage AP o'chiq paytda yo'qolmadi (navbat → qayta yuborish)"

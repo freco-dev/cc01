@@ -32,6 +32,12 @@ type fakeAccessServer struct {
 	delay     time.Duration
 	lastReq   *cc01v1.AuthorizeTunnelRequest
 	handledAt time.Time
+
+	// ReportUsage (usage_test.go): olingan so'rovlar, xato va qabul
+	// qilinganlar soni (nil — hammasi).
+	usageReqs     []*cc01v1.ReportUsageRequest
+	usageErr      error
+	usageAccepted func(n int) uint32
 }
 
 func (f *fakeAccessServer) AuthorizeTunnel(

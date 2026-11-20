@@ -272,6 +272,8 @@ func loadRaw(t *testing.T, env map[string]string) (Config, error) {
 		"CC01_ACCESS_TLS_CERT":        "",
 		"CC01_ACCESS_TLS_KEY":         "",
 		"CC01_ACCESS_TLS_SERVER_NAME": "",
+
+		"CC01_USAGE_INTERVAL": "",
 	}
 	for key, value := range env {
 		base[key] = value
@@ -298,6 +300,7 @@ func setRenewEnv(t *testing.T) {
 	t.Setenv("CC01_ACCESS_RENEW", "")
 	t.Setenv("CC01_ACCESS_RENEW_DENY", "")
 	t.Setenv("CC01_ACCESS_TIMEOUT", "")
+	t.Setenv("CC01_USAGE_INTERVAL", "")
 }
 
 func TestLoad_AccessRenew(t *testing.T) {
@@ -480,5 +483,66 @@ func TestLoad_AccessTimeoutMustBePositive(t *testing.T) {
 				t.Fatalf("CC01_ACCESS_TIMEOUT xatosi kutilgan, olindi: %v", err)
 			}
 		})
+	}
+}
+
+// ── Foydalanish hisoboti ──────────────────────────────────
+
+func TestLoad_UsageInterval(t *testing.T) {
+	cases := []struct {
+		raw     string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"", DefaultUsageInterval, false},
+		{"0", 0, false}, // o'chirish
+		{"5", 5 * time.Second, false},
+		{"5s", 5 * time.Second, false},
+		{"90s", 90 * time.Second, false},
+		{"5m", 5 * time.Minute, false},
+		{"300", 300 * time.Second, false},
+		{"4s", 0, true},     // AP'ni ortiqcha yuklaydi
+		{"301s", 0, true},   // juda uzun
+		{"10m", 0, true},    // juda uzun
+		{"7500ms", 0, true}, // butun sekund emas
+		{"-60s", 0, true},
+		{"daqiqa", 0, true},
+	}
+
+	for _, tc := range cases {
+		t.Run("raw="+tc.raw, func(t *testing.T) {
+			setRenewEnv(t)
+			t.Setenv("CC01_USAGE_INTERVAL", tc.raw)
+
+			var conf Config
+			err := conf.Load()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("xato kutilgan edi, UsageInterval=%s olindi", conf.UsageInterval)
+				}
+				if !strings.Contains(err.Error(), "CC01_USAGE_INTERVAL") {
+					t.Errorf("xato o'zgaruvchini zikr qilishi kerak: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("kutilmagan xato: %v", err)
+			}
+			if conf.UsageInterval != tc.want {
+				t.Errorf("%s kutilgan, %s olindi", tc.want, conf.UsageInterval)
+			}
+		})
+	}
+}
+
+// Avtorizatsiyasiz rejimda hisobot qabul qiladigan AP yo'q — o'chadi.
+// Yaroqsiz qiymat esa baribir rad etiladi (renew bilan bir xil).
+func TestLoad_UsageIntervalForcedOffWhenAuthDisabled(t *testing.T) {
+	cfg := loadWith(t, map[string]string{"CC01_USAGE_INTERVAL": "10s"})
+	if cfg.UsageInterval != 0 {
+		t.Errorf("UsageInterval: 0 kutilgan, %s olindi", cfg.UsageInterval)
+	}
+	if _, err := loadRaw(t, map[string]string{"CC01_USAGE_INTERVAL": "1s"}); err == nil {
+		t.Error("yaroqsiz qiymat disabled rejimda ham rad etilishi kerak")
 	}
 }

@@ -67,6 +67,12 @@ type Config struct {
 	// qilinadi: tunnel yopiladi (close) yoki faqat log'ga yoziladi (log —
 	// dry run, rollout uchun).
 	AccessRenewDeny RenewDenyMode
+
+	// UsageInterval — foydalanish oynasi uzunligi va AP'ga hisobot
+	// oralig'i (CC01_USAGE_INTERVAL). Oynalar devor soatiga tekislangan
+	// (unix vaqt UsageInterval ga karrali). 0 — hisobot o'chirilgan.
+	// AuthMode=disabled bo'lsa doim 0.
+	UsageInterval time.Duration
 }
 
 // RenewDenyMode — yangilashdagi rad javobiga munosabat.
@@ -111,6 +117,17 @@ const (
 	// R ≤ CC01_ACCESS_RENEW. Bu yig'indi undan QAT'IY kichik bo'lishi shart,
 	// aks holda server ishga tushmaydi.
 	AccessSLO = 60 * time.Second
+
+	// DefaultUsageInterval — foydalanish oynasi (CC01_USAGE_INTERVAL).
+	DefaultUsageInterval = 60 * time.Second
+
+	// MinUsageInterval va MaxUsageInterval — CC01_USAGE_INTERVAL ning
+	// ruxsat etilgan oralig'i (0 dan tashqari). Pastki chegara AP'ni har
+	// tunnel uchun juda ko'p oyna bilan yuklamaslik uchun, yuqorisi —
+	// edge qulaganda yo'qoladigan ma'lumot (navbat xotirada) cheklangan
+	// bo'lishi uchun.
+	MinUsageInterval = 5 * time.Second
+	MaxUsageInterval = 300 * time.Second
 )
 
 func (c *Config) Load() error {
@@ -232,7 +249,38 @@ func (c *Config) loadAuth() error {
 	if c.AccessGrace, err = durationEnv("CC01_ACCESS_GRACE", 15*time.Minute); err != nil {
 		return err
 	}
-	return c.loadRenew()
+	if err := c.loadRenew(); err != nil {
+		return err
+	}
+	return c.loadUsage()
+}
+
+// loadUsage foydalanish hisoboti sozlamasini o'qiydi.
+//
+// Oraliq butun sekund bo'lishi shart: oyna chegaralari unix sekundda
+// yuboriladi va devor soatiga tekislanadi (unix vaqt oraliqqa karrali).
+func (c *Config) loadUsage() error {
+	var err error
+	if c.UsageInterval, err = durationEnv("CC01_USAGE_INTERVAL", DefaultUsageInterval); err != nil {
+		return err
+	}
+	if c.UsageInterval != 0 {
+		if c.UsageInterval < MinUsageInterval || c.UsageInterval > MaxUsageInterval {
+			return fmt.Errorf(
+				"CC01_USAGE_INTERVAL=%s ruxsat etilmagan: 0 (o'chirish) yoki %s..%s bo'lishi kerak",
+				c.UsageInterval, MinUsageInterval, MaxUsageInterval)
+		}
+		if c.UsageInterval%time.Second != 0 {
+			return fmt.Errorf(
+				"CC01_USAGE_INTERVAL=%s ruxsat etilmagan: butun sekund bo'lishi kerak", c.UsageInterval)
+		}
+	}
+
+	// Avtorizatsiya o'chirilgan rejimda hisobot qabul qiladigan AP yo'q.
+	if c.AuthMode == AuthDisabled {
+		c.UsageInterval = 0
+	}
+	return nil
 }
 
 // loadRenew ochiq tunnel yangilanishi sozlamalarini o'qiydi.

@@ -35,6 +35,10 @@ type Tunnel interface {
 	// Notify ochiq tunnel yopilayotganini bildiruvchi freymni
 	// (TunnelOpened{error_code, error_message}) yuboradi.
 	Notify(code, msg string) error
+
+	// Usage — tunnel ochilgandan beri yig'ilgan trafik va ulanish
+	// hisoblagichlari (kumulyativ; usage.go).
+	Usage() Usage
 }
 
 // ErrNotOpened — TunnelOpened freymi hali yuborilmagan (yoki tunnel
@@ -81,6 +85,13 @@ type tunnel struct {
 	initialBuffer map[uint16][]byte
 	pairs         map[net.Conn]net.Conn // ommaviy -> xususiy (ko'priklangan)
 
+	// usage — trafik hisoblagichlari (faqat atomiklar, qulfsiz).
+	usage usageCounters
+	// copies — ishlayotgan ko'prik nusxalari. Juftlik consMx ostida (closed
+	// bo'lmaganda) ro'yxatga olinganda Add qilinadi; Close ulanishlarni
+	// yopgach ularni kutadi.
+	copies sync.WaitGroup
+
 	closeOnce sync.Once
 }
 
@@ -113,7 +124,6 @@ func (t *tunnel) closeWith(extra func()) {
 		t.privateServer.Stop()
 
 		t.consMx.Lock()
-		defer t.consMx.Unlock()
 		t.closed = true
 		for port, con := range t.publicCons {
 			con.Close()
@@ -125,6 +135,12 @@ func (t *tunnel) closeWith(extra func()) {
 			privateCon.Close()
 			delete(t.pairs, publicCon)
 		}
+		t.consMx.Unlock()
+
+		// Ulanishlar yopilgan — nusxa goroutine'lari darhol tugaydi.
+		// Kutish shart: Close qaytgandan keyin Usage() yakuniy (hisoblagichga
+		// kechikib qo'shiladigan bayt qolmaydi) va oxirgi oyna aniq bo'ladi.
+		t.copies.Wait()
 	})
 }
 
@@ -237,6 +253,7 @@ func (t *tunnel) acceptPublic(publicCon net.Conn, initialBuffer []byte) error {
 	}
 	if len(t.publicCons) >= t.maxConsLimit {
 		t.consMx.Unlock()
+		t.usage.rejected.Add(1)
 		publicCon.Close()
 		_ = t.writeEvent(func(w io.Writer) error {
 			return events.WriteConnectionReceived(w, &cc01v1.ConnectionReceived{
@@ -269,6 +286,8 @@ func (t *tunnel) acceptPublic(publicCon net.Conn, initialBuffer []byte) error {
 		publicCon.Close()
 		return fmt.Errorf("[event-write-failed]: %s: %w", t.hostname, err)
 	}
+	// Ulanish navbatga qo'yildi va klientga xabar ketdi — qabul qilingan.
+	t.usage.connections.Add(1)
 	return nil
 }
 
@@ -282,16 +301,20 @@ func (t *tunnel) privateConnectionHandler(privateCon net.Conn) error {
 	port := binary.LittleEndian.Uint16(buffer)
 	t.consMx.Lock()
 	publicCon, found := t.publicCons[port]
-	if !found {
+	if !found || t.closed {
 		t.consMx.Unlock()
 		return errors.New("public connection not found, cannot pair")
 	}
 	delete(t.publicCons, port)
 	initialBuffer := t.initialBuffer[port]
 	delete(t.initialBuffer, port)
-	// Juftlik shu qulf ostida ro'yxatga olinadi: Close() uni albatta ko'radi.
+	// Juftlik shu qulf ostida ro'yxatga olinadi: Close() uni albatta ko'radi
+	// va shu nusxalarni kutadi (copies Add — closed=false bo'lganda, Wait dan
+	// oldin).
 	t.pairs[publicCon] = privateCon
+	t.copies.Add(1)
 	t.consMx.Unlock()
+	defer t.copies.Done()
 
 	defer func() {
 		t.consMx.Lock()
@@ -301,36 +324,25 @@ func (t *tunnel) privateConnectionHandler(privateCon net.Conn) error {
 	defer publicCon.Close()
 
 	if len(initialBuffer) > 0 {
-		if _, err := privateCon.Write(initialBuffer); err != nil {
-			return err
-		}
-	}
-
-	go Bind(publicCon, privateCon, nil)
-	Bind(privateCon, publicCon, nil)
-	return nil
-}
-
-func Bind(src net.Conn, dst net.Conn, debug io.Writer) error {
-	defer src.Close()
-	defer dst.Close()
-	buf := make([]byte, 4096)
-	for {
-		n, err := src.Read(buf)
-		if n > 0 {
-			if _, writeErr := dst.Write(buf[:n]); writeErr != nil {
-				return writeErr
-			}
-			if debug != nil {
-				_, _ = debug.Write(buf[:n])
-			}
-		}
-		if err == io.EOF {
-			break
-		}
+		written, err := privateCon.Write(initialBuffer)
+		// Oldindan o'qilgan bufer ham ommaviy tomondan kelgan trafik.
+		t.usage.bytesIn.Add(uint64(written))
 		if err != nil {
 			return err
 		}
 	}
+
+	// Hisoblagich > 0 (yuqoridagi Add) — Wait davomida ham Add xavfsiz.
+	t.copies.Add(1)
+	go func() {
+		defer t.copies.Done()
+		_ = bindCounted(publicCon, privateCon, &t.usage.bytesIn, nil)
+	}()
+	_ = bindCounted(privateCon, publicCon, &t.usage.bytesOut, nil)
 	return nil
+}
+
+// Bind src'dan dst'ga nusxalaydi (hisoblagichsiz).
+func Bind(src net.Conn, dst net.Conn, debug io.Writer) error {
+	return bindCounted(src, dst, nil, debug)
 }

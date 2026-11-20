@@ -91,6 +91,35 @@ type Renewer interface {
 	Renew(ctx context.Context, req Request) (*Grant, error)
 }
 
+// UsageWindow — bitta tunnelning bitta vaqt oynasidagi foydalanishi
+// (proto: cc01.v1.UsageWindow). AP uni (TunnelID, WindowStart) bo'yicha
+// idempotent saqlaydi, shuning uchun TunnelID har tunnel NUSXASI uchun
+// noyob bo'lishi shart.
+type UsageWindow struct {
+	TenantID    string // tenant slug (Grant.TenantID)
+	TunnelID    string
+	WindowStart int64 // unix sekund, oyna boshi (ichiga kiradi)
+	WindowEnd   int64 // unix sekund, oyna oxiri (kirmaydi); > WindowStart
+	BytesIn     uint64
+	BytesOut    uint64
+	Connections uint32
+	Rejected    uint32
+}
+
+// UsageReporter — foydalanish oynalarini AP'ga yuboruvchi (ixtiyoriy
+// interfeys, Renewer kabi).
+//
+// accepted — AP qabul qilgan oynalar soni (0..len(windows)): chaqiruvchi
+// navbat boshidan shuncha oynani o'chiradi, qolganini qayta yuboradi.
+// Xato (AP yo'q, Unavailable, taymaut) — ErrUnavailable'ni o'rab oladi;
+// bunda hech bir oyna qabul qilinmagan deb hisoblanadi.
+//
+// AllowAll bu interfeysni ataylab amalga oshirmaydi: avtorizatsiya
+// o'chirilgan rejimda hisobot qabul qiladigan AP yo'q.
+type UsageReporter interface {
+	ReportUsage(ctx context.Context, windows []UsageWindow) (accepted int, err error)
+}
+
 // AllowAll — avtorizatsiya o'chirilgan rejim (CC01_AUTH_MODE=disabled).
 //
 // Faqat lokal ishlab chiqish va sinov uchun. Har qanday token qabul

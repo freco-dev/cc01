@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -962,8 +963,10 @@ func TestServe_RenewalAppliesNewLimitsToOpenTunnel(t *testing.T) {
 	eventually(t, 5*time.Second, "max_conns 128 bo'ldi", func() bool { return maxConns() == 128 })
 
 	// Log limit o'rnatilgandan keyin yoziladi — uni ham kutamiz.
+	// ID har nusxaga noyob: "<host>:<port>/<16 hex>".
+	limitsLine := regexp.MustCompile(`\[tunnel-limits\] demo\.cc01\.test:80/[0-9a-f]{16} plan=pro max_conns=128`)
 	eventually(t, 5*time.Second, "[tunnel-limits] yozildi", func() bool {
-		return strings.Contains(h.logs.String(), "[tunnel-limits] demo.cc01.test:80 plan=pro max_conns=128")
+		return limitsLine.MatchString(h.logs.String())
 	})
 	for _, c := range ap.callLog() {
 		if c.req.Subdomain != "demo" || !c.req.Renewal {
@@ -1160,8 +1163,9 @@ func TestServe_TCPRegistryCleanedOnClose(t *testing.T) {
 	if !registered {
 		t.Fatalf("tcpTunnels[%d] yo'q", port)
 	}
-	if want := fmt.Sprintf("dbx.cc01.test:%d", port); opened.GetTunnelId() != want {
-		t.Errorf("tunnel ID %q, %q kutilgan", opened.GetTunnelId(), want)
+	idPattern := regexp.MustCompile(fmt.Sprintf(`^dbx\.cc01\.test:%d/[0-9a-f]{16}$`, port))
+	if !idPattern.MatchString(opened.GetTunnelId()) {
+		t.Errorf("tunnel ID %q, %s kutilgan", opened.GetTunnelId(), idPattern)
 	}
 
 	// Accept sikli ishlayotganiga ishonch hosil qilamiz (server.TCPServer
