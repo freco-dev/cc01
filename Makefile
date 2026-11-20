@@ -330,7 +330,20 @@ db-sql: ## Migratsiyalarni SQL ko'rinishida chiqaradi (review uchun)
 # (`ps`/`/proc/<pid>/cmdline` da ko'rinmaydi): sarlavhani bash'ning ichki
 # printf'i stdin orqali beradi (`-H @-`, curl ≥ 7.55).
 # AP'da Internal__AdminKey shu qiymatga teng.
+#
+# mTLS (A-S5): AP ichki listeneri sertifikat talab qilsa, operator o'z
+# klient sertifikatini beradi — CN AP'ning Internal__Tls__AllowedClients
+# ro'yxatida bo'lishi shart:
+#   CC01_ADMIN_CERT=.dev-certs/operator.pem CC01_ADMIN_CERT_KEY=.dev-certs/operator.key \
+#   CC01_ADMIN_CA=.dev-certs/ca.pem make ap-set-plan ...
+# Admin kalit baribir kerak: sertifikat "kim ulanmoqda"ni, kalit esa
+# "tarifni o'zgartirishga haqqi bor"ni tasdiqlaydi — edge sertifikati
+# sizib chiqsa ham tarif o'zgarmaydi.
+ifdef CC01_ADMIN_CERT
+AP_INTERNAL ?= https://127.0.0.1:5081
+else
 AP_INTERNAL ?= http://127.0.0.1:5081
+endif
 
 .PHONY: ap-set-plan
 ap-set-plan: ## Tenant tarifini o'zgartiradi:  make ap-set-plan SLUG=t_... PLAN=pro ACTOR=aziz REASON=...
@@ -343,8 +356,16 @@ ap-set-plan: ## Tenant tarifini o'zgartiradi:  make ap-set-plan SLUG=t_... PLAN=
 	@case "$$CC01_ADMIN_KEY" in *[$$'\r\n']*) \
 	  echo "✘ CC01_ADMIN_KEY ichida qator oxiri belgisi bor."; exit 1 ;; \
 	esac
-	@printf 'X-Cc01-Admin-Key: %s\n' "$$CC01_ADMIN_KEY" | \
-	curl --fail-with-body --silent --show-error --http2-prior-knowledge -w '\n' \
+	@if [ -n "$$CC01_ADMIN_CERT" ]; then \
+	  if [ -z "$$CC01_ADMIN_CERT_KEY" ] || [ -z "$$CC01_ADMIN_CA" ]; then \
+	    echo "✘ CC01_ADMIN_CERT berilgan, lekin CC01_ADMIN_CERT_KEY yoki CC01_ADMIN_CA yo'q."; exit 1; \
+	  fi; \
+	  transport=(--http2 --cert "$$CC01_ADMIN_CERT" --key "$$CC01_ADMIN_CERT_KEY" --cacert "$$CC01_ADMIN_CA"); \
+	else \
+	  transport=(--http2-prior-knowledge); \
+	fi; \
+	printf 'X-Cc01-Admin-Key: %s\n' "$$CC01_ADMIN_KEY" | \
+	curl --fail-with-body --silent --show-error "$${transport[@]}" -w '\n' \
 	  -X PUT $(AP_INTERNAL)/internal/v1/tenants/$(SLUG)/subscription \
 	  -H @- -H "X-Cc01-Actor: $(ACTOR)" \
 	  -H 'content-type: application/json' \
@@ -368,6 +389,10 @@ check-docker: ## Docker konteksti lokal ekanini tekshiradi
 	     echo "      make dev-up DOCKER_CONTEXT=desktop-linux"; \
 	     exit 1 ;; \
 	esac
+
+.PHONY: dev-certs
+dev-certs: ## AP ↔ Edge mTLS uchun dev sertifikatlari (.dev-certs/; FORCE=1 — qayta)
+	@FORCE=$(FORCE) deploy/dev-certs.sh
 
 .PHONY: dev-up
 dev-up: check-docker ## Dev bog'liqliklarini ko'taradi (postgres + redis)

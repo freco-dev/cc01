@@ -81,7 +81,7 @@ func newTestClientWith(t *testing.T, fake *fakeAccessServer, opts Options) *Clie
 
 	go func() { _ = server.Serve(listener) }()
 
-	opts.Address = "passthrough:///bufnet"
+	opts.Address = "passthrough:///localhost:0" // bufconn; loopback — shifrsiz ruxsat etilgan
 	if opts.Timeout == 0 {
 		opts.Timeout = time.Second
 	}

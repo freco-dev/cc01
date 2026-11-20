@@ -3,6 +3,7 @@ package access
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -10,9 +11,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/freco-dev/cc01/core-server/config"
 	cc01v1 "github.com/freco-dev/cc01/proto/gen/cc01/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -77,6 +80,11 @@ type Options struct {
 	// dan kechroq ko'rardi. 0 — chegara yo'q (LeaseTTL ishlatiladi).
 	MaxFresh time.Duration
 
+	// TLS — edge→AP kanalining mTLS sozlamasi (config.AccessClientTLS:
+	// faqat ichki CA, klient sertifikati, TLS 1.3). nil — shifrsiz, faqat
+	// loopback manzil uchun; boshqa manzilda Dial xato qaytaradi.
+	TLS *tls.Config
+
 	// DialOptions — qo'shimcha gRPC sozlamalari. Testlarda bufconn
 	// dialer'ini berish uchun; prod'da bo'sh qoladi.
 	DialOptions []grpc.DialOption
@@ -115,11 +123,14 @@ func Dial(opts Options) (*Client, error) {
 		opts.Grace = 15 * time.Minute
 	}
 
-	// TODO(Faza 1): mTLS. Hozircha ulanish ichki tarmoqda va loopback'da
-	// (DEV_SPEC §7.2 S-11) — sertifikatlar Faza 1 da qo'shiladi.
+	creds, err := transportCredentials(opts.Address, opts.TLS)
+	if err != nil {
+		return nil, err
+	}
+
 	dialOptions := append(
 		[]grpc.DialOption{
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithTransportCredentials(creds),
 			grpc.WithConnectParams(reconnectParams),
 		},
 		opts.DialOptions...)
@@ -137,6 +148,46 @@ func Dial(opts Options) (*Client, error) {
 		maxFresh: opts.MaxFresh,
 		cache:    make(map[string]*tokenCache),
 	}, nil
+}
+
+// transportCredentials edge→AP kanali uchun transport himoyasini tanlaydi
+// (DEV_SPEC §7.2 S-11).
+//
+// Asosiy tekshiruv config'da (ishga tushishda); bu yerdagisi — ikkinchi
+// qatlam: Dial'ni boshqa joydan chaqirgan kod ham tokenlarni tarmoq
+// orqali shifrsiz yubora olmasligi yoki tizim ildizlariga ishona
+// olmasligi uchun.
+func transportCredentials(address string, tlsConfig *tls.Config) (credentials.TransportCredentials, error) {
+	if tlsConfig == nil {
+		if !config.IsLoopbackAddr(address) {
+			return nil, fmt.Errorf(
+				"access-server'ga shifrsiz ulanish rad etildi (%s): manzil loopback emas, mTLS kerak",
+				address)
+		}
+		return insecure.NewCredentials(), nil
+	}
+
+	switch {
+	case tlsConfig.InsecureSkipVerify:
+		return nil, errors.New("access-server mTLS: InsecureSkipVerify ruxsat etilmagan")
+	case tlsConfig.RootCAs == nil:
+		return nil, errors.New("access-server mTLS: RootCAs bo'sh — faqat ichki CA'ga ishoniladi, tizim ildizlariga emas")
+	case len(tlsConfig.Certificates) == 0 && tlsConfig.GetClientCertificate == nil:
+		return nil, errors.New("access-server mTLS: edge klient sertifikati yo'q")
+	}
+
+	// TLS 1.3 majburiy. Yagona istisno — loopback'dagi AP bilan TLS 1.2
+	// (config: CC01_ACCESS_TLS_MIN=1.2, macOS'dagi dev AP uchun). Tarmoq
+	// manzilida 1.2 so'ralgan bo'lsa ham 1.3 ga ko'tariladi.
+	minVersion := uint16(tls.VersionTLS13)
+	if tlsConfig.MinVersion == tls.VersionTLS12 && config.IsLoopbackAddr(address) {
+		minVersion = tls.VersionTLS12
+	}
+	tlsConfig = tlsConfig.Clone()
+	if tlsConfig.MinVersion < minVersion {
+		tlsConfig.MinVersion = minVersion
+	}
+	return credentials.NewTLS(tlsConfig), nil
 }
 
 func (c *Client) Close() error { return c.conn.Close() }

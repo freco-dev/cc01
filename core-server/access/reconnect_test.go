@@ -39,7 +39,7 @@ func TestDial_ReconnectBackoffIsBounded(t *testing.T) {
 	})
 
 	client, err := Dial(Options{
-		Address:     "passthrough:///ap-yoq",
+		Address:     "passthrough:///127.0.0.1:0", // dialer rad etadi; loopback — shifrsiz
 		Timeout:     100 * time.Millisecond,
 		DialOptions: []grpc.DialOption{refuse},
 	})

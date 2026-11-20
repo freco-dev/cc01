@@ -1,6 +1,7 @@
 package config
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"os"
@@ -47,6 +48,14 @@ type Config struct {
 	AccessAddr    string
 	AccessTimeout time.Duration
 	AccessGrace   time.Duration
+
+	// AccessTLS — edge→AP kanalining mTLS sozlamasi (accesstls.go). nil —
+	// shifrsiz, faqat loopback CC01_ACCESS_ADDR uchun ruxsat etiladi.
+	// AuthMode=disabled bo'lsa doim nil. Ishga tushishda bir marta
+	// o'qiladi: sertifikat almashtirilsa edge qayta ishga tushiriladi.
+	AccessTLS *tls.Config
+	// AccessTLSInfo — AccessTLS haqida log uchun ma'lumot (nil — shifrsiz).
+	AccessTLSInfo *AccessTLSInfo
 
 	// AccessRenew — ochiq tunnel ruxsatini AP'da qayta tekshirish oralig'i
 	// (lease yangilanishi). 0 — yangilash o'chirilgan (kill switch): ochiq
@@ -203,6 +212,14 @@ func (c *Config) loadAuth() error {
 
 	default:
 		return fmt.Errorf("CC01_AUTH_MODE noma'lum: %q (required yoki disabled)", c.AuthMode)
+	}
+
+	// Avtorizatsiya o'chirilgan rejimda AP'ga ulanish yo'q — TLS
+	// sozlamalari e'tiborsiz qoldiriladi.
+	if c.AuthMode != AuthDisabled {
+		if err := c.loadAccessTLS(); err != nil {
+			return err
+		}
 	}
 
 	var err error

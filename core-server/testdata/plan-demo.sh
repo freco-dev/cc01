@@ -10,8 +10,12 @@
 #      edge `[tunnel-renew-failed]` yozadi va qayta urinadi.
 #   4. Token bekor qilinsa ochiq tunnel yopiladi: klient TOKEN_REVOKED
 #      bilan 1 kodi bilan chiqadi, edge registridan o'chadi.
+#   5. (MTLS=1, sukut) AP ↔ Edge kanali mTLS (A-S5, S-11): edge va operator
+#      ichki CA sertifikati bilan ulanadi; sertifikatsiz yoki begona CA
+#      imzolagan sertifikat bilan ulanish TLS darajasida rad etiladi.
+#      MTLS=0 — eski h2c rejimi (faqat loopback'da ruxsat).
 #
-# Talablar: Go, .NET SDK, curl, perl, Docker (faqat dev Postgres uchun).
+# Talablar: Go, .NET SDK, curl, perl, openssl, Docker (faqat dev Postgres uchun).
 # Hamma narsa loopback'da; portlarni muhit o'zgaruvchilari bilan
 # almashtirish mumkin (pastda). KEEP=1 — vaqtinchalik papka qoldiriladi.
 #
@@ -56,12 +60,18 @@ BOUND_S=$((R_S + TIMEOUT_S))  # nazariy eng yomon holat
 SLO_S=60
 
 DOMAIN=cc01.test
+MTLS=${MTLS:-1}
 AP_PUBLIC="http://127.0.0.1:$AP_PUBLIC_PORT"
-AP_INTERNAL="http://127.0.0.1:$AP_INTERNAL_PORT"
+if [ "$MTLS" = "1" ]; then
+  AP_INTERNAL="https://127.0.0.1:$AP_INTERNAL_PORT"
+else
+  AP_INTERNAL="http://127.0.0.1:$AP_INTERNAL_PORT"
+fi
 AP_DIR="$ROOT/access-server/src/AccessServer.Api"
 AP_DLL="$AP_DIR/bin/Debug/net10.0/AccessServer.Api.dll"
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/cc01-plan-demo.XXXXXX")
+CERTS="$WORK/certs"   # har ishga tushishda yangi — repodagi .dev-certs ga tegmaydi
 AP_PID= EDGE_PID= ORIGIN_PID= CLI_PID=
 
 cleanup() {
@@ -124,7 +134,13 @@ start_ap() {
   # Renewal grantlari Debug darajasida log'lanadi — edge AP'ga qayta
   # ulanganini shu yozuvdan bilamiz.
   # Admin kaliti `env` argv'iga emas, eksport orqali beriladi.
-  (cd "$AP_DIR" && export Internal__AdminKey="$ADMIN_KEY" && exec env \
+  local tls=()
+  if [ "$MTLS" = "1" ]; then
+    tls=(Internal__Tls__CertPath="$CERTS/ap.pem" Internal__Tls__KeyPath="$CERTS/ap.key"
+         Internal__Tls__ClientCaPath="$CERTS/ca.pem"
+         Internal__Tls__AllowedClients="edge-dev,operator-dev")
+  fi
+  (cd "$AP_DIR" && export Internal__AdminKey="$ADMIN_KEY" && exec env ${tls[@]+"${tls[@]}"} \
     ASPNETCORE_ENVIRONMENT=Development \
     ConnectionStrings__Access="$DEV_DB" \
     Public__Address=127.0.0.1 Public__Port="$AP_PUBLIC_PORT" \
@@ -157,13 +173,38 @@ dotnet build "$AP_DIR" --nologo -v q >"$WORK/dotnet-build.log" 2>&1 \
   || { tail -20 "$WORK/dotnet-build.log"; fail "AP qurilmadi"; }
 echo "  ✔ edge, klient, origin, AP"
 
+EDGE_TLS=()
+if [ "$MTLS" = "1" ]; then
+  echo "── mTLS sertifikatlari ──"
+  CC01_DEV_CERTS="$CERTS" "$ROOT/deploy/dev-certs.sh" >"$WORK/certs.log" 2>&1 \
+    || { cat "$WORK/certs.log"; fail "sertifikatlar yaratilmadi"; }
+  echo "  ✔ ichki CA, ap, edge (CN=edge-dev), operator (CN=operator-dev), begona CA"
+  EDGE_TLS=(CC01_ACCESS_TLS_CA="$CERTS/ca.pem" CC01_ACCESS_TLS_CERT="$CERTS/edge.pem"
+            CC01_ACCESS_TLS_KEY="$CERTS/edge.key")
+  # macOS'da .NET server tomonda TLS 1.3 ni qo'llamaydi (SecureTransport) —
+  # lokal AP faqat TLS 1.2 da gaplashadi. Edge buni faqat loopback'dagi AP
+  # uchun qabul qiladi; Linux'da 1.3 sinaladi.
+  if [ "$(uname -s)" = "Darwin" ]; then
+    EDGE_TLS+=(CC01_ACCESS_TLS_MIN=1.2)
+    echo "  macOS: edge→AP TLS 1.2 (CC01_ACCESS_TLS_MIN=1.2, faqat loopback)"
+  fi
+  export CC01_ADMIN_CERT="$CERTS/operator.pem" CC01_ADMIN_CERT_KEY="$CERTS/operator.key" \
+         CC01_ADMIN_CA="$CERTS/ca.pem"
+fi
+
 echo "── AP ──"
 ADMIN_KEY=$(openssl rand -hex 24)
 start_ap "$WORK/ap.log"
-echo "  public $AP_PUBLIC, ichki $AP_INTERNAL (h2c, admin kaliti bilan)"
+if [ "$MTLS" = "1" ]; then
+  echo "  public $AP_PUBLIC, ichki $AP_INTERNAL (mTLS + admin kaliti)"
+else
+  echo "  public $AP_PUBLIC, ichki $AP_INTERNAL (h2c, admin kaliti bilan)"
+fi
 
 echo "── edge ──"
-env CC01_DOMAIN=$DOMAIN \
+# Bo'sh massiv `set -u` da bash 3.2 (macOS) uchun "unbound variable" —
+# shuning uchun ${a[@]+"${a[@]}"} shakli.
+env ${EDGE_TLS[@]+"${EDGE_TLS[@]}"} CC01_DOMAIN=$DOMAIN \
   CC01_TLS_CERT="$ROOT/core-server/server/sample.crt" \
   CC01_TLS_KEY="$ROOT/core-server/server/sample.key" \
   CC01_PUBLIC_PORT="$EDGE_HTTP_PORT" CC01_PUBLIC_TLS_PORT="$EDGE_TLS_PORT" \
@@ -280,6 +321,33 @@ echo "  ✔ gRPC AuthorizeTunnel → 404"
 curl -sf "$AP_PUBLIC/v1/plan" -H "authorization: Bearer $JWT" | grep -q '"plan":"free"' \
   || fail "soxta so'rov tarifni o'zgartirdi"
 echo "  ✔ tarif o'zgarmadi (free)"
+
+if [ "$MTLS" = "1" ]; then
+  echo
+  echo "═══ A-S5: ichki listener mTLS ═══"
+  # internal <nom> [curl argumentlari...] — HTTP kodi; TLS rad etsa "000".
+  internal() {
+    local name=$1; shift
+    printf 'X-Cc01-Admin-Key: %s\n' "$ADMIN_KEY" | curl -s -o /dev/null -w '%{http_code}' \
+      --max-time 5 --http2 --cacert "$CERTS/ca.pem" "$@" -X PUT \
+      -H @- -H 'X-Cc01-Actor: hujumchi' -H 'content-type: application/json' \
+      -d '{"plan":"enterprise"}' "$AP_INTERNAL/internal/v1/tenants/$SLUG/subscription" || true
+  }
+  CODE=$(internal "sertifikatsiz")
+  [ "$CODE" = "000" ] || fail "sertifikatsiz ulanish qabul qilindi: $CODE"
+  echo "  ✔ klient sertifikatisiz → TLS rad etdi"
+  CODE=$(internal "begona CA" --cert "$CERTS/rogue-edge.pem" --key "$CERTS/rogue-edge.key")
+  [ "$CODE" = "000" ] || fail "begona CA sertifikati qabul qilindi: $CODE"
+  echo "  ✔ begona CA imzolagan CN=edge-dev → TLS rad etdi"
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 --http2-prior-knowledge \
+    -X POST "http://127.0.0.1:$AP_INTERNAL_PORT/cc01.v1.AccessInternalService/AuthorizeTunnel" \
+    -H 'content-type: application/grpc' --data-binary @/dev/null || true)
+  [ "$CODE" = "000" ] || fail "ichki port shifrlanmagan h2c ga javob berdi: $CODE"
+  echo "  ✔ shifrlanmagan h2c → ulanish uzildi"
+  curl -sf "$AP_PUBLIC/v1/plan" -H "authorization: Bearer $JWT" | grep -q '"plan":"free"' \
+    || fail "rad etilgan ulanish tarifni o'zgartirdi"
+  echo "  ✔ tarif o'zgarmadi; edge va operator esa yuqorida mTLS orqali ishladi"
+fi
 
 echo
 echo "═══ fail-static: AP o'chirildi ═══"

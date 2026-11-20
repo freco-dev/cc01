@@ -12,6 +12,19 @@ func setBaseEnv(t *testing.T) {
 	t.Setenv("CC01_DOMAIN", "cc01.site")
 	t.Setenv("CC01_TLS_KEY", "key.pem")
 	t.Setenv("CC01_TLS_CERT", "cert.pem")
+	clearAccessTLSEnv(t)
+}
+
+// clearAccessTLSEnv edge→AP mTLS o'zgaruvchilarini bo'shatadi — testlar
+// ishlab chiquvchi muhitidagi qiymatlarga bog'liq bo'lmasligi uchun.
+func clearAccessTLSEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"CC01_ACCESS_TLS_CA", "CC01_ACCESS_TLS_CERT",
+		"CC01_ACCESS_TLS_KEY", "CC01_ACCESS_TLS_SERVER_NAME",
+	} {
+		t.Setenv(name, "")
+	}
 }
 
 func TestLoad_WithAccessAddr(t *testing.T) {
@@ -254,6 +267,11 @@ func loadRaw(t *testing.T, env map[string]string) (Config, error) {
 		"CC01_ACME_EMAIL": "",
 		"CC01_ACME_DIR":   "",
 		"CC01_ACME_CA":    "",
+
+		"CC01_ACCESS_TLS_CA":          "",
+		"CC01_ACCESS_TLS_CERT":        "",
+		"CC01_ACCESS_TLS_KEY":         "",
+		"CC01_ACCESS_TLS_SERVER_NAME": "",
 	}
 	for key, value := range env {
 		base[key] = value

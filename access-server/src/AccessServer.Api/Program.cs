@@ -18,8 +18,9 @@ var builder = WebApplication.CreateBuilder(args);
 // Ikkita listener ATAYLAB ajratilgan (DEV_SPEC §6.4):
 //
 //   Public   — REST API, HTTP/1.1+2. Internetga ochiladi.
-//   Internal — AP ↔ Edge gRPC kontrakti, h2c. HECH QACHON internetga
-//              chiqmaydi; sukut bo'yicha faqat loopback.
+//   Internal — AP ↔ Edge gRPC kontrakti, HTTP/2. HECH QACHON internetga
+//              chiqmaydi. Loopback'da h2c bo'lishi mumkin; tarmoq
+//              manziliga faqat mTLS bilan (A-S5).
 //
 // ⚠️ Endpointlar oshkora ko'rsatilgani uchun ASPNETCORE_URLS va
 //    launchSettings dagi applicationUrl E'TIBORGA OLINMAYDI — bu Kestrel'ning
@@ -30,10 +31,10 @@ var internalAddress = builder.Configuration.GetValue("Internal:Address", "127.0.
 var internalPort = builder.Configuration.GetValue("Internal:Port", 5081);
 
 // Bir xil port, turli IP (masalan 10.0.0.5:5081 va 127.0.0.1:5081) — ikkala
-// bind ham muvaffaqiyatli bo'ladi, lekin RequireHost("*:5081") public
-// so'rovning o'z Host'iga ham mos keladi va ichki/public farqi faqat
-// ulanish belgisiga qolib ketadi. Bu deyarli har doim xato sozlama —
-// ishga tushirmaymiz (A-S19).
+// bind ham muvaffaqiyatli bo'ladi va ikki listener'ni faqat ulanish belgisi
+// ajratib turadi; operator va monitoring uchun esa port raqami ham farq
+// qilishi kerak. Bu deyarli har doim xato sozlama — ishga tushirmaymiz
+// (A-S19).
 if (publicPort == internalPort)
 {
     throw new InvalidOperationException(
@@ -41,16 +42,26 @@ if (publicPort == internalPort)
         + "operator API) alohida portda bo'lishi shart — boshqa port tanlang.");
 }
 
+// Ichki listener transporti (A-S5, S-11): Internal:Tls:CertPath berilsa —
+// mTLS (TLS 1.3, klient sertifikati majburiy, CN allowlist); aks holda h2c,
+// lekin FAQAT loopback'da. Sozlama noto'g'ri bo'lsa server shu yerda
+// to'xtaydi. Tafsilotlar: Common/InternalTls.cs.
+var internalTls = InternalTls.Load(builder.Configuration, IPAddress.Parse(internalAddress), internalPort);
+
 builder.WebHost.ConfigureKestrel(kestrel =>
 {
     kestrel.Listen(IPAddress.Parse(publicAddress), publicPort,
         listen => listen.Protocols = HttpProtocols.Http1AndHttp2);
 
+    var tlsLogger = kestrel.ApplicationServices
+        .GetRequiredService<ILoggerFactory>()
+        .CreateLogger<InternalTls>();
+
     // MarkInternal — shu listener qabul qilgan har bir ulanishni belgilaydi;
     // guard port raqamiga emas, shu belgiga tayanadi.
-    kestrel.Listen(IPAddress.Parse(internalAddress), internalPort, listen =>
+    kestrel.Listen(internalTls.Address, internalTls.Port, listen =>
     {
-        listen.Protocols = HttpProtocols.Http2;
+        internalTls.Configure(listen, tlsLogger);
         listen.MarkInternal();
     });
 });
@@ -137,16 +148,7 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
-// Ichki listener internetga chiqmasligi kerak. Pod/klaster IP'siga
-// bog'lash mumkin (masalan edge boshqa konteynerda), lekin bu ongli qaror
-// bo'lishi kerak — mTLS (A-S5) hali yo'q, himoya faqat admin kaliti.
-if (!IPAddress.IsLoopback(IPAddress.Parse(internalAddress)))
-{
-    app.Logger.LogWarning(
-        "Internal:Address loopback emas ({InternalAddress}:{InternalPort}) — ichki gRPC va "
-        + "operator API tarmoqdan ko'rinadi. Port internetga ochilmaganiga ishonch hosil qiling.",
-        internalAddress, internalPort);
-}
+internalTls.LogMode(app.Logger);
 
 app.UseExceptionHandler();
 
@@ -164,14 +166,13 @@ app.MapSubdomainEndpoints();
 app.MapPlanEndpoints();
 app.MapOAuthEndpoints(oauthProviders);
 
-// Servis faqat ichki listener'da javob beradi. RequireHost yolg'iz yetarli
-// emas (Host sarlavhasini klient yozadi) — RequireInternalListener ulanishni
-// qaysi listener qabul qilganini ham tekshiradi. Public portga kelgan gRPC
-// so'rovi 404 oladi.
+// Servis faqat ichki listener'da javob beradi: RequireInternalListener
+// ulanishni qaysi listener qabul qilganini tekshiradi (Host sarlavhasiga
+// emas — uni klient yozadi). Public portga kelgan gRPC so'rovi 404 oladi.
 app.MapGrpcService<TunnelAuthorizationService>()
-    .RequireInternalListener(internalPort);
+    .RequireInternalListener();
 
-app.MapInternalPlanEndpoints(internalPort, builder.Configuration["Internal:AdminKey"]);
+app.MapInternalPlanEndpoints(builder.Configuration["Internal:AdminKey"]);
 
 app.MapHealthChecks("/livez", new HealthCheckOptions { Predicate = _ => false })
     .ExcludeFromDescription();

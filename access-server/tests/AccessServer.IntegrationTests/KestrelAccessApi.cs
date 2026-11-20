@@ -45,7 +45,14 @@ public sealed class KestrelAccessApi : IAsyncDisposable
 
     public RecordingEmailSender Emails => Factory.Services.GetRequiredService<RecordingEmailSender>();
 
-    public static KestrelAccessApi Start(string connectionString, string? adminKey)
+    /// <param name="extraSettings">
+    /// Qo'shimcha sozlamalar (masalan Internal:Tls:*). mTLS yoqilsa
+    /// <see cref="Internal"/> (h2c) ishlamaydi — test o'z klientini quradi.
+    /// </param>
+    public static KestrelAccessApi Start(
+        string connectionString,
+        string? adminKey,
+        IReadOnlyDictionary<string, string?>? extraSettings = null)
     {
         var publicPort = FreePort();
         var internalPort = FreePort();
@@ -61,6 +68,11 @@ public sealed class KestrelAccessApi : IAsyncDisposable
         if (adminKey is not null)
         {
             settings["Internal:AdminKey"] = adminKey;
+        }
+
+        foreach (var (key, value) in extraSettings ?? new Dictionary<string, string?>())
+        {
+            settings[key] = value;
         }
 
         var factory = new AccessApiFactory(connectionString, settings);
