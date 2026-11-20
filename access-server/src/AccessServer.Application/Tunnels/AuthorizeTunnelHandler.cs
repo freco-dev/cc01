@@ -1,5 +1,6 @@
 using AccessServer.Application.Abstractions;
 using AccessServer.Application.Common;
+using AccessServer.Application.Plans;
 using AccessServer.Application.Subdomains;
 using AccessServer.Application.Validation;
 using AccessServer.Domain.Entities;
@@ -13,22 +14,35 @@ public sealed record AuthorizeTunnelCommand(
     string? Subdomain,
     string? CustomDomain,
     string? CliVersion,
-    string? ClientIp);
+    string? ClientIp,
+    bool IsRenewal = false);
 
 /// <summary>
-/// Edge server tunnel ochish so'rovini shu yerda avtorizatsiya qiladi
-/// (ARCHITECTURE.md §3.4.3). Bu yagona joy — edge o'zi qaror qabul qilmaydi.
+/// Edge server tunnel ochish so'rovini va ochiq tunnel lease yangilanishini
+/// (<see cref="AuthorizeTunnelCommand.IsRenewal"/>) shu yerda avtorizatsiya
+/// qiladi (ARCHITECTURE.md §3.4.3). Bu yagona joy — edge o'zi qaror qabul
+/// qilmaydi.
 /// </summary>
 public sealed class AuthorizeTunnelHandler(
     IAccessDbContext db,
     IApiTokenFactory tokenFactory,
+    EffectivePlanResolver planResolver,
     TimeProvider timeProvider)
 {
     /// <summary>
-    /// Edge natijani shu muddat davomida keshlashi mumkin. Qisqa: token
-    /// bekor qilinganda o'zgarish shuncha vaqtda kuchga kiradi.
+    /// Edge natijani yangi ochilishlar uchun shu muddat davomida keshlashi
+    /// mumkin. Ochiq tunnel lease'ini esa ko'pi bilan LeaseTtlSeconds/2 da
+    /// yangilaydi — tarif o'zgarishi yoki token bekor qilinishi 60 sekund
+    /// ichida ochiq tunnelga ham yetadi.
     /// </summary>
     public const int LeaseTtlSeconds = 60;
+
+    /// <summary>
+    /// Lease yangilanishida <c>last_used_at</c> shundan siyrakroq yozilmaydi.
+    /// Ochiq tunnel har ≤30 sekundda yangilanadi — har safar yozish bazaga
+    /// keraksiz yuk. Tunnel ochishda esa u har doim yoziladi.
+    /// </summary>
+    public static readonly TimeSpan LastUsedRenewalWriteInterval = TimeSpan.FromMinutes(5);
 
     public async Task<Result<AuthorizeTunnelGrant>> HandleAsync(
         AuthorizeTunnelCommand command,
@@ -57,25 +71,35 @@ public sealed class AuthorizeTunnelHandler(
             return Denied(TunnelDenial.PlanSuspended, "Hisob to'xtatilgan.");
         }
 
-        var limits = PlanCatalog.For(token.Tenant.Plan);
+        // Limitlar har safar bazadan: tarif o'zgarishi, muddat tugashi va
+        // katalog tahriri keyingi avtorizatsiyadayoq kuchga kiradi.
+        var plan = await planResolver.ResolveAsync(token.TenantId, cancellationToken);
 
-        var subdomain = await ResolveSubdomainAsync(token, command.Subdomain, limits, now, cancellationToken);
+        var subdomain = command.IsRenewal
+            ? await ResolveRenewalSubdomainAsync(token, command.Subdomain, cancellationToken)
+            : await ResolveSubdomainAsync(token, command.Subdomain, plan.Limits, now, cancellationToken);
         if (subdomain.Error is not null)
         {
             return subdomain.Error;
         }
 
-        // Token ishlatilgani qayd etiladi. Bu yozuv har bir tunnel ochishda
-        // bo'ladi — aniqligi soniya darajasida bo'lishi yetarli.
-        token.LastUsedAt = now;
-        await db.SaveChangesAsync(cancellationToken);
+        // Token ishlatilgani qayd etiladi. Tunnel ochishda har safar;
+        // yangilanishda esa siyrak — aniqligi daqiqalar darajasida yetarli,
+        // yangilanish esa asosan faqat o'qishdan iborat bo'lib qoladi.
+        if (!command.IsRenewal
+            || token.LastUsedAt is null
+            || now - token.LastUsedAt.Value >= LastUsedRenewalWriteInterval)
+        {
+            token.LastUsedAt = now;
+            await db.SaveChangesAsync(cancellationToken);
+        }
 
         return new AuthorizeTunnelGrant(
             token.CreatedByUserId,
             token.Tenant.Slug,
-            token.Tenant.Plan,
+            plan.Code,
             subdomain.Name!,
-            limits,
+            plan.Limits,
             LeaseTtlSeconds);
     }
 
@@ -102,6 +126,38 @@ public sealed class AuthorizeTunnelHandler(
         return tokenFactory.HashesEqual(token.TokenHash, tokenFactory.ComputeHash(raw))
             ? token
             : null;
+    }
+
+    /// <summary>
+    /// Ochiq tunnel lease'ini yangilash (ARCHITECTURE.md §3.4.3). Edge avval
+    /// BERILGAN nomni yuboradi. Nom mavjud, shu tenantniki va `Released`
+    /// emas bo'lishi shart — aks holda SubdomainNotOwned va edge tunnelni
+    /// yopadi. Bu yerda nom band qilinmaydi va kvota sanalmaydi: yangilanish
+    /// hech qachon yangi qator yaratmaydi.
+    /// </summary>
+    private async Task<(string? Name, Error? Error)> ResolveRenewalSubdomainAsync(
+        ApiToken token,
+        string? granted,
+        CancellationToken cancellationToken)
+    {
+        var name = granted?.Trim().ToLowerInvariant();
+
+        if (string.IsNullOrEmpty(name))
+        {
+            return (null, Denied(TunnelDenial.SubdomainNotOwned,
+                "Yangilanishda subdomain ko'rsatilmagan.").Error);
+        }
+
+        var owned = await db.Subdomains
+            .AsNoTracking()
+            .AnyAsync(s => s.Name == name
+                           && s.TenantId == token.TenantId
+                           && s.Status != SubdomainStatus.Released, cancellationToken);
+
+        return owned
+            ? (name, null)
+            : (null, Denied(TunnelDenial.SubdomainNotOwned,
+                $"'{name}' endi bu hisobga tegishli emas.").Error);
     }
 
     private async Task<(string? Name, Error? Error)> ResolveSubdomainAsync(
@@ -145,6 +201,24 @@ public sealed class AuthorizeTunnelHandler(
                     $"'{name}' boshqa hisobga tegishli.").Error);
             }
 
+            if (existing.Status != SubdomainStatus.Released)
+            {
+                return (existing.Name, null);
+            }
+
+            // Tenant o'zi bo'shatgan nom. Yangilanish `Released` ni rad etadi
+            // (ResolveRenewalSubdomainAsync) — shuning uchun bu yerda ham
+            // "egalik" holatiga qaytarmasdan berib bo'lmaydi, aks holda
+            // tunnel ochilib, birinchi yangilanishda (≤ 33 s) yopilardi.
+            // Qoida dashboard'dagi band qilish bilan bir xil: kvota ichida
+            // qayta olinadi.
+            if (!await db.Subdomains.TryReclaimAsync(existing, limits.MaxSubdomains, cancellationToken))
+            {
+                return (null, Denied(TunnelDenial.QuotaTunnelsExceeded,
+                    "Tarif bo'yicha subdomainlar limitiga yetdingiz.").Error);
+            }
+
+            await db.SaveChangesAsync(cancellationToken);
             return (existing.Name, null);
         }
 
@@ -152,9 +226,7 @@ public sealed class AuthorizeTunnelHandler(
         // `cc01 tunnel http 8080 --subdomain myapp` dashboardga kirmasdan
         // ishlaydi, lekin nom baribir EGALIK qilinadi: keyingi safar uni
         // boshqa hisob ololmaydi.
-        var owns = await db.Subdomains
-            .CountAsync(s => s.TenantId == token.TenantId
-                             && s.Status != SubdomainStatus.Released, cancellationToken);
+        var owns = await db.Subdomains.CountOwnedAsync(token.TenantId, cancellationToken);
 
         if (owns >= limits.MaxSubdomains)
         {

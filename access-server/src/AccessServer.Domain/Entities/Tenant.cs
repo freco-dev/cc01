@@ -15,8 +15,6 @@ public sealed class Tenant : Entity
 
     public required string Name { get; set; }
 
-    public PlanCode Plan { get; set; } = PlanCode.Free;
-
     public TenantStatus Status { get; set; } = TenantStatus.Active;
 
     public ICollection<User> Users { get; set; } = [];
@@ -24,4 +22,11 @@ public sealed class Tenant : Entity
     public ICollection<ApiToken> Tokens { get; set; } = [];
 
     public ICollection<Subdomain> Subdomains { get; set; } = [];
+
+    /// <summary>
+    /// Joriy tarif. Har bir tenantda bitta qator; limitlar to'g'ridan-to'g'ri
+    /// shu yerdan emas, EffectivePlanResolver orqali o'qiladi (muddat va
+    /// holat hisobga olinadi).
+    /// </summary>
+    public Subscription? Subscription { get; set; }
 }

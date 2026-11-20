@@ -30,8 +30,10 @@ type AccessInternalServiceClient interface {
 	// Tunnel ochish so'rovini avtorizatsiya qiladi: token → foydalanuvchi →
 	// subdomain egaligi → tarif kvotasi.
 	//
-	// Edge natijani 60 sekundgacha keshlaydi. Kesh TTL'i token bekor
-	// qilinganda o'zgarishning kuchga kirish kechikishini belgilaydi.
+	// Edge natijani lease muddatigacha keshlaydi, ochiq tunnellar uchun esa
+	// lease'ni har ≤30 sekundda yangilaydi. Shu sabab tarif o'zgarishi, token
+	// bekor qilinishi yoki hisob to'xtatilishi 60 sekund ichida ochiq
+	// tunnelga ham yetib boradi.
 	AuthorizeTunnel(ctx context.Context, in *AuthorizeTunnelRequest, opts ...grpc.CallOption) (*AuthorizeTunnelResponse, error)
 	// Usage hisoboti — billing uchun. Edge har 60 sekundda batch yuboradi.
 	// Idempotent: `window_start` + `tunnel_id` bo'yicha takrorlanish e'tiborsiz
@@ -74,8 +76,10 @@ type AccessInternalServiceServer interface {
 	// Tunnel ochish so'rovini avtorizatsiya qiladi: token → foydalanuvchi →
 	// subdomain egaligi → tarif kvotasi.
 	//
-	// Edge natijani 60 sekundgacha keshlaydi. Kesh TTL'i token bekor
-	// qilinganda o'zgarishning kuchga kirish kechikishini belgilaydi.
+	// Edge natijani lease muddatigacha keshlaydi, ochiq tunnellar uchun esa
+	// lease'ni har ≤30 sekundda yangilaydi. Shu sabab tarif o'zgarishi, token
+	// bekor qilinishi yoki hisob to'xtatilishi 60 sekund ichida ochiq
+	// tunnelga ham yetib boradi.
 	AuthorizeTunnel(context.Context, *AuthorizeTunnelRequest) (*AuthorizeTunnelResponse, error)
 	// Usage hisoboti — billing uchun. Edge har 60 sekundda batch yuboradi.
 	// Idempotent: `window_start` + `tunnel_id` bo'yicha takrorlanish e'tiborsiz

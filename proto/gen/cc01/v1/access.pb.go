@@ -95,13 +95,18 @@ func (DenialCode) EnumDescriptor() ([]byte, []int) {
 }
 
 type AuthorizeTunnelRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Token         string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"` // to'liq API token; AP faqat hash bilan solishtiradi
-	Protocol      Protocol               `protobuf:"varint,2,opt,name=protocol,proto3,enum=cc01.v1.Protocol" json:"protocol,omitempty"`
-	Subdomain     string                 `protobuf:"bytes,3,opt,name=subdomain,proto3" json:"subdomain,omitempty"` // so'ralgan nom; bo'sh bo'lsa AP tanlaydi
-	CustomDomain  string                 `protobuf:"bytes,4,opt,name=custom_domain,json=customDomain,proto3" json:"custom_domain,omitempty"`
-	CliVersion    string                 `protobuf:"bytes,5,opt,name=cli_version,json=cliVersion,proto3" json:"cli_version,omitempty"`
-	ClientIp      string                 `protobuf:"bytes,6,opt,name=client_ip,json=clientIp,proto3" json:"client_ip,omitempty"` // audit va rate limit uchun
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Token        string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"` // to'liq API token; AP faqat hash bilan solishtiradi
+	Protocol     Protocol               `protobuf:"varint,2,opt,name=protocol,proto3,enum=cc01.v1.Protocol" json:"protocol,omitempty"`
+	Subdomain    string                 `protobuf:"bytes,3,opt,name=subdomain,proto3" json:"subdomain,omitempty"` // so'ralgan nom; bo'sh bo'lsa AP tanlaydi
+	CustomDomain string                 `protobuf:"bytes,4,opt,name=custom_domain,json=customDomain,proto3" json:"custom_domain,omitempty"`
+	CliVersion   string                 `protobuf:"bytes,5,opt,name=cli_version,json=cliVersion,proto3" json:"cli_version,omitempty"`
+	ClientIp     string                 `protobuf:"bytes,6,opt,name=client_ip,json=clientIp,proto3" json:"client_ip,omitempty"` // audit va rate limit uchun
+	// true — ochiq tunnel lease'ini yangilash. AP bunda nom band qilmaydi,
+	// kvota sanamaydi va `last_used_at` ni siyrak yozadi. Edge `subdomain`
+	// maydoniga avval BERILGAN nomni qo'yadi. Eski AP bu maydonni e'tiborsiz
+	// qoldiradi va so'rovni oddiy ochilish sifatida ko'radi.
+	Renewal       bool `protobuf:"varint,7,opt,name=renewal,proto3" json:"renewal,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -176,6 +181,13 @@ func (x *AuthorizeTunnelRequest) GetClientIp() string {
 		return x.ClientIp
 	}
 	return ""
+}
+
+func (x *AuthorizeTunnelRequest) GetRenewal() bool {
+	if x != nil {
+		return x.Renewal
+	}
+	return false
 }
 
 type AuthorizeTunnelResponse struct {
@@ -270,8 +282,9 @@ type Grant struct {
 	// Yakuniy subdomain. So'ralgandan farq qilishi mumkin (AP tanlagan bo'lsa).
 	Subdomain string  `protobuf:"bytes,4,opt,name=subdomain,proto3" json:"subdomain,omitempty"`
 	Limits    *Limits `protobuf:"bytes,5,opt,name=limits,proto3" json:"limits,omitempty"`
-	// Ushbu ruxsatning amal qilish muddati (sekund). Edge shu muddat davomida
-	// qayta so'ramasligi mumkin; muddat tugagach yangilaydi.
+	// Ushbu ruxsatning amal qilish muddati (sekund). Edge yangi ochilishlar
+	// uchun natijani shu muddatgacha keshlashi mumkin; ochiq tunnel lease'ini
+	// esa ko'pi bilan lease_ttl_s/2 da yangilaydi.
 	LeaseTtlS     uint32 `protobuf:"varint,6,opt,name=lease_ttl_s,json=leaseTtlS,proto3" json:"lease_ttl_s,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -664,7 +677,7 @@ var File_cc01_v1_access_proto protoreflect.FileDescriptor
 
 const file_cc01_v1_access_proto_rawDesc = "" +
 	"\n" +
-	"\x14cc01/v1/access.proto\x12\acc01.v1\x1a\x14cc01/v1/tunnel.proto\"\xde\x01\n" +
+	"\x14cc01/v1/access.proto\x12\acc01.v1\x1a\x14cc01/v1/tunnel.proto\"\xf8\x01\n" +
 	"\x16AuthorizeTunnelRequest\x12\x14\n" +
 	"\x05token\x18\x01 \x01(\tR\x05token\x12-\n" +
 	"\bprotocol\x18\x02 \x01(\x0e2\x11.cc01.v1.ProtocolR\bprotocol\x12\x1c\n" +
@@ -672,7 +685,8 @@ const file_cc01_v1_access_proto_rawDesc = "" +
 	"\rcustom_domain\x18\x04 \x01(\tR\fcustomDomain\x12\x1f\n" +
 	"\vcli_version\x18\x05 \x01(\tR\n" +
 	"cliVersion\x12\x1b\n" +
-	"\tclient_ip\x18\x06 \x01(\tR\bclientIp\"v\n" +
+	"\tclient_ip\x18\x06 \x01(\tR\bclientIp\x12\x18\n" +
+	"\arenewal\x18\a \x01(\bR\arenewal\"v\n" +
 	"\x17AuthorizeTunnelResponse\x12&\n" +
 	"\x05grant\x18\x01 \x01(\v2\x0e.cc01.v1.GrantH\x00R\x05grant\x12)\n" +
 	"\x06denial\x18\x02 \x01(\v2\x0f.cc01.v1.DenialH\x00R\x06denialB\b\n" +

@@ -77,6 +77,12 @@ message TunnelRequested {
 //
 // `error_message` bo'sh bo'lmasa — so'rov rad etilgan va qolgan maydonlar
 // ma'noga ega emas. `error_code` mashina uchun, `error_message` odam uchun.
+//
+// Shu xabar tunnel OCHILGANDAN KEYIN ham kelishi mumkin — yopilish
+// xabarnomasi sifatida: lease yangilanishida AP qat'iy rad etsa (masalan
+// TOKEN_REVOKED, PLAN_SUSPENDED), server `error_code`/`error_message` ni
+// to'ldirib yuboradi va ulanishni yopadi. Eski klient bu freymni
+// e'tiborsiz qoldiradi va faqat ulanish uzilganini ko'radi.
 message TunnelOpened {
   string   hostname       = 1;  // "myapp.example.com"
   Protocol protocol       = 2;

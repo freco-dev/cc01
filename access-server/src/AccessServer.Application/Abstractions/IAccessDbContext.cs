@@ -20,5 +20,11 @@ public interface IAccessDbContext
 
     DbSet<UserVerificationToken> UserVerificationTokens { get; }
 
+    DbSet<Plan> Plans { get; }
+
+    DbSet<Subscription> Subscriptions { get; }
+
+    DbSet<AuditEvent> AuditEvents { get; }
+
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 }

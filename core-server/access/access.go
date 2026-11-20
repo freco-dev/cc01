@@ -3,18 +3,31 @@
 //
 // Kontrakt: proto/cc01/v1/access.proto, ARCHITECTURE.md §3.4.3.
 //
-// Muhim invariant: bu paket faqat tunnel OCHILAYOTGANDA chaqiriladi.
-// Ochilgandan keyin trafik access-server'ga tegmaydi — ya'ni AP yiqilsa
-// oqayotgan tunnellar ishlashda davom etadi.
+// Muhim invariant: access-server paket yo'lida EMAS. AuthorizeTunnel
+// tunnel ochilayotganda (Authorize) va har bir ochiq tunnel uchun davriy
+// ravishda — har ≤30 s (Renew, lease yangilanishi) — chaqiriladi; trafikning
+// o'zi hech qachon AP'ga tegmaydi. AP yo'qligi (tarmoq xatosi, Unavailable,
+// timeout) ochiq tunnelni hech qachon yopmaydi: tunnel oxirgi limitlar
+// bilan ishlashda davom etadi (fail-static). Ochiq tunnelni faqat AP'ning
+// aniq rad javobi (Denial) yopishi mumkin.
 package access
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
 
+// ErrUnavailable — access-server javob bermadi (tarmoq xatosi, Unavailable,
+// timeout). Bu rad javobi EMAS: ochiq tunnel bunday xato tufayli yopilmaydi.
+var ErrUnavailable = errors.New("access-server mavjud emas")
+
 // Grant — avtorizatsiya muvaffaqiyatli tugagandagi natija.
+//
+// Grant o'zgarmas: Client uni keshda saqlaydi va bir nechta chaqiruvchiga
+// bir xil ko'rsatkichni qaytaradi — chaqiruvchi maydonlarni o'zgartirmasligi
+// shart.
 type Grant struct {
 	UserID    int64
 	TenantID  string
@@ -27,6 +40,11 @@ type Grant struct {
 
 	// LeaseTTL — natijani shu muddat davomida keshlash mumkin.
 	LeaseTTL time.Duration
+
+	// IssuedAt — AP'ga RPC BOSHLANGAN vaqt (javob kelgan vaqt emas). Faqat
+	// Client o'rnatadi; kesh'dan qaytganda ham asl qiymati saqlanadi —
+	// birinchi yangilanish shu vaqtga bog'lanadi. AllowAll uchun nol.
+	IssuedAt time.Time
 }
 
 // Request — avtorizatsiya so'rovi.
@@ -37,6 +55,10 @@ type Request struct {
 	CustomDomain string
 	CliVersion   string
 	ClientIP     string
+
+	// Renewal — ochiq tunnel lease yangilanishi: AP nom band qilmaydi va
+	// kvota sanamaydi. Edge bunda BERILGAN subdomainni yuboradi.
+	Renewal bool
 }
 
 // Denial — so'rov rad etildi. Bu tarmoq xatosi EMAS: server javob berdi
@@ -55,6 +77,18 @@ func (d *Denial) Error() string {
 type Authorizer interface {
 	Authorize(ctx context.Context, req Request) (*Grant, error)
 	Close() error
+}
+
+// Renewer — ochiq tunnel ruxsatini qayta tekshiruvchi (ixtiyoriy interfeys).
+//
+// Renew hech qachon keshdagi natijani qaytarmaydi: har chaqiruv AP'ga
+// boradi. AP javob bermasa — ErrUnavailable'ni o'rab olgan xato (Denial
+// emas) qaytadi va chaqiruvchi oxirgi limitlarni saqlab qoladi.
+//
+// AllowAll bu interfeysni ataylab amalga oshirmaydi: avtorizatsiya
+// o'chirilgan rejimda yangilash ma'nosiz.
+type Renewer interface {
+	Renew(ctx context.Context, req Request) (*Grant, error)
 }
 
 // AllowAll — avtorizatsiya o'chirilgan rejim (CC01_AUTH_MODE=disabled).

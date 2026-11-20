@@ -1689,6 +1689,10 @@ Qo'shimcha qarorlar (kod yozilayotganda qabul qilingan):
 | `TimeProvider` inyeksiya qilinadi | `CreatedAt`/`UpdatedAt` `SaveChanges`da markazda qo'yiladi va testda soxtalashtiriladi |
 | `dotnet-ef` **lokal tool** (`dotnet-tools.json`) | Versiya repoda qayd etiladi; CI va ishlab chiquvchida bir xil |
 | `IDesignTimeDbContextFactory` | Migratsiya Api hostiga, DI'ga va sirlarga bog'lanmaydi |
+| Tarif katalogi — `plans` jadvali, `HasData` bilan seed (id 1–3, sobit vaqt tamg'asi, yangi qatorlar identity 100 dan) | Yagona manba. Kod ichida zaxira jadval **yo'q**: Free qatori bo'lmasa `InvalidOperationException` → gRPC `Internal` → edge buni tarmoq xatosi deb ko'radi (fail-static), noto'g'ri sozlama tunnelni o'ldirmaydi |
+| Tenant boshiga **bitta** `subscriptions` qatori, joyida yangilanadi (`xmin` parallellik tokeni); tarix `audit_events` da | "Eskisini yop, yangisini qo'sh" tartibi va unga bog'liq poyga yo'q. Parallel o'zgarish → `SUBSCRIPTION_CONFLICT` (409) |
+| Muddat **dangasa** tekshiriladi: `PeriodEnd` o'tgan, `Canceled` yoki obuna yo'q → Free limitlari (rad emas) | Fon vazifasi kerak emas; muddat tugashi edge'ga tarif o'zgarishi bilan bir xil yo'l (lease yangilanishi) orqali yetadi |
+| Seed qiymatini o'zgartirish — yangi migratsiya (`UpdateData`) | Bazada qo'lda tahrir modeldan uzoqlashadi; keyingi migratsiya uni jimgina qaytarib yozishi mumkin |
 
 ### 6.2 Domen modeli (EF Core)
 
@@ -1703,11 +1707,44 @@ public abstract class Entity {
 public sealed class Tenant : Entity {
     public required string Slug { get; set; }            // "t_9f3a", unique
     public required string Name { get; set; }
-    public PlanCode Plan { get; set; }                   // Free | Pro | Enterprise
     public TenantStatus Status { get; set; }
     public ICollection<User> Users { get; set; } = [];
     public ICollection<ApiToken> Tokens { get; set; } = [];
     public ICollection<Subdomain> Subdomains { get; set; } = [];
+    public Subscription? Subscription { get; set; }      // joriy tarif — bitta qator
+}
+
+// Tarif katalogi. Qiymatlar bazada (HasData), kodda nusxa yo'q.
+public sealed class Plan : Entity {
+    public PlanCode Code { get; set; }                   // Free | Pro | Enterprise — unique, matn
+    public required string Name { get; set; }
+    public int MaxSubdomains { get; set; }
+    public int MaxTunnels { get; set; }                  // edge node bo'yicha, ochilishda
+    public int MaxConnsPerTunnel { get; set; }           // edge'da jonli qo'llanadi
+    public long BandwidthBps { get; set; }               // 0 = cheklanmagan; hali MAJBURLANMAYDI
+}
+
+// Tenantda aniq bitta qator, joyida yangilanadi.
+public sealed class Subscription : Entity {
+    public int TenantId { get; set; }                    // unique, ON DELETE CASCADE
+    public Tenant Tenant { get; set; } = null!;
+    public int PlanId { get; set; }                      // ON DELETE RESTRICT
+    public Plan Plan { get; set; } = null!;
+    public SubscriptionStatus Status { get; set; }       // Active | Canceled
+    public DateTimeOffset PeriodStart { get; set; }
+    public DateTimeOffset? PeriodEnd { get; set; }       // null = muddatsiz; o'tgach → Free
+    public uint Version { get; set; }                    // Postgres xmin (parallellik tokeni)
+}
+
+// Minimal audit. Tenant/User'ga FK yo'q — yozuv ular o'chganda ham qoladi.
+public sealed class AuditEvent : Entity {
+    public int? TenantId { get; set; }
+    public int? UserId { get; set; }
+    public required string Actor { get; set; }           // "operator:aziz" — email EMAS
+    public required string Action { get; set; }          // "plan.changed"
+    public required string Target { get; set; }          // "tenant:t_9f3a"
+    public string? Ip { get; set; }
+    public string? Metadata { get; set; }                // jsonb: {from, to, periodEnd, reason}
 }
 
 public sealed class User : Entity {
@@ -1746,9 +1783,11 @@ public sealed class Subdomain : Entity {
 
 **Navigatsiya xossalari `required` emas** (`= null!`): EF ularni o'zi to'ldiradi. `required User User` deb yozilsa har bir entity yaratishda bog'liq obyektni majburan yuklash kerak bo'ladi — bu mavjud `UserToken` kodidagi xato.
 
-`CustomDomain`, `Plan`, `Subscription`, `UsageRecord`, `AuditEvent` — Faza 1/3 da (§8). Faza 0 da tarif limitlari `PlanCode` enumidan kod ichidagi jadval orqali olinadi; to'liq `Plan`/`Subscription` entity'lari Faza 1 da.
+`Plan`, `Subscription`, `AuditEvent` — Faza 1 da qo'shildi (`AddPlansAndSubscriptions` migratsiyasi): Faza 0 dagi kod ichidagi `PlanCatalog` va `Tenant.Plan` ustuni o'chirildi, mavjud tenantlar `subscriptions` ga ko'chirildi (noma'lum qiymat → Free), `Down()` ustunni tiklaydi. Effektiv limitlarni faqat `EffectivePlanResolver` hisoblaydi — `Subscription.Plan` ni to'g'ridan-to'g'ri o'qish muddat va holatni chetlab o'tadi. `CustomDomain`, `UsageRecord` — Faza 1/3 da (§8).
 
-**Indekslar (majburiy):** `Tenant.Slug` unique · `User.Email` unique · `ApiToken.Prefix` unique · `Subdomain.Name` unique · `ApiToken.TenantId` · `Subdomain.TenantId` · `UsageRecord (TenantId, WindowStart)`.
+**Indekslar (majburiy):** `Tenant.Slug` unique · `User.Email` unique · `ApiToken.Prefix` unique · `Subdomain.Name` unique · `Plan.Code` unique · `Subscription.TenantId` unique · `ApiToken.TenantId` · `Subdomain.TenantId` · `Subscription.PlanId` · `AuditEvent (TenantId, CreatedAt)` · `UsageRecord (TenantId, WindowStart)`.
+
+**Check cheklovlari:** `ck_plans_limits` (limitlar ≥ 1, `bandwidth_bps` ≥ 0) · `ck_subscriptions_period` (`period_end IS NULL OR period_end > period_start`).
 
 ### 6.3 Token formati
 
@@ -1785,18 +1824,51 @@ cc01_live_a1b2c3d4_<32 bayt base62 sir>
 ✅ DELETE /v1/tokens/{id}              bekor qilish (darhol)
 
 ✅ GET    /v1/subdomains
-✅ POST   /v1/subdomains               {name} → egalik
-✅ DELETE /v1/subdomains/{id}          bo'shatish (karantinga o'tadi)
+✅ POST   /v1/subdomains               {name} → egalik (o'zi bo'shatgan nomni kvota ichida qaytarib oladi)
+✅ DELETE /v1/subdomains/{id}          bo'shatish (karantinga o'tadi — boshqa tenantga berilmaydi)
 
    GET    /v1/domains                  custom domenlar
    POST   /v1/domains                  {fqdn} → TXT verifikatsiya tokeni
    POST   /v1/domains/{id}/verify
 
    GET    /v1/usage?from=&to=          bayt, ulanish, tunnel-soat
-   GET    /v1/plan
+✅ GET    /v1/plan                     amaldagi tarif, manba, obuna, limitlar, band subdomainlar soni
 ```
 
 Qolgan endpointlar Faza 1/3 da (§8).
+
+`GET /v1/plan` javobi (`source` — limit qayerdan kelgani: `Subscription`,
+`NoSubscription`, `Expired`, `Canceled`; oxirgi uchtasida limitlar Free'niki):
+
+```jsonc
+{ "plan": "pro", "source": "Subscription",
+  "subscription": { "status": "Active", "periodStart": "…", "periodEnd": null },
+  "limits": { "maxSubdomains": 10, "maxTunnels": 10, "maxConnsPerTunnel": 128,
+              "bandwidthBps": 1000000000 },
+  "usage":  { "subdomains": 1 } }
+```
+
+**Operator API** (`/internal/v1/*`) — **faqat ichki listener'da** (h2c), self-service yo'q:
+billing hali yo'q, ya'ni foydalanuvchiga ochilgan tarif o'zgartirish hammaga bepul
+Enterprise degani bo'lardi. Faza 3 billing ham aynan shu handler'ni chaqiradi.
+
+```
+✅ PUT    /internal/v1/tenants/{slug}/subscription
+          sarlavhalar: X-Cc01-Admin-Key (majburiy), X-Cc01-Actor (majburiy, audit uchun)
+          tana:        {plan: "free"|"pro"|"enterprise", periodEnd?, reason?}
+          → 200 {tenant, plan, status, periodStart, periodEnd, changed}
+```
+
+| Holat | Javob |
+| --- | --- |
+| Kalit yo'q yoki noto'g'ri | `401 ADMIN_KEY_INVALID` (SHA-256 xeshlari doimiy vaqtda solishtiriladi) |
+| `Internal:AdminKey` sozlanmagan | Yo'l **umuman ro'yxatga olinmaydi** → 404, ishga tushishda ogohlantirish |
+| Public portga kelgan so'rov (Host soxta bo'lsa ham) | 404 (A-S19) |
+| Noma'lum tarif (`"1"`, `"Pro"`, `" pro"`, `"Pro,Free"`) | `400 PLAN_UNKNOWN` — faqat aniq kichik harfli qiymatlar |
+| `periodEnd` o'tmishda / actor yaroqsiz (faqat `A-Z a-z 0-9 . _ -`, oxiridagi `\n` ham rad) / sabab > 200 belgi, boshqaruv belgisi (U+0000, yangi qator, tab) yoki juftsiz surrogat | `400 PLAN_PERIOD_INVALID` / `PLAN_ACTOR_INVALID` / `PLAN_REASON_INVALID` |
+| Tenant yo'q yoki o'chirilgan | `404 TENANT_NOT_FOUND` (to'xtatilgan tenantning tarifini o'zgartirish mumkin) |
+| Bir vaqtda ikki o'zgarish | Bittasi `409 SUBSCRIPTION_CONFLICT` (faqat parallellik tokeni yoki unikal indeks buzilishi; boshqa baza xatolari 409 emas, 500) |
+| O'sha tarif, o'sha muddat | `200 changed=false`, yozuv ham, audit ham yo'q |
 
 **Xato → HTTP status xaritasi** bitta joyda: `AccessServer.Api/Common/ResultExtensions.cs`. Noma'lum kod uchun zaxira — `400`.
 
@@ -1815,8 +1887,20 @@ bog'liq bo'lsa, orkestrator sog'lom podlarni bekordan qayta ishga tushiradi.
 
 ```
 ✅ AccessInternalService.AuthorizeTunnel   → ARCHITECTURE.md §3.4.3
+✅   … renewal=true                         ochiq tunnel lease yangilanishi (edge har ≤ 30 s)
    AccessInternalService.ReportUsage       usage batch (qabul qiladi, hali saqlamaydi)
 ```
+
+`renewal=true` da AP xuddi ochilishdagidek token, tenant holati va tarifni
+tekshiradi, lekin **nom band qilmaydi va kvota sanamaydi**: nom mavjud, shu
+tenantniki va `Released` bo'lmasligi shart, aks holda `SUBDOMAIN_NOT_OWNED`.
+Ochilish (`renewal=false`) va `POST /v1/subdomains` esa shu tenant o'zi
+bo'shatgan nomni kvota ichida `Reserved` ga qaytaradi (`SubdomainQuota`);
+kvota to'lgan bo'lsa `QUOTA_TUNNELS_EXCEEDED` / `SUBDOMAIN_QUOTA_EXCEEDED`
+va nom `Released` qoladi. Ya'ni ochilish hech qachon yangilanish rad
+etadigan nomni bermaydi.
+`last_used_at` faqat bo'sh yoki 5 daqiqadan eski bo'lsa yoziladi. Maydonni
+bilmaydigan eski edge oddiy ochilish yuboradi — xatti-harakat avvalgidek.
 
 **Internal listener hech qachon public interfeysga bind qilinmaydi.** Ikkala
 listener `Program.cs` da oshkora sozlanadi:
@@ -1826,12 +1910,58 @@ listener `Program.cs` da oshkora sozlanadi:
 | Public | HTTP/1.1 + HTTP/2 | `0.0.0.0:5078` | `Public:Address`, `Public:Port` |
 | Internal | h2c (gRPC) | `127.0.0.1:5081` | `Internal:Address`, `Internal:Port` |
 
-Servis `RequireHost` bilan ichki portga qadalgan — public portga kelgan gRPC
-so'rovi 404 oladi. Kubernetes'da qo'shimcha `NetworkPolicy` qo'yiladi.
+gRPC servisi va operator API `RequireInternalListener(port)` bilan ichki
+listener'ga qadalgan: `RequireHost` + `InternalListenerGuardMiddleware`. Guard
+port raqamiga emas, **ulanish belgisiga** qaraydi: ichki listener'ning Kestrel
+connection middleware'i (`ListenOptions.MarkInternal()`) har bir ulanishga
+belgi qo'yadi (`IConnectionItemsFeature`), belgisiz ulanishdagi ichki endpoint
+— 404. Public portga kelgan so'rov — Host sarlavhasi soxtalashtirilgan bo'lsa
+ham — 404 oladi (A-S19). `Public:Port == Internal:Port` bo'lsa AP ishga
+tushmaydi. Ichki endpointlar OpenAPI hujjatiga (`/openapi/v1.json`) kirmaydi.
+`Internal:Address` loopback bo'lmasa AP ishga tushishda ogohlantiradi.
+Kubernetes'da qo'shimcha `NetworkPolicy` qo'yiladi.
 
 > ⚠️ Endpointlar oshkora ko'rsatilgani uchun `ASPNETCORE_URLS` va
 > `launchSettings.json` dagi `applicationUrl` **e'tiborga olinmaydi** — bu
 > Kestrel'ning xatti-harakati, portlarni yuqoridagi kalitlardan o'zgartiring.
+
+#### Runbook: tarifni o'zgartirish
+
+```bash
+read -rs CC01_ADMIN_KEY && export CC01_ADMIN_KEY   # AP'dagi Internal__AdminKey bilan bir xil
+make ap-set-plan SLUG=t_9f3a PLAN=pro ACTOR=aziz REASON="shartnoma 42"
+#   AP boshqa joyda bo'lsa: AP_INTERNAL=http://10.0.0.5:5081
+```
+
+Kalit hech qayerda argv'ga tushmaydi: `read -s` uni shell tarixiga yozmaydi,
+Makefile esa sarlavhani bash'ning ichki `printf`'i bilan curl'ga **stdin**
+orqali beradi (`-H @-`, curl ≥ 7.55), shuning uchun boshqa foydalanuvchi uni
+`ps`/`/proc/<pid>/cmdline` da ko'rmaydi. Kalitda qator oxiri belgisi bo'lsa
+maqsad rad etadi (sarlavha in'ektsiyasi).
+
+O'zgarish ochiq tunnellarga **≤ R + `CC01_ACCESS_TIMEOUT`** ichida yetadi
+(standart 30 + 3 = 33 s; edge log'ida `[tunnel-limits] <id> plan=pro max_conns=128`).
+AP yaqinda yiqilib qaytgan bo'lsa — yana ≤ 6 s (edge'ning gRPC kanali qayta
+ulanishi), ya'ni ≤ 39 s; AP yo'q paytda o'zgarish yetmaydi (fail-static). `REASON`
+va `PLAN` ichida qo'shtirnoq bo'lmasin — Makefile JSON'ni satr ichiga qo'yadi.
+
+Kim, qachon, nima qildi:
+
+```sql
+SELECT created_at, actor, target, metadata
+FROM audit_events
+WHERE action = 'plan.changed' AND target = 'tenant:t_9f3a'
+ORDER BY created_at DESC;
+```
+
+Orqaga qaytarish:
+
+| Muammo | Chora |
+| --- | --- |
+| Noto'g'ri tarif berildi | Xuddi shu buyruq eski `PLAN` bilan (yangi audit yozuvi qoladi) |
+| Yangilash ochiq tunnellarni ommaviy yopyapti (AP xatosi) | Edge'da `CC01_ACCESS_RENEW_DENY=log` — yopish to'xtaydi, limitlar qo'llanishda davom etadi |
+| Yangilashning o'zi muammo | Edge'da `CC01_ACCESS_RENEW=0` — ochiq tunnellar ochilishdagi limitlar bilan qoladi |
+| Migratsiyani qaytarish | AP'ni to'xtating → bitta qadam orqaga: `CC01_ACCESS_DB=… make db-rollback TO=InitialAccessSchema CONFIRM=yes` (faqat `AddPlansAndSubscriptions.Down()` ishlaydi; `CC01_ACCESS_DB` siz — lokal dev baza, `CONFIRM` so'ralmaydi) → oldingi AP build'ini ishga tushiring (u `tenants.plan` ustunini o'qiydi, yangisi `subscriptions` ni — ikkalasi ham boshqa sxemada ishlamaydi). ⚠️ `Down()` faqat **amaldagi** tarif kodini `tenants.plan` ga qaytaradi (`EffectivePlanResolver` qoidasi: muddati o'tgan yoki bekor qilingan obuna → `free`); muddat, holat va `audit_events` yo'qoladi — oldin `pg_dump`. ⛔ `make db-down` **emas**: u `database update 0` — hamma migratsiya, jumladan `InitialAccessSchema` qaytadi va tenant, foydalanuvchi, token, subdomain jadvallari o'chadi (faqat dev) |
 
 ### 6.5 Xavfsizlik talablari (AP uchun)
 
@@ -1860,6 +1990,9 @@ so'rovi 404 oladi. Kubernetes'da qo'shimcha `NetworkPolicy` qo'yiladi.
 | A-S16 | OAuth mavjud hisobga faqat **tasdiqlangan** email bilan bog'lanadi | Tasdiqlanmagan email bilan bog'lash — hisobni egallab olishning klassik yo'li (§6.6) |
 | A-S17 | Provayder access tokeni saqlanmaydi (`SaveTokens = false`) | Bizga kerak emas; saqlash sizib chiqishda zararni kengaytiradi |
 | A-S18 | "External" cookie bir marta o'qiladi va darhol o'chiriladi | Oqimning vaqtinchalik holati sessiyaga aylanib qolmasligi uchun |
+| A-S19 | Ichki endpointlar (gRPC va `/internal/v1`) **ulanishni qabul qilgan listener** bo'yicha himoyalangan: ichki listener har bir ulanishni belgilaydi (`ListenOptions.MarkInternal()`), `InternalListenerGuardMiddleware` belgisiz ulanishga 404 qaytaradi (port raqami tekshirilmaydi — ikki listener bir portda turli IP'da bo'lsa ham public ulanish o'tmaydi). `Public:Port == Internal:Port` bo'lsa AP ishga tushmaydi; ichki endpointlar OpenAPI'da yo'q. Operator API'da qo'shimcha `X-Cc01-Admin-Key` (doimiy vaqtda solishtiriladi); kalit sozlanmasa yo'l umuman yo'q | `RequireHost` faqat `Host`/`:authority` sarlavhasini tekshiradi va uni klient yozadi — public portga `Host: x:5081` yuborish yetarli edi. Tarif o'zgartirish pul bilan bog'liq imtiyoz, mTLS (A-S5) esa hali yo'q. Sinov: `PlanHttpTests` (haqiqiy Kestrel, ikki port) va `make plan-demo` |
+| A-S20 | Ochiq tunnel yangilanishida edge tunnelni **faqat allowlist** bo'yicha yopadi: `TOKEN_INVALID`, `TOKEN_REVOKED`, `TOKEN_EXPIRED`, `PLAN_SUSPENDED`, `SUBDOMAIN_NOT_OWNED`. Boshqa kod va tarmoq xatosi — tunnel saqlanadi. Favqulodda: `CC01_ACCESS_RENEW_DENY=log` (dry run), `CC01_ACCESS_RENEW=0` (kill switch) | Xato qilgan AP yoki orqada qolgan replika 33 s ichida HAMMA tunnelni yopib yubormasligi uchun (`core-server/env.md`) |
+| A-S21 | Tarif o'zgarishi (`plan.changed`) obuna bilan **bitta tranzaksiyada** (`SaveChanges` bir marta) `audit_events` ga yoziladi: actor `operator:<nom>`, target `tenant:<slug>`, metadata `{from, to, periodEnd, reason}` — email va ism yozilmaydi | Audit yozuvisiz o'zgarish bo'lmaydi va aksincha. A-S8 ning birinchi qismi; boshqa amallar auditi hali yo'q |
 
 ### 6.6 OAuth (GitHub, Google)
 
@@ -1969,8 +2102,8 @@ Subdomain qoidalari hozir `core-server/utils.go` da (uzunlik 3–38, `^[a-z\d](?
 6. eBPF map to'lganda (conntrack LRU evict) → sessiyalar uzilmasligi.
 7. `cc01 down` → barcha marshrutlar/qoidalar tozalanishi (leak yo'q).
 8. Daemon `SIGKILL` → keyingi start'da orphan resurslarni tozalash.
-9. AP o'chirilgan holatda mavjud tunnellar ishlashda davom etishi; yangi tunnel kesh grace ichida qabul qilinishi.
-10. Bekor qilingan token → keyingi `authorize` chaqirig'ida darhol rad etilishi (kesh TTL ≤ 60 s).
+9. AP o'chirilgan holatda mavjud tunnellar ishlashda davom etishi — **oxirgi ma'lum limitlar bilan, muddatsiz** (`[tunnel-renew-failed]`, qayta urinish ≤ 10 s); yangi tunnel kesh grace ichida qabul qilinishi.
+10. Bekor qilingan token → keyingi `authorize` chaqirig'ida rad etilishi (kesh yangiligi ≤ R = 30 s; rad javobi tokenning kesh yozuvlarini darhol o'chiradi); **ochiq** tunnel esa keyingi yangilashda ≤ 33 s ichida yopilishi (klient `TOKEN_REVOKED` bilan 1 kodi bilan chiqadi). Tarif o'zgarishi, muddat tugashi va hisob to'xtatilishi ham shu yo'l bilan ≤ 33 s.
 11. Boshqa foydalanuvchining subdomainini so'rash → `SUBDOMAIN_NOT_OWNED`, 100% holatda.
 12. Bir xil 40+ subdomain kiritmasi uchun Go va .NET validatsiyasi bir xil natija berishi.
 
@@ -2066,7 +2199,7 @@ Maqsad: uchta mustaqil bo'lakni **bitta ishlaydigan mahsulotga** bog'lash — to
 | Subdomain egaligi (rezervatsiya) | Band nom boshqa tenantga berilmaydi; validatsiya §6.7 ga mos | ✅ |
 | OAuth: GitHub, Google (PKCE + state) | Yo'naltirish parametrlari va bog'lash mantiqi testlar bilan; callback qo'lda tekshiriladi | ✅ (§6.6) |
 
-83 ta test (unit + integration + HTTP) yashil. Testlash bo'yicha ikkita qaror:
+Faza 0 yopilganda 83 ta test (unit + integration + HTTP) yashil edi; tarif modeli (Faza 1) bilan — **205 ta**. Testlash bo'yicha ikkita qaror:
 
 - **`Testcontainers` ishlatilmadi.** Bu mashinada docker konteksti masofaviy serverga qaratilgan bo'lishi mumkin va Testcontainers uni jimgina ishlatib yuborardi. O'rniga oshkora ulanish satri: `CC01_TEST_DB`. Har bir yugurish o'ziga alohida baza yaratadi va oxirida o'chiradi.
 - **HTTP darajasidagi testlar majburiy.** Handler'ni to'g'ridan-to'g'ri chaqiradigan testlar routing, JWT claim'lari va xato → status xaritasini ko'rmaydi. Amalda aynan shu qatlamda ikkita xato topildi (§6.5 A-S13, A-S14) — ikkalasi ham handler testlaridan bemalol o'tib ketgan edi.
@@ -2128,7 +2261,7 @@ Faza 0 dan farqli — bu yerda haqiqiy overlay boshlanadi. Foundation ishlari (T
 | CLI: `status`, `peer list`, `doctor` | Ishlab turgan mesh'da yo'l holati ko'rinadi | ✅ `make cp-demo` |
 | CLI: `up`, `down` (demon hayot sikli) | `down` → 0 marshrut, `up` → o'sha manzil qaytadi | ✅ `daemon/session` |
 | Linux paketlar (deb/rpm) + systemd unit | Toza konteynerda o'rnatiladi, `make package-verify` | ✅ `deploy/packaging` |
-| AP: `Plan`, `Subscription`, kvota modeli | Tarif o'zgarishi 60 s ichida edge'da kuchga kiradi | ⏳ |
+| AP: `Plan`, `Subscription`, kvota modeli | Tarif o'zgarishi 60 s ichida edge'da kuchga kiradi | ✅ `Application/Plans` + `core-server/renew.go` — o'lchandi **≤ 29.7 s** (`make plan-demo`, chegara 33 s) |
 | **MVP demo** | 3 shahar, 3 node, o'zaro ping < 50 ms, public IPv6 internetdan erishiladi | ⏳ |
 
 **Datapath bo'yicha o'lchangan natija** (Apple M5, ChaCha20-Poly1305):
@@ -2357,6 +2490,154 @@ lekin **ichidagi manba manzilini emas**. Ya'ni tarmoqqa qonuniy ulangan
 har qanday node boshqasining nomidan gaplasha olardi. Test aynan shu
 stsenariyni tekshiradi: qonuniy peer (haqiqiy kalitlar, muvaffaqiyatli
 handshake) begona manzildan yozmoqchi bo'ladi va rad etiladi.
+
+#### AP: tarif, obuna va kvota → edge
+
+Tarif endi bazada: `plans` (katalog), `subscriptions` (tenantda bitta qator),
+`audit_events` (§6.2). Effektiv limitni `EffectivePlanResolver` hisoblaydi
+(muddati o'tgan, bekor qilingan yoki obunasiz → Free). Operator tarifni
+ichki API orqali o'zgartiradi (§6.4, runbook o'sha yerda). Edge esa har bir
+**ochiq** tunnel uchun `AuthorizeTunnel{renewal=true}` ni davriy chaqiradi va
+yangi limitlarni jonli qo'llaydi (`core-server/renew.go`).
+
+**O'lchov** (`make plan-demo`: AP, edge va klient — lokal jarayonlar, haqiqiy
+Postgres, `CC01_ACCESS_RENEW=30s`). Vaqt `make ap-set-plan` dan edge
+log'idagi `[tunnel-limits] <id> plan=… max_conns=…` gacha:
+
+| O'tish | 1-yugurish | 2-yugurish | 3-yugurish | 4-yugurish (review tuzatishlaridan keyin) |
+| --- | --- | --- | --- | --- |
+| free → pro (24 → 128) | 27.5 s | 29.7 s | 28.1 s | 29.1 s |
+| pro → enterprise (128 → 1024) | 29.7 s | 28.5 s | 27.7 s | 28.2 s |
+| enterprise → free (1024 → 24) | 24.5 s | 24.3 s | 25.0 s | 24.6 s |
+| Token bekor qilindi → klient `TOKEN_REVOKED` bilan chiqdi | 24.4 s | 24.2 s | 28.3 s | 27.3 s |
+
+Ketma-ket o'zgarishlar oldingisi qo'llangan zahoti yuboriladi, ya'ni har biri
+yangilash sikli boshiga — eng yomon fazaga yaqin tushadi; shuning uchun
+qiymatlar `R·U[0.8,1]` = 24–30 s oralig'ida. Nazariy chegara
+`R + taymaut` = **33 s**; `TestSupervise_PropagationBudget` (`testing/synctest`,
+virtual vaqt, 4 faza × 40 yugurish, RPC 3 s) eng yomon holatda **33.00 s**
+ko'rsatdi. Demo shu bilan birga tekshiradi: public portga soxta `Host` bilan
+kelgan operator so'rovi va gRPC → 404 (A-S19); AP o'chirilganda tunnel 2R
+(60 s) dan keyin ham trafik o'tkazadi, edge har ≤ 10 s qayta urinadi
+(`[tunnel-renew-failed]`); AP qaytgach edge yangilashni 5.5 s da tikladi
+(cheklangan backoff, ≤ 6 s; gRPC standart backoff'i bilan 13–20 s edi);
+token bekor qilingach registr bo'shaydi va o'sha token bilan yangi tunnel
+ochilmaydi.
+
+⚠️ **Nega pull, push emas?** AP'dan edge'larga o'zgarish oqimi (watch
+stream) har bir edge uchun doimiy ulanish, qayta ulanishda resinxronizatsiya
+va "o'tkazib yuborilgan hodisa" muammosini keltirardi: bitta yo'qolgan xabar
+— tunnel muddatsiz eski limitlarda qoladi. Pull'da esa **bitta yo'l** hamma
+qoidani tashiydi — tarif o'zgarishi, muddat tugashi (fon vazifasisiz),
+katalog tahriri, token bekor qilinishi, hisob to'xtatilishi. AP holatsiz
+qoladi va bir nechta nusxada xavfsiz ishlaydi, fail-static esa o'z-o'zidan
+chiqadi: javob kelmasa — hech narsa o'zgarmaydi. Narxi: ochiq tunnellar soni
+/ 30 s RPC (10 000 tunnel ≈ 333 so'rov/s, har biri bir nechta indeksli
+o'qish; `last_used_at` 5 daqiqada ko'pi bilan bir marta yoziladi). Yuk
+muammo bo'lsa — qo'shimcha batch RPC (protoga faqat qo'shish).
+
+⚠️ **Nega birinchi yangilash IssuedAt'ga bog'langan?** Tunnel keshdagi
+natija bilan ochilishi mumkin — u allaqachon eskirgan bo'ladi. Birinchi
+yangilash ochilish paytidan R keyin rejalashtirilsa, eng yomon holat
+`kesh yoshi + R + taymaut` bo'lardi: Faza 0 dagi 60 s lik kesh bilan
+60 + 30 + 3 = 93 s — kafolat buziladi. Shuning uchun ikki qoida:
+`Grant.IssuedAt` — RPC **boshlangan** vaqt (keshdan olinganda ham
+saqlanadi) va birinchi kutish `IssuedAt + R·U[0.8,1] − hozir` (eski grant
+bilan ochilgan tunnel darhol yangilanadi); keshning "yangi" oynasi esa
+yangilash oralig'ining o'zi bilan cheklangan: `R = min(Options.MaxFresh,
+lease_ttl/2)` (`renewInterval` bilan bir xil formula). Ikkalasi birga
+chegarani kesh yoshidan mustaqil qiladi: ≤ R + taymaut. `IssuedAt` ni RPC
+**tugagan** vaqtga qo'yish ham xato bo'lardi — AP holatni RPC boshida
+o'qiydi, ya'ni javob RPC davomidagi o'zgarishni ko'rmagan bo'lishi mumkin.
+
+⚠️ **Chegara qachon amal qiladi?** `≤ R + taymaut` — edge→AP gRPC kanali
+tayyor bo'lganda. AP yiqilib qaytgandan keyin kanal qayta ulanguncha yana
+kutiladi: gRPC standarti (backoff 120 s gacha) bilan bu 60 s kafolatini
+buzardi, shuning uchun backoff cheklangan (`access.reconnectParams`:
+1 s × 1.6, ≤ 2 s, jitter 0.2, urinish taymauti 3 s) va qayta ulanish
+≤ 6 s (`config.AccessReconnectMax`) — ya'ni ≤ 6 + R + taymaut = 39 s.
+AP yo'q paytda kafolat yo'q (fail-static). Edge ishga tushishda
+`6 s + CC01_ACCESS_RENEW + CC01_ACCESS_TIMEOUT < 60 s` ni tekshiradi
+(`CC01_ACCESS_TIMEOUT ≤ 0` ham rad) — bu shartni buzadigan sozlama bilan
+edge ishga tushmaydi.
+
+Boshqa qarorlar:
+
+- **Tunnelni faqat allowlist yopadi** (A-S20). Tarmoq xatosi, `Unavailable`,
+  taymaut, noma'lum yoki vaqtinchalik kod (`QUOTA_*`, `SUBDOMAIN_BUSY`) —
+  tunnel saqlanadi. `Renew` hech qachon keshdagi natijani qaytarmaydi
+  (`access.ErrUnavailable`), aks holda AP yo'qligi "ruxsat bor" bo'lib
+  ko'rinardi.
+- **Pastga tushirish hech narsani uzmaydi.** `max_conns_per_tunnel` faqat
+  yangi ulanishlarga qo'llanadi (sanash qoidasi o'zgarmagan), mavjud
+  tunnellar va nomlar qoladi.
+- **`max_tunnels` — edge node doirasida va faqat ochilishda**, registrga
+  qo'shish bilan bir qulf ichida (`QUOTA_TUNNELS_EXCEEDED`). Bir nechta
+  ingress node bo'lganda kam hisoblaydi; global hisob — keyingi ish.
+- **`bandwidth_bps` edge'ga yetadi, lekin majburlanmaydi.**
+- **Yangilash AP'da yon ta'sirsiz:** nom band qilinmaydi, kvota sanalmaydi,
+  edge **berilgan** nomni yuboradi; tunnel ochiq turganda bo'shatilgan
+  (`Released`) nom keyingi yangilashda `SUBDOMAIN_NOT_OWNED` → tunnel
+  yopiladi va nom boshqa tenantni to'smaydi.
+- **Bo'shatilgan nomni egasi qaytarib oladi:** ochilish va
+  `POST /v1/subdomains` shu tenantning `Released` nomini kvota ichida
+  `Reserved` ga qaytaradi (kvota to'lsa `QUOTA_TUNNELS_EXCEEDED` /
+  `SUBDOMAIN_QUOTA_EXCEEDED`, nom `Released` qoladi). Karantin faqat
+  BOSHQA tenantdan himoya qiladi; ochilish va yangilanish bir xil egalik
+  qoidasiga amal qiladi (`SubdomainQuota`) — ochilish yangilanish rad
+  etadigan nomni bermaydi.
+- **Kesh yozuvi `IssuedAt` bo'yicha monoton:** bir tenantning parallel
+  yangilashlari eski javob bilan yangisini ustidan yozib, limitni orqaga
+  qaytara olmaydi.
+- **Rad javobi keshni tozalaydi va iz qoldiradi:** token darajasidagi rad
+  (`TOKEN_*`, `PLAN_SUSPENDED`, `EMAIL_NOT_VERIFIED`) tokenning hamma kesh
+  yozuvlarini, boshqa rad — shu nom (klient bo'sh subdomain bilan ochgan,
+  AP aynan shu nomni bergan yozuv ham) va shu custom domain yozuvlarini
+  o'chiradi. Rad javobi RPC'si boshlangan vaqt iz (tombstone) sifatida
+  ~`2·taymaut + 5 s` saqlanadi: undan oldin boshlangan va kechroq qaytgan
+  grant keshga yozilmaydi — bekor qilingan token keshdan (fail-static
+  orqali ham) qayta ochilmaydi.
+- **Boshqaruv kanaliga yozish muddatli:** har bir freym 5 s ichida
+  yozilishi kerak (`tunnel.EventWriteTimeout`), aks holda kanal yopiladi va
+  tunnel odatiy yo'l bilan yopiladi. Tarmoqqa yozish `consMx` ostida
+  bajarilmaydi — o'qimay qo'ygan klient `Close`, `SetMaxConns` va
+  juftlashni to'sa olmaydi; yopilish xabari (`Notify`) eng ko'pi 5 s kutadi.
+  Public ulanishda 3 s lik muddat faqat Host aniqlanguncha amal qiladi,
+  ko'prikka ulangan ulanishda olib tashlanadi.
+- **Yopilish xabari — mavjud `TunnelOpened{error_code, error_message}`
+  freymi**, ochilgandan keyin yuboriladi; simda o'zgarish yo'q. Yangi klient
+  `tunnel yopildi: CODE: xabar` bilan 1 kodi bilan chiqadi; eski klient
+  freymni e'tiborsiz qoldiradi va ulanish yopilganini ko'radi.
+- **Freymlar tartibi:** `TunnelOpened` yozilmaguncha public ulanish qabul
+  qilinmaydi va yopilish xabari `ConnectionReceived` bilan aralashmaydi
+  (ikkalasi `eventWriterMx` ostida).
+- **Proto faqat qo'shildi:** `AuthorizeTunnelRequest.renewal = 7`. Eski edge
+  yangi AP bilan — yangilash yo'q, avvalgidek; yangi edge eski AP bilan —
+  maydon e'tiborsiz qoldiriladi, limitlar baribir yangilanadi.
+- **Migratsiya bir qadamda** (yarat → seed → ko'chir → `tenants.plan` ni
+  o'chir): prod baza hali yo'q. Paydo bo'lsa — expand/contract ga
+  bo'linadi. `Down()` faqat amaldagi tarifni `tenants.plan` ga qaytaradi
+  (muddati o'tgan yoki bekor qilingan obuna → `free`, `EffectivePlanResolver`
+  bilan bir xil); bitta qadam orqaga — `make db-rollback`. `PlanMigrationTests`
+  up → down → up ni **ma'lumot bilan** tekshiradi, `make db-verify` — bo'sh
+  bazada.
+
+**Ataylab qilinmagan:** billing va self-service, tarmoq tezligini
+cheklash, global `max_tunnels`, pastga tushirishda tunnel/nomlarni
+chiqarish, `ReportUsage` ni saqlash, admin kalitini aylantirish (mTLS A-S5
+kelguncha statik kalit). Pastga tushirishda kvotadan ortiq nomlardan
+qaysi biri ishlashda qolishi (masalan, "eng eski N nom" qoidasi) —
+mahsulot qarori bilan alohida.
+
+**Testlar:** access-server — 205 ta (`PlanMigrationTests`,
+`EffectivePlanResolverTests`, `PlanChangeTests`, `PlanHttpTests` haqiqiy
+Kestrel bilan, renewal testlari); core-server — `renew_test.go` (synctest
+budjeti, allowlist, fail-static 2 soat virtual vaqt, loopback serve
+testlari), `access/client_test.go` (rad javobi izi, kesh yangiligi),
+`access/reconnect_test.go` (cheklangan backoff), `tunnel/tunnel_test.go`,
+`tunnel/stall_test.go` (o'qimayotgan klient), `cc01_conn_test.go`,
+`server/tcpserver_test.go` (Stop/Accept poygasi); cli-client —
+yopilish freymi. Hammasi `-race` bilan.
 
 ### Faza 2 — eBPF Security Layer (6 hafta)
 

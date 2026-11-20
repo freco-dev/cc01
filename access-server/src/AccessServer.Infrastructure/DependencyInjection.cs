@@ -1,5 +1,6 @@
 using AccessServer.Application.Abstractions;
 using AccessServer.Application.Auth;
+using AccessServer.Application.Plans;
 using AccessServer.Application.Subdomains;
 using AccessServer.Application.Tunnels;
 using AccessServer.Application.Tokens;
@@ -83,6 +84,10 @@ public static class DependencyInjection
         services.AddScoped<CreateApiTokenHandler>();
         services.AddScoped<ListApiTokensHandler>();
         services.AddScoped<RevokeApiTokenHandler>();
+
+        services.AddScoped<EffectivePlanResolver>();
+        services.AddScoped<ChangePlanHandler>();
+        services.AddScoped<GetPlanHandler>();
 
         services.AddScoped<AuthorizeTunnelHandler>();
 

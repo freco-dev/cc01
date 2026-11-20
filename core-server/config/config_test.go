@@ -1,7 +1,6 @@
 package config
 
 import (
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -179,7 +178,7 @@ func TestConfig_ACMEDisabledByDefault(t *testing.T) {
 // Doimiy papkasiz ACME har qayta ishga tushishda hamma
 // sertifikatni qaytadan chiqartirib, limitga urardi.
 func TestConfig_ACMERequiresDirectory(t *testing.T) {
-	if _, err := loadRaw(map[string]string{
+	if _, err := loadRaw(t, map[string]string{
 		"CC01_ACME_EMAIL": "admin@cc01.uz",
 	}); err == nil {
 		t.Error("papkasiz ACME qabul qilindi")
@@ -235,14 +234,18 @@ func TestConfig_ACMEAcceptsCustomCA(t *testing.T) {
 func loadWith(t *testing.T, env map[string]string) Config {
 	t.Helper()
 
-	cfg, err := loadRaw(env)
+	cfg, err := loadRaw(t, env)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	return cfg
 }
 
-func loadRaw(env map[string]string) (Config, error) {
+// loadRaw muhitni t.Setenv orqali qo'yadi: test tugagach qiymatlar
+// tiklanadi va keyingi testlar (-count>1 ham) toza muhitda ishlaydi.
+func loadRaw(t *testing.T, env map[string]string) (Config, error) {
+	t.Helper()
+
 	base := map[string]string{
 		"CC01_DOMAIN":     "cc01.uz",
 		"CC01_TLS_CERT":   "/tmp/cert.pem",
@@ -257,12 +260,207 @@ func loadRaw(env map[string]string) (Config, error) {
 	}
 
 	for key, value := range base {
-		if err := os.Setenv(key, value); err != nil {
-			return Config{}, err
-		}
+		t.Setenv(key, value)
 	}
 
 	var cfg Config
 	err := cfg.Load()
 	return cfg, err
+}
+
+// ── Ochiq tunnel yangilanishi ──────────────────────────────────
+
+// setRenewEnv avtorizatsiya yoqilgan bazaviy muhitni qo'yadi.
+func setRenewEnv(t *testing.T) {
+	t.Helper()
+	setBaseEnv(t)
+	t.Setenv("CC01_AUTH_MODE", "")
+	t.Setenv("CC01_ACCESS_ADDR", "127.0.0.1:5081")
+	t.Setenv("CC01_ACME_EMAIL", "")
+	t.Setenv("CC01_ACCESS_RENEW", "")
+	t.Setenv("CC01_ACCESS_RENEW_DENY", "")
+	t.Setenv("CC01_ACCESS_TIMEOUT", "")
+}
+
+func TestLoad_AccessRenew(t *testing.T) {
+	cases := []struct {
+		raw     string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"", DefaultAccessRenew, false},
+		{"0", 0, false}, // kill switch
+		{"5", 5 * time.Second, false},
+		{"1s", time.Second, false},
+		{"50s", 50 * time.Second, false},
+		{"55", 0, true},    // 50 s chegarasidan katta: 60 s kafolati buziladi
+		{"2m", 0, true},    // 60 s dan katta
+		{"500ms", 0, true}, // AP'ni ortiqcha yuklaydi
+		{"-5s", 0, true},
+		{"tez", 0, true},
+	}
+
+	for _, tc := range cases {
+		t.Run("raw="+tc.raw, func(t *testing.T) {
+			setRenewEnv(t)
+			t.Setenv("CC01_ACCESS_RENEW", tc.raw)
+
+			var conf Config
+			err := conf.Load()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("xato kutilgan edi, AccessRenew=%s olindi", conf.AccessRenew)
+				}
+				if !strings.Contains(err.Error(), "CC01_ACCESS_RENEW") {
+					t.Errorf("xato o'zgaruvchini zikr qilishi kerak: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("kutilmagan xato: %v", err)
+			}
+			if conf.AccessRenew != tc.want {
+				t.Errorf("%s kutilgan, %s olindi", tc.want, conf.AccessRenew)
+			}
+		})
+	}
+}
+
+// Avtorizatsiyasiz rejimda yangilaydigan AP yo'q — yangilash o'chadi.
+func TestLoad_AccessRenewForcedOffWhenAuthDisabled(t *testing.T) {
+	setRenewEnv(t)
+	t.Setenv("CC01_AUTH_MODE", "disabled")
+	t.Setenv("CC01_ACCESS_ADDR", "")
+	t.Setenv("CC01_ACCESS_RENEW", "10s")
+
+	var conf Config
+	if err := conf.Load(); err != nil {
+		t.Fatalf("kutilmagan xato: %v", err)
+	}
+	if conf.AccessRenew != 0 {
+		t.Errorf("AccessRenew: 0 kutilgan, %s olindi", conf.AccessRenew)
+	}
+}
+
+func TestLoad_AccessRenewDeny(t *testing.T) {
+	cases := []struct {
+		raw     string
+		want    RenewDenyMode
+		wantErr bool
+	}{
+		{"", RenewDenyClose, false},
+		{"close", RenewDenyClose, false},
+		{"log", RenewDenyLog, false},
+		{"Log", "", true},
+		{"ignore", "", true},
+	}
+
+	for _, tc := range cases {
+		t.Run("raw="+tc.raw, func(t *testing.T) {
+			setRenewEnv(t)
+			t.Setenv("CC01_ACCESS_RENEW_DENY", tc.raw)
+
+			var conf Config
+			err := conf.Load()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("xato kutilgan edi, %q olindi", conf.AccessRenewDeny)
+				}
+				if !strings.Contains(err.Error(), tc.raw) {
+					t.Errorf("xato qiymatni ko'rsatishi kerak: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("kutilmagan xato: %v", err)
+			}
+			if conf.AccessRenewDeny != tc.want {
+				t.Errorf("%q kutilgan, %q olindi", tc.want, conf.AccessRenewDeny)
+			}
+		})
+	}
+}
+
+// 60 s kafolati konfiguratsiyada yashaydi: ruxsat etilgan eng katta
+// oraliq ham taymaut va qayta ulanish bilan birga 60 s dan kichik.
+func TestRenewBoundsKeepSLO(t *testing.T) {
+	if b := AccessReconnectMax + DefaultAccessRenew + DefaultAccessTimeout; b >= AccessSLO {
+		t.Errorf("standart: %s >= %s", b, AccessSLO)
+	}
+	if b := AccessReconnectMax + MaxAccessRenew + DefaultAccessTimeout; b >= AccessSLO {
+		t.Errorf("chegara: %s >= %s", b, AccessSLO)
+	}
+}
+
+// CC01_ACCESS_TIMEOUT ham 60 s kafolatiga kiradi: R + T (+ qayta ulanish)
+// chegaradan oshsa server ishga tushmaydi. Ilgari faqat CC01_ACCESS_RENEW
+// tekshirilardi va RENEW=50s + TIMEOUT=15s (65 s) jimgina qabul qilinardi.
+func TestLoad_AccessRenewPlusTimeoutKeepsSLO(t *testing.T) {
+	cases := []struct {
+		renew, timeout string
+		wantErr        bool
+	}{
+		{"", "", false},       // 6 + 30 + 3 = 39 s
+		{"50s", "3s", false},  // 6 + 50 + 3 = 59 s
+		{"50s", "15s", true},  // 71 s
+		{"50s", "4s", true},   // 60 s — qat'iy kichik bo'lishi shart
+		{"30s", "23s", false}, // 59 s
+		{"30s", "24s", true},  // 60 s
+		{"0", "45s", false},   // yangilash o'chiq — kafolat yo'q, tekshiruv ham
+		{"10s", "43s", false}, // 59 s
+	}
+
+	for _, tc := range cases {
+		t.Run("renew="+tc.renew+",timeout="+tc.timeout, func(t *testing.T) {
+			setRenewEnv(t)
+			t.Setenv("CC01_ACCESS_RENEW", tc.renew)
+			t.Setenv("CC01_ACCESS_TIMEOUT", tc.timeout)
+
+			var conf Config
+			err := conf.Load()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("xato kutilgan edi: RENEW=%s TIMEOUT=%s qabul qilindi",
+						conf.AccessRenew, conf.AccessTimeout)
+				}
+				for _, name := range []string{"CC01_ACCESS_RENEW", "CC01_ACCESS_TIMEOUT"} {
+					if !strings.Contains(err.Error(), name) {
+						t.Errorf("xato %s ni zikr qilishi kerak: %v", name, err)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("kutilmagan xato: %v", err)
+			}
+		})
+	}
+}
+
+// Avtorizatsiyasiz rejimda yangilash yo'q — taymaut kafolatga kirmaydi.
+func TestLoad_AccessTimeoutNotBoundWhenAuthDisabled(t *testing.T) {
+	setRenewEnv(t)
+	t.Setenv("CC01_AUTH_MODE", "disabled")
+	t.Setenv("CC01_ACCESS_ADDR", "")
+	t.Setenv("CC01_ACCESS_TIMEOUT", "70s")
+
+	var conf Config
+	if err := conf.Load(); err != nil {
+		t.Fatalf("kutilmagan xato: %v", err)
+	}
+}
+
+func TestLoad_AccessTimeoutMustBePositive(t *testing.T) {
+	for _, raw := range []string{"0", "-1s"} {
+		t.Run(raw, func(t *testing.T) {
+			setRenewEnv(t)
+			t.Setenv("CC01_ACCESS_TIMEOUT", raw)
+
+			var conf Config
+			err := conf.Load()
+			if err == nil || !strings.Contains(err.Error(), "CC01_ACCESS_TIMEOUT") {
+				t.Fatalf("CC01_ACCESS_TIMEOUT xatosi kutilgan, olindi: %v", err)
+			}
+		})
+	}
 }

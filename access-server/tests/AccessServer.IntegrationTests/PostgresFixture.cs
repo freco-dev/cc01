@@ -31,21 +31,7 @@ public sealed class PostgresFixture : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        var admin = Environment.GetEnvironmentVariable("CC01_TEST_DB") ?? DefaultAdminConnection;
-
-        var builder = new NpgsqlConnectionStringBuilder(admin) { Database = "postgres" };
-        await using (var connection = new NpgsqlConnection(builder.ConnectionString))
-        {
-            await connection.OpenAsync();
-            await using var command = connection.CreateCommand();
-            // Nom o'zimiz generatsiya qilgan guid — in'yeksiya xavfi yo'q,
-            // lekin identifikator baribir qo'shtirnoqqa olinadi.
-            command.CommandText = $"CREATE DATABASE \"{_databaseName}\"";
-            await command.ExecuteNonQueryAsync();
-        }
-
-        builder.Database = _databaseName;
-        ConnectionString = builder.ConnectionString;
+        ConnectionString = await CreateDatabaseAsync(_databaseName);
 
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -84,16 +70,61 @@ public sealed class PostgresFixture : IAsyncLifetime
     public async Task DisposeAsync()
     {
         await _services.DisposeAsync();
+        await DropScratchDatabaseAsync(ConnectionString);
+    }
+
+    /// <summary>
+    /// Bo'sh (migratsiyasiz) alohida baza — migratsiyani ma'lumot bilan
+    /// tekshirish yoki umumiy bazaga ta'sir qiladigan testlar (katalog
+    /// tahriri) uchun. Ulanish satrini qaytaradi.
+    /// </summary>
+    public Task<string> CreateScratchDatabaseAsync() =>
+        CreateDatabaseAsync("cc01_scratch_" + Guid.NewGuid().ToString("n")[..12]);
+
+    public static async Task DropScratchDatabaseAsync(string connectionString)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(connectionString);
+        var name = builder.Database;
 
         // Pool'dagi ochiq ulanishlar bazani o'chirishga to'sqinlik qiladi.
         NpgsqlConnection.ClearAllPools();
 
-        var builder = new NpgsqlConnectionStringBuilder(ConnectionString) { Database = "postgres" };
+        builder.Database = "postgres";
         await using var connection = new NpgsqlConnection(builder.ConnectionString);
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
-        command.CommandText = $"DROP DATABASE IF EXISTS \"{_databaseName}\" WITH (FORCE)";
+        command.CommandText = $"DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)";
         await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// DI'siz kontekst: retry strategiyasi yo'q, shuning uchun IMigrator va
+    /// oshkora tranzaksiyalar bilan erkin ishlatiladi.
+    /// </summary>
+    public static AccessDbContext CreateContext(string connectionString) =>
+        new(new DbContextOptionsBuilder<AccessDbContext>()
+                .UseNpgsql(connectionString)
+                .UseSnakeCaseNamingConvention()
+                .Options,
+            TimeProvider.System);
+
+    private static async Task<string> CreateDatabaseAsync(string name)
+    {
+        var admin = Environment.GetEnvironmentVariable("CC01_TEST_DB") ?? DefaultAdminConnection;
+
+        var builder = new NpgsqlConnectionStringBuilder(admin) { Database = "postgres" };
+        await using (var connection = new NpgsqlConnection(builder.ConnectionString))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            // Nom o'zimiz generatsiya qilgan guid — in'yeksiya xavfi yo'q,
+            // lekin identifikator baribir qo'shtirnoqqa olinadi.
+            command.CommandText = $"CREATE DATABASE \"{name}\"";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        builder.Database = name;
+        return builder.ConnectionString;
     }
 }
 

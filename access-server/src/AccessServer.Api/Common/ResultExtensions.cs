@@ -11,15 +11,16 @@ public static class ResultExtensions
     /// </summary>
     public static IResult ToProblem(this Error error) => error.Code switch
     {
-        "INVALID_CREDENTIALS" or "ACCOUNT_SUSPENDED" or "OAUTH_NOT_AUTHENTICATED" =>
+        "INVALID_CREDENTIALS" or "ACCOUNT_SUSPENDED" or "OAUTH_NOT_AUTHENTICATED"
+            or "ADMIN_KEY_INVALID" =>
             Results.Json(ErrorBody(error), statusCode: StatusCodes.Status401Unauthorized),
 
         "EMAIL_TAKEN" or "SUBDOMAIN_TAKEN"
-            or "SUBDOMAIN_QUOTA_EXCEEDED" =>
+            or "SUBDOMAIN_QUOTA_EXCEEDED" or "SUBSCRIPTION_CONFLICT" =>
             Results.Json(ErrorBody(error), statusCode: StatusCodes.Status409Conflict),
 
         "TOKEN_NOT_FOUND" or "SUBDOMAIN_NOT_FOUND" or "VERIFICATION_TOKEN_INVALID"
-            or "OAUTH_PROVIDER_UNKNOWN" =>
+            or "OAUTH_PROVIDER_UNKNOWN" or "TENANT_NOT_FOUND" =>
             Results.Json(ErrorBody(error), statusCode: StatusCodes.Status404NotFound),
 
         _ => Results.Json(ErrorBody(error), statusCode: StatusCodes.Status400BadRequest),

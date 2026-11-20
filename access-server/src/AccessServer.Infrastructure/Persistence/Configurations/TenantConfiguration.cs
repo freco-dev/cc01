@@ -15,7 +15,6 @@ internal sealed class TenantConfiguration : IEntityTypeConfiguration<Tenant>
 
         // Enumlar matn sifatida saqlanadi: bazaga qarab ma'no tushunarli
         // bo'ladi va enum a'zolari tartibi o'zgarsa ma'lumot buzilmaydi.
-        builder.Property(t => t.Plan).HasConversion<string>().HasMaxLength(20);
         builder.Property(t => t.Status).HasConversion<string>().HasMaxLength(20);
 
         builder.HasIndex(t => t.Slug).IsUnique();

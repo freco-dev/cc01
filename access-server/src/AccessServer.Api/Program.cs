@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using AccessServer.Api.Common;
 using AccessServer.Api.Endpoints;
 using AccessServer.Api.Grpc;
 using AccessServer.Infrastructure;
@@ -28,13 +29,30 @@ var publicPort = builder.Configuration.GetValue("Public:Port", 5078);
 var internalAddress = builder.Configuration.GetValue("Internal:Address", "127.0.0.1")!;
 var internalPort = builder.Configuration.GetValue("Internal:Port", 5081);
 
+// Bir xil port, turli IP (masalan 10.0.0.5:5081 va 127.0.0.1:5081) — ikkala
+// bind ham muvaffaqiyatli bo'ladi, lekin RequireHost("*:5081") public
+// so'rovning o'z Host'iga ham mos keladi va ichki/public farqi faqat
+// ulanish belgisiga qolib ketadi. Bu deyarli har doim xato sozlama —
+// ishga tushirmaymiz (A-S19).
+if (publicPort == internalPort)
+{
+    throw new InvalidOperationException(
+        $"Public:Port va Internal:Port bir xil ({publicPort}). Ichki listener (gRPC, "
+        + "operator API) alohida portda bo'lishi shart — boshqa port tanlang.");
+}
+
 builder.WebHost.ConfigureKestrel(kestrel =>
 {
     kestrel.Listen(IPAddress.Parse(publicAddress), publicPort,
         listen => listen.Protocols = HttpProtocols.Http1AndHttp2);
 
-    kestrel.Listen(IPAddress.Parse(internalAddress), internalPort,
-        listen => listen.Protocols = HttpProtocols.Http2);
+    // MarkInternal — shu listener qabul qilgan har bir ulanishni belgilaydi;
+    // guard port raqamiga emas, shu belgiga tayanadi.
+    kestrel.Listen(IPAddress.Parse(internalAddress), internalPort, listen =>
+    {
+        listen.Protocols = HttpProtocols.Http2;
+        listen.MarkInternal();
+    });
 });
 
 var connectionString = builder.Configuration.GetConnectionString("Access")
@@ -119,19 +137,41 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
+// Ichki listener internetga chiqmasligi kerak. Pod/klaster IP'siga
+// bog'lash mumkin (masalan edge boshqa konteynerda), lekin bu ongli qaror
+// bo'lishi kerak — mTLS (A-S5) hali yo'q, himoya faqat admin kaliti.
+if (!IPAddress.IsLoopback(IPAddress.Parse(internalAddress)))
+{
+    app.Logger.LogWarning(
+        "Internal:Address loopback emas ({InternalAddress}:{InternalPort}) — ichki gRPC va "
+        + "operator API tarmoqdan ko'rinadi. Port internetga ochilmaganiga ishonch hosil qiling.",
+        internalAddress, internalPort);
+}
+
 app.UseExceptionHandler();
+
+// Routing'dan keyin (WebApplication uni quvur boshiga qo'yadi), auth'dan
+// OLDIN: public portga kelgan ichki so'rov hech qanday boshqa qatlamga
+// yetmasdan 404 oladi. A-S19.
+app.UseMiddleware<InternalListenerGuardMiddleware>();
+
 app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapAuthEndpoints();
 app.MapTokenEndpoints();
 app.MapSubdomainEndpoints();
+app.MapPlanEndpoints();
 app.MapOAuthEndpoints(oauthProviders);
 
-// RequireHost — servis faqat ichki portda javob beradi. Public portga
-// kelgan gRPC so'rovi 404 oladi.
+// Servis faqat ichki listener'da javob beradi. RequireHost yolg'iz yetarli
+// emas (Host sarlavhasini klient yozadi) — RequireInternalListener ulanishni
+// qaysi listener qabul qilganini ham tekshiradi. Public portga kelgan gRPC
+// so'rovi 404 oladi.
 app.MapGrpcService<TunnelAuthorizationService>()
-    .RequireHost($"*:{internalPort}");
+    .RequireInternalListener(internalPort);
+
+app.MapInternalPlanEndpoints(internalPort, builder.Configuration["Internal:AdminKey"]);
 
 app.MapHealthChecks("/livez", new HealthCheckOptions { Predicate = _ => false })
     .ExcludeFromDescription();

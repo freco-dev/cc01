@@ -105,9 +105,9 @@ Bu hujjat **maqsadli** arxitekturani tasvirlaydi. Repozitoriyda hozir mavjud kod
 | Edge ingress (SNI router, QUIC, ACME) | `core-server/` — HTTP `Host:` header bo'yicha demux, TLS terminatsiya sertifikat fayldan | HTTP/1.1 gina; SNI routing, HTTP/2, WebSocket, ACME yo'q |
 | Tunnel data plane (QUIC stream mux) | `core-server/tunnel/` — public↔private TCP juftlash, port raqami bilan identifikatsiya | Xom TCP; multiplexing, backpressure, flow control yo'q |
 | CP ↔ node protokoli (gRPC/protobuf) | `core-server/events/` — protobuf freyming, magic+versiya preambulasi bilan | ✅ `gob` dan ko'chirildi; uzun yashovchi gRPC stream Faza 1 da |
-| AP ↔ Edge avtorizatsiyasi (§3.4.3) | `core-server/access/` — gRPC klient, kesh, fail-static | ✅ ishlaydi; mTLS Faza 1 da |
+| AP ↔ Edge avtorizatsiyasi (§3.4.3) | `core-server/access/` — gRPC klient, kesh, fail-static; `core-server/renew.go` — ochiq tunnel lease yangilanishi | ✅ ishlaydi; mTLS Faza 1 da |
 | Klient daemon `cc01d` + CLI `cc01` | `cli-client/` — 173 qatorli `flag` asosidagi klient | Daemon, IPC, holat mashinasi, buyruq daraxti yo'q |
-| Account Plane (`access-server`) | `access-server/` — auth, OAuth (GitHub/Google), API token, subdomain egaligi, tunnel avtorizatsiyasi | ✅ ishlaydi; billing va usage hisobi Faza 1/3 da |
+| Account Plane (`access-server`) | `access-server/` — auth, OAuth (GitHub/Google), API token, subdomain egaligi, tunnel avtorizatsiyasi, tarif katalogi + obuna + audit (`Application/Plans`), operator API | ✅ ishlaydi; tarif o'zgarishi ochiq tunnelga ≤ 33 s (`make plan-demo`: o'lchandi ≤ 29.7 s); billing va usage hisobi Faza 1/3 da |
 | Control Plane — `cc01-ipam` | `control/ipam/` — ijara hayot sikli, sticky taqsimlash, karantin | ✅ `Register` da manzil beradi; Raft store keyingi qadam |
 | Control Plane — `cc01-disco` | `control/registry/` + `control/server/` — registri, NetworkMap, delta sync, gRPC stream | ✅ `cc01d` peerlarni avtomatik oladi |
 | Control Plane — idp / policy | — | Hali yo'q |
@@ -239,7 +239,7 @@ graph TB
     CLI_A -. "login / token" .-> AUTH
 ```
 
-**Diagrammani o'qish:** `AP` odam bilan, `CP` mashina bilan gaplashadi. Edge `AP`ga faqat **tunnel ochilayotganda** (avtorizatsiya) va **davriy** (usage hisoboti) murojaat qiladi. Paket yo'lida `AP` yo'q.
+**Diagrammani o'qish:** `AP` odam bilan, `CP` mashina bilan gaplashadi. Edge `AP`ga faqat **tunnel ochilayotganda** (avtorizatsiya), **ochiq tunnel uchun har ≤ 30 s** (lease yangilanishi: tarif, token va hisob holati qayta tekshiriladi) va **davriy** (usage hisoboti) murojaat qiladi. Paket yo'lida `AP` yo'q: AP javob bermasa ochiq tunnel oxirgi limitlar bilan ishlayveradi.
 
 ### 2.2 Qatlamli ko'rinish (ASCII)
 
@@ -634,7 +634,7 @@ Nega alohida (ADR-009):
 | Dashboard backend (`web/` uchun API) | Paket bilan bog'liq har qanday ish |
 | Hisob darajasidagi audit log | Relay/ingress trafigi |
 
-**Qat'iy invariant:** `access-server` foydalanuvchi trafigini ko'rmaydi va data plane yo'lida turmaydi. Tunnel ochilgandan keyin uning ishtiroki tugaydi — AP o'chsa ham oqayotgan trafik davom etadi.
+**Qat'iy invariant:** `access-server` foydalanuvchi trafigini ko'rmaydi, data plane yo'lida turmaydi va **trafikka tegmaydi**. Ochiq tunnel uchun edge undan faqat ruxsat va limitlarni har ≤ 30 s qayta so'raydi (§3.4.3, lease yangilanishi). AP o'chsa oqayotgan trafik ham, ochiq tunnel ham davom etadi — oxirgi ma'lum limitlar bilan; tunnelni faqat AP'ning **aniq** rad javobi yopadi (ADR-009, 2026-11-20 tuzatishi).
 
 #### 3.4.2 Domen modeli
 
@@ -642,18 +642,18 @@ Hozirgi `access-server/src/AccessServer.Domain/Entities/` da `Entity`, `User`, `
 
 ```
 Entity                (Id, CreatedAt, UpdatedAt)  ← abstract base
- └── Tenant           Slug, Name, Plan, Status      ← IZOLYATSIYA CHEGARASI
+ └── Tenant           Slug, Name, Status            ← IZOLYATSIYA CHEGARASI
       ├── User        FullName, Email, PasswordHash, EmailVerifiedAt,
       │               GithubId?, GoogleId?, Status, Subscribe
       ├── ApiToken    Prefix (unique), TokenHash, Name, CreatedByUserId,
       │               LastUsedAt, ExpiresAt, RevokedAt
       ├── Subdomain   Name (unique), Status, ReservedUntil
       ├── CustomDomain Fqdn, VerificationToken, VerifiedAt
-      ├── Subscription PlanId, Status, PeriodStart, PeriodEnd
+      ├── Subscription PlanId, Status, PeriodStart, PeriodEnd?  ← tenantda BITTA qator
       └── UsageRecord TunnelId, BytesIn, BytesOut, Conns,
                       WindowStart, WindowEnd
 
-Plan                  Code (free|pro|enterprise), MaxTunnels,
+Plan                  Code (free|pro|enterprise), MaxSubdomains, MaxTunnels,
                       MaxConnsPerTunnel, BandwidthBps  ← tenantdan mustaqil
 AuditEvent            TenantId?, UserId?, Actor, Action, Target, Ip, Metadata
 ```
@@ -672,6 +672,7 @@ Transport — **gRPC**, kontrakt `proto/cc01/v1/access.proto` da (ADR-010: yagon
 | RPC | Chaqiruvchi | Qachon |
 | --- | --- | --- |
 | `AccessInternalService.AuthorizeTunnel` | Edge ingress | Har bir tunnel ochish so'rovida |
+| `AccessInternalService.AuthorizeTunnel` (`renewal=true`) | Edge ingress | Har bir **ochiq** tunnel uchun har `R·U[0.8,1]` (R = 30 s); nom band qilinmaydi, kvota sanalmaydi |
 | `AccessInternalService.ReportUsage` | Edge ingress | Har 60 s, batch holida |
 
 Quyidagi JSON — xabar tuzilishini ko'rsatish uchun; simda protobuf ketadi.
@@ -679,13 +680,14 @@ Quyidagi JSON — xabar tuzilishini ko'rsatish uchun; simda protobuf ketadi.
 ```jsonc
 // → so'rov
 { "token": "cc01_live_…", "protocol": "http", "subdomain": "myapp",
-  "cname": "demo.example.com", "cli_version": "0.3.1", "client_ip": "213.x.x.x" }
+  "cname": "demo.example.com", "cli_version": "0.3.1", "client_ip": "213.x.x.x",
+  "renewal": false }   // true — ochiq tunnel lease yangilanishi, subdomain = BERILGAN nom
 
 // ← 200 OK
 { "user_id": 42, "tenant_id": "t_9f3a", "subdomain": "myapp", "plan": "pro",
   "limits": { "max_tunnels": 10, "max_conns_per_tunnel": 128,
               "bandwidth_bps": 1000000000 },
-  "lease_ttl_s": 3600 }
+  "lease_ttl_s": 60 }   // edge ≤ lease/2 da yangilaydi
 
 // ← 403 Forbidden
 { "code": "SUBDOMAIN_NOT_OWNED", "message": "myapp boshqa foydalanuvchiga tegishli" }
@@ -693,16 +695,56 @@ Quyidagi JSON — xabar tuzilishini ko'rsatish uchun; simda protobuf ketadi.
 
 **Xato kodlari:** `TOKEN_INVALID`, `TOKEN_REVOKED`, `TOKEN_EXPIRED`, `EMAIL_NOT_VERIFIED`, `SUBDOMAIN_NOT_OWNED`, `SUBDOMAIN_BUSY`, `QUOTA_TUNNELS_EXCEEDED`, `PLAN_SUSPENDED`.
 
-**Keshlash va fail-static.** Edge avtorizatsiya natijasini 60 s keshlaydi. AP yo'q bo'lsa (§6.1 nosozlik domenlari):
+**Lease yangilanishi (60 s kafolati).** Edge har bir ochiq tunnel uchun
+`AuthorizeTunnel{renewal=true}` ni qayta chaqiradi va javobdagi limitlarni
+tunnelga jonli qo'llaydi (`max_conns_per_tunnel` — yangi ulanishlarga).
+Oraliq `R = min(CC01_ACCESS_RENEW, lease_ttl_s/2)` = 30 s, har kutish
+`R·U[0.8,1]`. Birinchi yangilash grant olingan paytga (RPC boshlanishi,
+`Grant.IssuedAt`) bog'langan, keshdagi natija ko'pi bilan R yangi hisoblanadi
+— shuning uchun AP'dagi har qanday o'zgarish (tarif, muddat tugashi, katalog
+tahriri, token bekor qilinishi, hisob to'xtatilishi) ochiq tunnelga
+**≤ R + taymaut = 30 + 3 = 33 s** ichida yetadi (edge→AP kanali tayyor
+bo'lganda). AP yiqilib qaytgandan keyin gRPC kanali cheklangan backoff bilan
+(1 s → ≤ 2 s, urinish taymauti 3 s) **≤ 6 s** da qayta ulanadi, ya'ni
+≤ 6 + R + taymaut = 39 s; AP yo'q paytda kafolat yo'q (fail-static). Edge
+`6 s + CC01_ACCESS_RENEW + CC01_ACCESS_TIMEOUT < 60 s` bo'lmasa ishga
+tushmaydi. `make plan-demo` da
+o'lchangan: tarif o'zgarishi ≤ 29.7 s, token bekor qilinishi → tunnel
+yopilishi 24–28 s. Tunnelni faqat allowlist'dagi rad javobi yopadi
+(`TOKEN_INVALID`, `TOKEN_REVOKED`, `TOKEN_EXPIRED`, `PLAN_SUSPENDED`,
+`SUBDOMAIN_NOT_OWNED`); klient yopilishdan oldin
+`TunnelOpened{error_code, error_message}` freymini oladi. Pastga tushirish
+mavjud tunnel, ulanish va nomlarni uzmaydi. Batafsil: `DEV_SPEC.md` §8
+(Faza 1), `core-server/env.md`.
+
+**Keshlash va fail-static.** Edge avtorizatsiya natijasini keshlaydi: yangi
+deb ko'pi bilan R = min(`CC01_ACCESS_RENEW`, lease_ttl/2) (30 s) hisoblanadi,
+AP yo'qligida esa grace (15 daqiqa) gacha ishlatiladi. Rad javobi shu
+tokenga shu nomni berishi mumkin bo'lgan barcha kesh yozuvlarini o'chiradi
+(token darajasidagi kod — tokenning hammasini) va iz qoldiradi: rad
+javobidan oldin boshlangan, kechroq qaytgan grant keshga yozilmaydi. AP yo'q bo'lsa (§6.1 nosozlik domenlari) yoki yangilash rad javobi olsa:
 
 | Holat | Xatti-harakat |
 | --- | --- |
 | Mavjud tunnellar | **Ishlashda davom etadi** — AP ular uchun kerak emas |
+| Ochiq tunnel, yangilash AP'ga yetmadi | **Oxirgi limitlar bilan muddatsiz** davom etadi; `min(R, 10 s)` dan keyin qayta uriniladi. Yangilash hech qachon keshdagi natijani qaytarmaydi |
+| Ochiq tunnel, AP aniq rad etdi (allowlist) | ≤ R + taymaut (33 s) ichida yopiladi; `CC01_ACCESS_RENEW_DENY=log` — faqat log (dry run). Klient boshqaruv kanalini o'qimasa, yopilish xabari ≤ 5 s kutadi va kanal uziladi |
+| AP qaytdi | gRPC kanali ≤ 6 s ichida qayta ulanadi, yangilash odatdagidek davom etadi |
+| Ochiq tunnel, boshqa rad kodi (`QUOTA_*`, `SUBDOMAIN_BUSY`, noma'lum) | Log'ga yoziladi, tunnel saqlanadi |
 | Yangi tunnel, kesh'da yaroqli yozuv bor | Qabul qilinadi (grace 15 daqiqa) |
 | Yangi tunnel, kesh'da yo'q | Rad etiladi: `SERVICE_UNAVAILABLE` |
 | Usage hisoboti | Edge'da navbatga olinadi (disk buffer), AP tiklanganda yuboriladi |
 
-Sozlanadi: `on_account_plane_loss = cache | reject`.
+Sozlanadi: `on_account_plane_loss = cache | reject`. Yangilashni butunlay
+o'chirish (kill switch): `CC01_ACCESS_RENEW=0`.
+
+**Kvota qayerda majburlanadi:** `max_conns_per_tunnel` — edge'da jonli;
+`max_tunnels` — edge'da, faqat ochilishda va **shu edge node doirasida**
+(bir nechta ingress node bo'lganda kam hisoblaydi); `max_subdomains` — AP'da
+(band qilish, yangi nom bilan ochilish va o'zi bo'shatgan `Released` nomni
+qaytarib olish — karantin faqat boshqa tenantdan himoya qiladi, ochilish
+yangilanish rad etadigan nomni bermaydi); `bandwidth_bps` — edge'ga
+yetkaziladi, lekin hali **majburlanmaydi**.
 
 #### 3.4.4 Tunnel ochish oqimi (avtorizatsiya bilan)
 
@@ -726,16 +768,32 @@ sequenceDiagram
 
     Note over C,E: Endi CLI ishlatiladi
     U->>C: cc01 tunnel http 8080 --subdomain myapp
-    C->>E: OpenTunnel{token, http, 8080, "myapp"}
-    E->>A: POST /internal/v1/tunnels:authorize
-    A->>A: token → user → subdomain egaligi → kvota
-    A-->>E: 200 {user_id, limits, lease_ttl}
-    E-->>C: TunnelReady{https://myapp.tas.cc01.io}
-    Note over E,A: AP endi yo'ldan chiqadi — trafik unga tegmaydi
-    loop har 60 s
-        E->>A: tunnels:report {bytes_in, bytes_out, conns}
+    C->>E: TunnelRequested{token, http, "myapp"}
+    E->>A: gRPC AuthorizeTunnel{token, "myapp", renewal=false}
+    A->>A: token → tenant → tarif (EffectivePlanResolver) → subdomain egaligi → kvota
+    A-->>E: Grant{tenant_id, plan, limits, lease_ttl_s=60}
+    E-->>C: TunnelOpened{https://myapp.tas.cc01.io}
+    Note over E,A: AP paket yo'lida emas — trafik unga tegmaydi
+    loop har R·U[0.8,1] (R = 30 s), birinchisi Grant.IssuedAt'dan
+        E->>A: gRPC AuthorizeTunnel{token, BERILGAN nom, renewal=true}
+        alt Grant
+            A-->>E: yangi limitlar → SetMaxConns (yangi ulanishlarga)
+        else aniq rad (allowlist: TOKEN_*, PLAN_SUSPENDED, SUBDOMAIN_NOT_OWNED)
+            A-->>E: Denial{code}
+            E-->>C: TunnelOpened{error_code, error_message} → tunnel yopiladi
+        else AP javob bermadi / boshqa kod
+            Note over E: oxirgi limitlar saqlanadi, min(R, 10 s) dan keyin qayta
+        end
+    end
+    loop har 60 s (maqsad — edge hali yubormaydi)
+        E->>A: ReportUsage {bytes_in, bytes_out, conns}
     end
 ```
+
+Operator tarifni o'zgartiradi (`PUT /internal/v1/tenants/{slug}/subscription`,
+faqat ichki listener + admin kaliti, `DEV_SPEC.md` §6.4) — AP edge'ga hech narsa
+yubormaydi (push yo'q): o'zgarish keyingi yangilashda olinadi, ≤ 33 s
+(AP yiqilib qaytgandan keyin ≤ 39 s).
 
 #### 3.4.5 Texnologik tanlovlar
 
