@@ -16,15 +16,20 @@ option csharp_namespace = "Cc01.V1";
 //   · mTLS majburiy, klient sertifikati CN allowlist bilan tekshiriladi
 //   · Kubernetes'da alohida Service + NetworkPolicy
 //
-// Invariant: access-server data plane yo'lida turmaydi. AuthorizeTunnel faqat
-// tunnel OCHILAYOTGANDA chaqiriladi; ochilgandan keyin trafik unga tegmaydi.
+// Invariant: access-server data plane yo'lida turmaydi — paketlar unga
+// tegmaydi. AuthorizeTunnel tunnel OCHILAYOTGANDA va ochiq tunnel uchun har
+// ≤30 sekundda (lease yangilanishi, `renewal = true`) chaqiriladi. AP javob
+// bermasa ochiq tunnel HECH QACHON yopilmaydi (fail-static): u oxirgi
+// ma'lum limitlar bilan ishlashda davom etadi.
 
 service AccessInternalService {
   // Tunnel ochish so'rovini avtorizatsiya qiladi: token → foydalanuvchi →
   // subdomain egaligi → tarif kvotasi.
   //
-  // Edge natijani 60 sekundgacha keshlaydi. Kesh TTL'i token bekor
-  // qilinganda o'zgarishning kuchga kirish kechikishini belgilaydi.
+  // Edge natijani lease muddatigacha keshlaydi, ochiq tunnellar uchun esa
+  // lease'ni har ≤30 sekundda yangilaydi. Shu sabab tarif o'zgarishi, token
+  // bekor qilinishi yoki hisob to'xtatilishi 60 sekund ichida ochiq
+  // tunnelga ham yetib boradi.
   rpc AuthorizeTunnel (AuthorizeTunnelRequest) returns (AuthorizeTunnelResponse);
 
   // Usage hisoboti — billing uchun. Edge har 60 sekundda batch yuboradi.
@@ -42,6 +47,12 @@ message AuthorizeTunnelRequest {
   string   custom_domain = 4;
   string   cli_version   = 5;
   string   client_ip     = 6;  // audit va rate limit uchun
+
+  // true — ochiq tunnel lease'ini yangilash. AP bunda nom band qilmaydi,
+  // kvota sanamaydi va `last_used_at` ni siyrak yozadi. Edge `subdomain`
+  // maydoniga avval BERILGAN nomni qo'yadi. Eski AP bu maydonni e'tiborsiz
+  // qoldiradi va so'rovni oddiy ochilish sifatida ko'radi.
+  bool     renewal       = 7;
 }
 
 message AuthorizeTunnelResponse {
@@ -62,8 +73,9 @@ message Grant {
 
   Limits limits      = 5;
 
-  // Ushbu ruxsatning amal qilish muddati (sekund). Edge shu muddat davomida
-  // qayta so'ramasligi mumkin; muddat tugagach yangilaydi.
+  // Ushbu ruxsatning amal qilish muddati (sekund). Edge yangi ochilishlar
+  // uchun natijani shu muddatgacha keshlashi mumkin; ochiq tunnel lease'ini
+  // esa ko'pi bilan lease_ttl_s/2 da yangilaydi.
   uint32 lease_ttl_s = 6;
 }
 

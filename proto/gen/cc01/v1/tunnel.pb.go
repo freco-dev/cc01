@@ -272,6 +272,12 @@ func (x *TunnelRequested) GetCliVersion() string {
 //
 // `error_message` bo'sh bo'lmasa — so'rov rad etilgan va qolgan maydonlar
 // ma'noga ega emas. `error_code` mashina uchun, `error_message` odam uchun.
+//
+// Shu xabar tunnel OCHILGANDAN KEYIN ham kelishi mumkin — yopilish
+// xabarnomasi sifatida: lease yangilanishida AP qat'iy rad etsa (masalan
+// TOKEN_REVOKED, PLAN_SUSPENDED), server `error_code`/`error_message` ni
+// to'ldirib yuboradi va ulanishni yopadi. Eski klient bu freymni
+// e'tiborsiz qoldiradi va faqat ulanish uzilganini ko'radi.
 type TunnelOpened struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Hostname      string                 `protobuf:"bytes,1,opt,name=hostname,proto3" json:"hostname,omitempty"` // "myapp.example.com"
