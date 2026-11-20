@@ -406,6 +406,81 @@ namespace AccessServer.Infrastructure.Persistence.Migrations
                     b.ToTable("tenants", (string)null);
                 });
 
+            modelBuilder.Entity("AccessServer.Domain.Entities.UsageRecord", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<long>("BytesIn")
+                        .HasColumnType("bigint")
+                        .HasColumnName("bytes_in");
+
+                    b.Property<long>("BytesOut")
+                        .HasColumnType("bigint")
+                        .HasColumnName("bytes_out");
+
+                    b.Property<int>("Connections")
+                        .HasColumnType("integer")
+                        .HasColumnName("connections");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<int>("Rejected")
+                        .HasColumnType("integer")
+                        .HasColumnName("rejected");
+
+                    b.Property<string>("ReportedBy")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("reported_by");
+
+                    b.Property<int>("TenantId")
+                        .HasColumnType("integer")
+                        .HasColumnName("tenant_id");
+
+                    b.Property<string>("TunnelId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasColumnName("tunnel_id");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<DateTimeOffset>("WindowEnd")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("window_end");
+
+                    b.Property<DateTimeOffset>("WindowStart")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("window_start");
+
+                    b.HasKey("Id")
+                        .HasName("pk_usage_records");
+
+                    b.HasIndex("TenantId", "WindowStart")
+                        .HasDatabaseName("ix_usage_records_tenant_id_window_start");
+
+                    b.HasIndex("TunnelId", "WindowStart")
+                        .IsUnique()
+                        .HasDatabaseName("ix_usage_records_tunnel_id_window_start");
+
+                    b.ToTable("usage_records", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_usage_records_counters", "bytes_in >= 0 AND bytes_out >= 0 AND connections >= 0 AND rejected >= 0");
+
+                            t.HasCheckConstraint("ck_usage_records_window", "window_end > window_start");
+                        });
+                });
+
             modelBuilder.Entity("AccessServer.Domain.Entities.User", b =>
                 {
                     b.Property<int>("Id")
@@ -594,6 +669,18 @@ namespace AccessServer.Infrastructure.Persistence.Migrations
                         .HasConstraintName("fk_subscriptions_tenants_tenant_id");
 
                     b.Navigation("Plan");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("AccessServer.Domain.Entities.UsageRecord", b =>
+                {
+                    b.HasOne("AccessServer.Domain.Entities.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_usage_records_tenants_tenant_id");
 
                     b.Navigation("Tenant");
                 });

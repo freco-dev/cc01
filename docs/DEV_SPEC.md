@@ -1783,7 +1783,7 @@ public sealed class Subdomain : Entity {
 
 **Navigatsiya xossalari `required` emas** (`= null!`): EF ularni o'zi to'ldiradi. `required User User` deb yozilsa har bir entity yaratishda bog'liq obyektni majburan yuklash kerak bo'ladi — bu mavjud `UserToken` kodidagi xato.
 
-`Plan`, `Subscription`, `AuditEvent` — Faza 1 da qo'shildi (`AddPlansAndSubscriptions` migratsiyasi): Faza 0 dagi kod ichidagi `PlanCatalog` va `Tenant.Plan` ustuni o'chirildi, mavjud tenantlar `subscriptions` ga ko'chirildi (noma'lum qiymat → Free), `Down()` ustunni tiklaydi. Effektiv limitlarni faqat `EffectivePlanResolver` hisoblaydi — `Subscription.Plan` ni to'g'ridan-to'g'ri o'qish muddat va holatni chetlab o'tadi. `CustomDomain`, `UsageRecord` — Faza 1/3 da (§8).
+`Plan`, `Subscription`, `AuditEvent` — Faza 1 da qo'shildi (`AddPlansAndSubscriptions` migratsiyasi): Faza 0 dagi kod ichidagi `PlanCatalog` va `Tenant.Plan` ustuni o'chirildi, mavjud tenantlar `subscriptions` ga ko'chirildi (noma'lum qiymat → Free), `Down()` ustunni tiklaydi. Effektiv limitlarni faqat `EffectivePlanResolver` hisoblaydi — `Subscription.Plan` ni to'g'ridan-to'g'ri o'qish muddat va holatni chetlab o'tadi. `UsageRecord` — Faza 1 da qo'shildi (`AddUsageRecords`): edge'ning har bir ochiq tunnel uchun har oynadagi (sukut 60 s) bayt/ulanish hisobi, `(TunnelId, WindowStart)` bo'yicha idempotent. `CustomDomain` — Faza 3 da (§8).
 
 **Indekslar (majburiy):** `Tenant.Slug` unique · `User.Email` unique · `ApiToken.Prefix` unique · `Subdomain.Name` unique · `Plan.Code` unique · `Subscription.TenantId` unique · `ApiToken.TenantId` · `Subdomain.TenantId` · `Subscription.PlanId` · `AuditEvent (TenantId, CreatedAt)` · `UsageRecord (TenantId, WindowStart)`.
 
@@ -1831,7 +1831,7 @@ cc01_live_a1b2c3d4_<32 bayt base62 sir>
    POST   /v1/domains                  {fqdn} → TXT verifikatsiya tokeni
    POST   /v1/domains/{id}/verify
 
-   GET    /v1/usage?from=&to=          bayt, ulanish, tunnel-soat
+✅ GET    /v1/usage?from=&to=          bayt, ulanish, tunnel-soat (jami + kunlik, UTC)
 ✅ GET    /v1/plan                     amaldagi tarif, manba, obuna, limitlar, band subdomainlar soni
 ```
 
@@ -1888,8 +1888,31 @@ bog'liq bo'lsa, orkestrator sog'lom podlarni bekordan qayta ishga tushiradi.
 ```
 ✅ AccessInternalService.AuthorizeTunnel   → ARCHITECTURE.md §3.4.3
 ✅   … renewal=true                         ochiq tunnel lease yangilanishi (edge har ≤ 30 s)
-   AccessInternalService.ReportUsage       usage batch (qabul qiladi, hali saqlamaydi)
+✅ AccessInternalService.ReportUsage       usage oynalari → usage_records (idempotent)
 ```
+
+**Usage (`ReportUsage` → `usage_records` → `GET /v1/usage`).** Edge har bir
+ochiq tunnel uchun `bytes_in` (internet → lokal servis), `bytes_out`,
+qabul qilingan va `max_conns` sababli rad etilgan ulanishlarni sanaydi va har
+`CC01_USAGE_INTERVAL` (sukut 60 s, devor soatiga tekislangan) da **har bir**
+ochiq tunnel uchun oyna kesadi — trafiksiz tunnel ham, chunki tunnel-soat
+oynalar davomiyligidan hisoblanadi. `tunnel_id` har bir tunnel nusxasi uchun
+noyob (`<host>:<port>/<16 hex>`): qayta ochilgan tunnel oynalari eskisiniki
+bilan to'qnashmaydi.
+
+| Qoida | Sabab |
+| --- | --- |
+| `INSERT … ON CONFLICT (tunnel_id, window_start) DO NOTHING` — birinchi yozuv yutadi | Edge qayta yuborsa ikki marta hisoblanmaydi |
+| Yaroqsiz oyna (noma'lum tenant, 7 kundan eski, 5 daqiqadan ko'p kelajakda, > 1 soat, `end ≤ start`) **tashlanadi**, partiya rad etilmaydi; `accepted` = partiya hajmi | Aks holda edge bitta yomon oyna uchun abadiy qayta yuborardi |
+| Baza xatosi → gRPC `Unavailable`; edge navbatni saqlaydi va keyingi oynada qayta yuboradi | AP yoki baza o'chiq paytdagi trafik yo'qolmaydi (`make plan-demo` tekshiradi) |
+| > 1000 oyna → `InvalidArgument` (edge ≤ 500 yuboradi) | Bitta so'rov chegarasiz o'smasligi uchun |
+| Edge navbati xotirada, ≤ 10 000 oyna; to'lsa eng eskisi tashlanadi (`[usage-dropped]`) | Edge qayta ishga tushsa navbat yo'qoladi — **at-most-once**, hujjatlashtirilgan |
+| `ReportedBy` — edge mTLS sertifikatining CN'i (`plaintext` — loopback) | Qaysi edge hisobot berganini audit qilish uchun |
+
+`GET /v1/usage` faqat chaqiruvchining tenanti (A-S15); sukut — oxirgi 30 kun,
+`[from, to)` `window_start` bo'yicha, ≤ 400 kun, aks holda
+`USAGE_RANGE_INVALID`. Javob: `totals` va `daily` (UTC kun) — `bytesIn`,
+`bytesOut`, `connections`, `rejected`, `tunnelHours`. Yig'ish SQL'da.
 
 `renewal=true` da AP xuddi ochilishdagidek token, tenant holati va tarifni
 tekshiradi, lekin **nom band qilmaydi va kvota sanamaydi**: nom mavjud, shu
@@ -2245,7 +2268,7 @@ Maqsad: uchta mustaqil bo'lakni **bitta ishlaydigan mahsulotga** bog'lash — to
 | Subdomain egaligi (rezervatsiya) | Band nom boshqa tenantga berilmaydi; validatsiya §6.7 ga mos | ✅ |
 | OAuth: GitHub, Google (PKCE + state) | Yo'naltirish parametrlari va bog'lash mantiqi testlar bilan; callback qo'lda tekshiriladi | ✅ (§6.6) |
 
-Faza 0 yopilganda 83 ta test (unit + integration + HTTP) yashil edi; tarif modeli (Faza 1) bilan — 205 ta, AP ↔ Edge mTLS bilan — **248 ta**. Testlash bo'yicha ikkita qaror:
+Faza 0 yopilganda 83 ta test (unit + integration + HTTP) yashil edi; tarif modeli (Faza 1) bilan — 205 ta, AP ↔ Edge mTLS bilan — 248 ta, usage bilan — **285 ta**. Testlash bo'yicha ikkita qaror:
 
 - **`Testcontainers` ishlatilmadi.** Bu mashinada docker konteksti masofaviy serverga qaratilgan bo'lishi mumkin va Testcontainers uni jimgina ishlatib yuborardi. O'rniga oshkora ulanish satri: `CC01_TEST_DB`. Har bir yugurish o'ziga alohida baza yaratadi va oxirida o'chiradi.
 - **HTTP darajasidagi testlar majburiy.** Handler'ni to'g'ridan-to'g'ri chaqiradigan testlar routing, JWT claim'lari va xato → status xaritasini ko'rmaydi. Amalda aynan shu qatlamda ikkita xato topildi (§6.5 A-S13, A-S14) — ikkalasi ham handler testlaridan bemalol o'tib ketgan edi.
@@ -2261,7 +2284,7 @@ Faza 0 yopilganda 83 ta test (unit + integration + HTTP) yashil edi; tarif model
 | Avtorizatsiya deny-by-default | `CC01_ACCESS_ADDR` sozlanmagan bo'lsa server ishga tushmaydi | ✅ |
 | **Faza 0 demo** | Ro'yxatdan o'tish → token olish → tunnel ochish → brauzerdan ochilishi | ✅ |
 | mTLS: AP ↔ Edge | Klient sertifikati CN allowlist bilan | ✅ `Internal:Tls:*` + `CC01_ACCESS_TLS_*`; `make plan-demo` (sukut bo'yicha mTLS) — sertifikatsiz, begona CA va shifrsiz ulanish rad etiladi (§6.4) |
-| `ReportUsage` + `UsageRecord` | Bayt/ulanish hisobi dashboard'da ko'rinadi | ⏳ RPC bor, saqlash Faza 1 |
+| `ReportUsage` + `UsageRecord` | Bayt/ulanish hisobi dashboard'da ko'rinadi | ✅ edge oynalarni yuboradi, AP `usage_records` ga idempotent yozadi, `GET /v1/usage`; `make plan-demo` — AP o'chiq paytdagi trafik ham yetib boradi (§6.4) |
 | `test/contract/` — validatsiya pariteti | Go va .NET 40+ kirishda bir xil natija | ⏳ ikkala tomonda testlar bor, taqqoslash yo'q |
 
 **Faza 0 demo qanday tekshirildi** (qo'lda, uchidan uchiga):
@@ -2670,7 +2693,7 @@ Boshqa qarorlar:
 
 **Ataylab qilinmagan:** billing va self-service, tarmoq tezligini
 cheklash, global `max_tunnels`, pastga tushirishda tunnel/nomlarni
-chiqarish, `ReportUsage` ni saqlash, admin kalitini aylantirish (statik kalit;
+chiqarish, admin kalitini aylantirish (statik kalit;
 mTLS A-S5 endi uning oldida turadi). Pastga tushirishda kvotadan ortiq nomlardan
 qaysi biri ishlashda qolishi (masalan, "eng eski N nom" qoidasi) —
 mahsulot qarori bilan alohida.

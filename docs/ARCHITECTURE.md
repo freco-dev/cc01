@@ -107,7 +107,7 @@ Bu hujjat **maqsadli** arxitekturani tasvirlaydi. Repozitoriyda hozir mavjud kod
 | CP ↔ node protokoli (gRPC/protobuf) | `core-server/events/` — protobuf freyming, magic+versiya preambulasi bilan | ✅ `gob` dan ko'chirildi; uzun yashovchi gRPC stream Faza 1 da |
 | AP ↔ Edge avtorizatsiyasi (§3.4.3) | `core-server/access/` — gRPC klient, kesh, fail-static; `core-server/renew.go` — ochiq tunnel lease yangilanishi | ✅ ishlaydi; mTLS ✅ (A-S5, ichki CA + CN allowlist) |
 | Klient daemon `cc01d` + CLI `cc01` | `cli-client/` — 173 qatorli `flag` asosidagi klient | Daemon, IPC, holat mashinasi, buyruq daraxti yo'q |
-| Account Plane (`access-server`) | `access-server/` — auth, OAuth (GitHub/Google), API token, subdomain egaligi, tunnel avtorizatsiyasi, tarif katalogi + obuna + audit (`Application/Plans`), operator API | ✅ ishlaydi; tarif o'zgarishi ochiq tunnelga ≤ 33 s (`make plan-demo`: o'lchandi ≤ 29.7 s); billing va usage hisobi Faza 1/3 da |
+| Account Plane (`access-server`) | `access-server/` — auth, OAuth (GitHub/Google), API token, subdomain egaligi, tunnel avtorizatsiyasi, tarif katalogi + obuna + audit (`Application/Plans`), operator API | ✅ ishlaydi; tarif o'zgarishi ochiq tunnelga ≤ 33 s (`make plan-demo`: o'lchandi ≤ 29.7 s); usage hisobi ✅ (`usage_records`, `GET /v1/usage`); billing Faza 3 da |
 | Control Plane — `cc01-ipam` | `control/ipam/` — ijara hayot sikli, sticky taqsimlash, karantin | ✅ `Register` da manzil beradi; Raft store keyingi qadam |
 | Control Plane — `cc01-disco` | `control/registry/` + `control/server/` — registri, NetworkMap, delta sync, gRPC stream | ✅ `cc01d` peerlarni avtomatik oladi |
 | Control Plane — idp / policy | — | Hali yo'q |
@@ -785,8 +785,9 @@ sequenceDiagram
             Note over E: oxirgi limitlar saqlanadi, min(R, 10 s) dan keyin qayta
         end
     end
-    loop har 60 s (maqsad — edge hali yubormaydi)
-        E->>A: ReportUsage {bytes_in, bytes_out, conns}
+    loop har CC01_USAGE_INTERVAL (sukut 60 s)
+        E->>A: ReportUsage [oynalar: tunnel_id, window, bytes_in/out, conns, rejected]
+        A-->>E: accepted (AP o'chiq → navbatda qoladi, keyin qayta)
     end
 ```
 

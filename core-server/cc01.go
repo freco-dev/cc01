@@ -18,6 +18,7 @@ import (
 	"github.com/freco-dev/cc01/core-server/server"
 	"github.com/freco-dev/cc01/core-server/tlsmgr"
 	"github.com/freco-dev/cc01/core-server/tunnel"
+	"github.com/freco-dev/cc01/core-server/usage"
 	cc01v1 "github.com/freco-dev/cc01/proto/gen/cc01/v1"
 )
 
@@ -43,6 +44,10 @@ type CC01Server struct {
 
 	certs *tlsmgr.Resolver
 
+	// usage — ochiq tunnellarning foydalanish hisoboti (usage.go). nil —
+	// o'chiq (AllowAll yoki CC01_USAGE_INTERVAL=0); nil'da ham xavfsiz.
+	usage *usage.Meter
+
 	// logOut — tunnel hodisalari log'i ([tunnel-opened], [tunnel-limits]
 	// va h.k.). nil — os.Stdout; testlar o'z yozuvchisini beradi.
 	logOut io.Writer
@@ -54,6 +59,7 @@ func (j *CC01Server) Init(conf config.Config) error {
 	if err := j.initAuthorizer(); err != nil {
 		return err
 	}
+	j.initUsage()
 
 	j.initRegistry()
 
@@ -221,6 +227,7 @@ func (j *CC01Server) Start() {
 	go j.eventServer.Start(j.serveEventConn)
 	go j.publicServer.Start(j.servePublicConn)
 	go j.publicServerTLS.Start(j.servePublicConn)
+	j.usage.Start()
 }
 
 func (j *CC01Server) Stop() error {
@@ -233,6 +240,9 @@ func (j *CC01Server) Stop() error {
 	if err := j.publicServerTLS.Stop(); err != nil {
 		return err
 	}
+	// Ochiq tunnellarning oxirgi oynalari va navbat — best-effort, AP
+	// yopilishidan oldin. AP yo'q bo'lsa navbat yo'qoladi.
+	j.usage.Stop(usageFlushTimeout)
 	if j.authorizer != nil {
 		return j.authorizer.Close()
 	}
@@ -442,13 +452,20 @@ func (j *CC01Server) serveEventConn(conn net.Conn) error {
 		publicPort = port
 	}
 
-	tunnelID := fmt.Sprintf("%s:%d", t.Hostname(), publicPort)
+	// Har tunnel nusxasi uchun noyob (foydalanish oynalari shu ID bilan
+	// AP'ga boradi); log'larda va TunnelOpened.tunnel_id da ham shu.
+	tunnelID := newTunnelID(t.Hostname(), publicPort)
 	// Boshqaruv kanali t.Close() DAN OLDIN yopiladi: kanalga yozib turib
 	// qolgan goroutine (o'qimay qo'ygan klient) darhol bo'shaydi va
 	// yuqoridagi ro'yxatdan o'chirish defer'lari albatta ishlaydi.
+	//
+	// Yakuniy foydalanish oynasi tunnel yopilgandan KEYIN kesiladi —
+	// yopilish paytida ko'chirilgan oxirgi baytlar ham unga tushadi.
+	closeUsage := func() {}
 	defer func() {
 		_ = conn.Close()
 		t.Close()
+		closeUsage()
 	}()
 
 	// TunnelOpened Open() dan OLDIN yuboriladi: listenerlar Init'da
@@ -464,6 +481,7 @@ func (j *CC01Server) serveEventConn(conn net.Conn) error {
 		return err
 	}
 	t.Open()
+	closeUsage = j.usage.Open(tunnelID, grant.TenantID, t.Usage)
 
 	j.logf("[tunnel-opened] %s tenant=%s plan=%s max_conns=%d",
 		tunnelID, grant.TenantID, grant.Plan, maxConsLimit)

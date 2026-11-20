@@ -1,7 +1,13 @@
+using System.Data.Common;
+using AccessServer.Api.Common;
+using AccessServer.Application.Common;
 using AccessServer.Application.Plans;
 using AccessServer.Application.Tunnels;
+using AccessServer.Application.Usage;
+using AccessServer.Domain.Entities;
 using Cc01.V1;
 using Grpc.Core;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace AccessServer.Api.Grpc;
 
@@ -13,6 +19,7 @@ namespace AccessServer.Api.Grpc;
 /// </summary>
 public sealed class TunnelAuthorizationService(
     AuthorizeTunnelHandler authorize,
+    RecordUsageHandler recordUsage,
     ILogger<TunnelAuthorizationService> logger)
     : AccessInternalService.AccessInternalServiceBase
 {
@@ -80,19 +87,95 @@ public sealed class TunnelAuthorizationService(
         };
     }
 
-    public override Task<ReportUsageResponse> ReportUsage(
+    /// <summary>
+    /// Edge'ning usage oynalarini saqlaydi (RecordUsageHandler). Javob:
+    ///
+    ///   OK, accepted = so'rovdagi oynalar soni — qo'shilgan, takror va
+    ///       tashlangan (noto'g'ri / tenant noma'lum) birga. Edge ularni
+    ///       navbatidan o'chiradi.
+    ///   InvalidArgument — 1000 tadan ko'p oyna (edge ≤500 yuboradi).
+    ///   Unavailable     — baza xatosi: edge hisobotni saqlab, qayta yuboradi.
+    /// </summary>
+    public override async Task<ReportUsageResponse> ReportUsage(
         ReportUsageRequest request,
         ServerCallContext context)
     {
-        // Faza 1: UsageRecord entity'si va billing hisob-kitobi (§8).
-        // Hozircha qabul qilinganini tasdiqlaymiz, aks holda edge navbatni
-        // cheksiz to'plab boradi.
-        logger.LogDebug("Usage hisoboti: {Count} oyna (hali saqlanmaydi)", request.Windows.Count);
-
-        return Task.FromResult(new ReportUsageResponse
+        if (request.Windows.Count > RecordUsageHandler.MaxBatchSize)
         {
-            Accepted = (uint)request.Windows.Count,
-        });
+            throw new RpcException(new Status(StatusCode.InvalidArgument, UsageErrors.BatchTooLarge.Message));
+        }
+
+        var windows = request.Windows
+            .Select(w => new UsageWindowInput(
+                w.TenantId,
+                w.TunnelId,
+                w.WindowStart,
+                w.WindowEnd,
+                w.BytesIn,
+                w.BytesOut,
+                w.Connections,
+                w.Rejected))
+            .ToList();
+
+        Result<RecordUsageOutcome> result;
+        try
+        {
+            result = await recordUsage.HandleAsync(
+                new RecordUsageCommand(windows, ResolveReporter(context)),
+                context.CancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException && IsDatabaseFailure(ex))
+        {
+            logger.LogWarning(ex,
+                "Usage hisoboti saqlanmadi (baza xatosi): {Count} oyna — edge qayta yuboradi",
+                windows.Count);
+
+            throw new RpcException(new Status(
+                StatusCode.Unavailable,
+                "Usage hozircha saqlanmadi. Hisobotni keyinroq qayta yuboring."));
+        }
+
+        if (!result.IsSuccess)
+        {
+            throw new RpcException(new Status(StatusCode.InvalidArgument, result.Error!.Message));
+        }
+
+        return new ReportUsageResponse { Accepted = (uint)result.Value.Received };
+    }
+
+    /// <summary>
+    /// Hisobotni kim yubordi: mTLS bo'lsa — klient sertifikatining Subject
+    /// CN'i (handshake'da allowlist bo'yicha tekshirilgan), aks holda
+    /// "plaintext" (loopback h2c, S-11).
+    /// </summary>
+    private static string ResolveReporter(ServerCallContext context)
+    {
+        var certificate = context.GetHttpContext().Connection.ClientCertificate;
+        if (certificate is null)
+        {
+            return UsageRecord.PlaintextReporter;
+        }
+
+        // Handshake CN'siz sertifikatni o'tkazmaydi — bu faqat himoya qatlami.
+        return InternalTls.GetCommonName(certificate) ?? "unknown";
+    }
+
+    /// <summary>
+    /// Baza yetib bo'lmasligi yoki so'rov yiqilishi — vaqtinchalik holat:
+    /// edge qayta yuboradi. Npgsql xatolari DbException; retry strategiyasi
+    /// tugasa RetryLimitExceededException (ichida DbException).
+    /// </summary>
+    private static bool IsDatabaseFailure(Exception ex)
+    {
+        for (var current = ex; current is not null; current = current.InnerException)
+        {
+            if (current is DbException or RetryLimitExceededException or TimeoutException)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

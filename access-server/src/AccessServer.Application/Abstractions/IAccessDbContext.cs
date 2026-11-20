@@ -26,5 +26,7 @@ public interface IAccessDbContext
 
     DbSet<AuditEvent> AuditEvents { get; }
 
+    DbSet<UsageRecord> UsageRecords { get; }
+
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 }

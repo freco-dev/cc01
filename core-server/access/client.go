@@ -248,6 +248,41 @@ func (c *Client) Renew(ctx context.Context, req Request) (*Grant, error) {
 	return grant, nil
 }
 
+// ReportUsage foydalanish oynalarini AP'ga bitta RPC bilan yuboradi
+// (UsageReporter). Keshga tegmaydi; taymaut — Options.Timeout.
+//
+// Har qanday RPC xatosi ErrUnavailable'ni o'rab qaytariladi (0 qabul
+// qilingan): chaqiruvchi oynalarni saqlab, keyinroq qayta yuboradi. AP
+// len(windows) dan ko'p qaytarsa — len(windows) gacha qisqartiriladi.
+func (c *Client) ReportUsage(ctx context.Context, windows []UsageWindow) (int, error) {
+	if len(windows) == 0 {
+		return 0, nil
+	}
+
+	req := &cc01v1.ReportUsageRequest{Windows: make([]*cc01v1.UsageWindow, 0, len(windows))}
+	for _, w := range windows {
+		req.Windows = append(req.Windows, &cc01v1.UsageWindow{
+			TenantId:    w.TenantID,
+			TunnelId:    w.TunnelID,
+			WindowStart: w.WindowStart,
+			WindowEnd:   w.WindowEnd,
+			BytesIn:     w.BytesIn,
+			BytesOut:    w.BytesOut,
+			Connections: w.Connections,
+			Rejected:    w.Rejected,
+		})
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+
+	response, err := c.service.ReportUsage(callCtx, req)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+	return min(int(response.GetAccepted()), len(windows)), nil
+}
+
 // call AP'ga bitta AuthorizeTunnel RPC yuboradi. Keshga tegmaydi.
 // Rad javobi *Denial sifatida, tarmoq xatosi oddiy xato sifatida qaytadi.
 // started — RPC boshlangan vaqt: AP qarorini shu paytdan keyin qabul
