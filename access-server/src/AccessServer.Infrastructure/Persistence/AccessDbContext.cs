@@ -30,6 +30,8 @@ public sealed class AccessDbContext : DbContext, IAccessDbContext
 
     public DbSet<AuditEvent> AuditEvents => Set<AuditEvent>();
 
+    public DbSet<UsageRecord> UsageRecords => Set<UsageRecord>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(AccessDbContext).Assembly);

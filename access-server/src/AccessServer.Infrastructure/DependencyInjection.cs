@@ -4,6 +4,7 @@ using AccessServer.Application.Plans;
 using AccessServer.Application.Subdomains;
 using AccessServer.Application.Tunnels;
 using AccessServer.Application.Tokens;
+using AccessServer.Application.Usage;
 using AccessServer.Infrastructure.Auth;
 using AccessServer.Infrastructure.Email;
 using AccessServer.Infrastructure.Persistence;
@@ -36,6 +37,9 @@ public static class DependencyInjection
 
         // Application qatlami faqat interfeysni ko'radi.
         services.AddScoped<IAccessDbContext>(sp => sp.GetRequiredService<AccessDbContext>());
+
+        // usage_records: ON CONFLICT va kunlik yig'indi — xom SQL (LINQ'da yo'q).
+        services.AddScoped<IUsageStore, UsageStore>();
 
         return services;
     }
@@ -94,6 +98,9 @@ public static class DependencyInjection
         services.AddScoped<ReserveSubdomainHandler>();
         services.AddScoped<ListSubdomainsHandler>();
         services.AddScoped<ReleaseSubdomainHandler>();
+
+        services.AddScoped<RecordUsageHandler>();
+        services.AddScoped<GetUsageHandler>();
 
         return services;
     }

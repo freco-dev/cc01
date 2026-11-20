@@ -153,6 +153,7 @@ public sealed class RenewalGrpcTests(PostgresFixture fixture) : IAsyncLifetime
         var logger = new CapturingLogger();
         var service = new TunnelAuthorizationService(
             scope.ServiceProvider.GetRequiredService<AuthorizeTunnelHandler>(),
+            scope.ServiceProvider.GetRequiredService<Application.Usage.RecordUsageHandler>(),
             logger);
 
         var reply = await service.AuthorizeTunnel(request, new TestServerCallContext());

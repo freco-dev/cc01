@@ -164,6 +164,7 @@ app.MapAuthEndpoints();
 app.MapTokenEndpoints();
 app.MapSubdomainEndpoints();
 app.MapPlanEndpoints();
+app.MapUsageEndpoints();
 app.MapOAuthEndpoints(oauthProviders);
 
 // Servis faqat ichki listener'da javob beradi: RequireInternalListener
