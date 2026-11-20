@@ -19,7 +19,6 @@ public static class InternalPlanEndpoints
 
     public static WebApplication MapInternalPlanEndpoints(
         this WebApplication app,
-        int internalPort,
         string? adminKey)
     {
         ArgumentNullException.ThrowIfNull(app);
@@ -35,7 +34,7 @@ public static class InternalPlanEndpoints
         }
 
         var group = app.MapGroup("/internal/v1")
-            .RequireInternalListener(internalPort)
+            .RequireInternalListener()
             .AddEndpointFilter(new AdminKeyFilter(adminKey))
             .WithTags("Internal");
 

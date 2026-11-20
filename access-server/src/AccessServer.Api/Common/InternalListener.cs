@@ -59,25 +59,27 @@ public static class InternalListenerExtensions
     }
 
     /// <summary>
-    /// Endpointni ichki listener'ga bog'laydi. Ikki qatlam:
+    /// Endpointni ichki listener'ga bog'laydi: <see cref="InternalOnlyMetadata"/>
+    /// bo'yicha guard middleware so'rov HAQIQATAN ichki listener qabul qilgan
+    /// ulanishdan kelganini (<see cref="MarkInternal(ListenOptions)"/> belgisi)
+    /// tekshiradi.
     ///
-    /// 1. <c>RequireHost("*:port")</c> — routing darajasida. ⚠️ U Host /
-    ///    :authority sarlavhasiga qaraydi, uni esa klient o'zi yozadi: public
-    ///    portga <c>Host: x:5081</c> yuborib aldash mumkin. Yolg'iz yetarli EMAS.
-    /// 2. <see cref="InternalOnlyMetadata"/> — guard middleware so'rov
-    ///    HAQIQATAN ichki listener qabul qilgan ulanishdan kelganini
-    ///    (<see cref="MarkInternal(ListenOptions)"/> belgisi) tekshiradi.
+    /// ⚠️ <c>RequireHost("*:port")</c> ATAYLAB ishlatilmaydi. U Host /
+    /// :authority sarlavhasiga qaraydi — uni klient o'zi yozadi (public portga
+    /// <c>Host: x:5081</c> bilan aldash mumkin, A-S19), ya'ni himoya bermaydi.
+    /// Ustiga-ustak u haqiqiy klientni sindirardi: grpc-go TLS'da :authority
+    /// sifatida PORTSIZ ServerName ni yuboradi ("127.0.0.1"), RequireHost esa
+    /// "*:5081" ni kutib, mTLS orqali kelgan edge so'roviga 404 qaytarardi.
     ///
     /// OpenAPI hujjatidan ham chiqariladi: public portdagi /openapi/v1.json
     /// ichki endpoint mavjudligini oshkor qilmasligi kerak.
     /// </summary>
-    public static TBuilder RequireInternalListener<TBuilder>(this TBuilder builder, int internalPort)
+    public static TBuilder RequireInternalListener<TBuilder>(this TBuilder builder)
         where TBuilder : IEndpointConventionBuilder
     {
         ArgumentNullException.ThrowIfNull(builder);
 
         return builder
-            .RequireHost($"*:{internalPort}")
             .WithMetadata(new InternalOnlyMetadata())
             .ExcludeFromDescription();
     }
@@ -120,8 +122,10 @@ public sealed class InternalListenerGuardMiddleware(
 
 /// <summary>
 /// <c>X-Cc01-Admin-Key</c> sarlavhasini tekshiradi. Ichki listener pod yoki
-/// klaster IP'siga bog'langan bo'lishi mumkin va AP ↔ Edge mTLS (A-S5) hali
-/// yo'q — tarif o'zgartirish esa pul bilan bog'liq imtiyoz.
+/// klaster IP'siga bog'langan bo'lishi mumkin; u yerda mTLS (A-S5,
+/// <see cref="InternalTls"/>) ulanishni edge sertifikati bilan cheklaydi,
+/// admin kaliti esa chuqur himoya — tarif o'zgartirish pul bilan bog'liq
+/// imtiyoz, edge sertifikati yolg'iz unga yetmasligi kerak.
 ///
 /// Solishtirish SHA-256 digestlari ustida, doimiy vaqtda: uzunlik ham, mos
 /// prefiks ham vaqt orqali sizmaydi.
