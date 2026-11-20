@@ -127,6 +127,13 @@ raft-demo: check-docker ## Control Plane klasteri: 3 replika, lider failover
 tunnel-demo: check-docker ## Tunnel: subdomain, SNI bo'yicha TLS, begona domen rad etiladi
 	sh core-server/testdata/tunnel-demo.sh
 
+# Lokal jarayonlar (AP + edge + klient), Docker faqat dev Postgres uchun.
+# Tarif o'zgarishining ochiq tunnelga yetib borish vaqtini O'LCHAYDI
+# (60 s dan oshsa yiqiladi) — DEV_SPEC §8 dagi raqam shu yerdan.
+.PHONY: plan-demo
+plan-demo: check-docker ## Tarif: o'zgarish ochiq tunnelga <60 s, fail-static, token bekor → yopiladi
+	DOCKER_CONTEXT=$(DOCKER_CONTEXT) bash core-server/testdata/plan-demo.sh
+
 .PHONY: punch-sym-demo
 punch-sym-demo: check-docker ## Birthday punching: symmetric NAT ortidagi node bilan to'g'ridan-to'g'ri
 	sh daemon/testdata/punch-sym-demo.sh
@@ -247,6 +254,7 @@ dotnet-vuln: ## Zaif NuGet paketlarini qidiradi (§7.2 S-9)
 # (DEV_SPEC §6.5 A-S10) — shuning uchun alohida maqsadlar.
 EF := cd access-server && dotnet dotnet-ef
 EF_PROJECT := --project src/AccessServer.Infrastructure
+MIGRATIONS_DIR := access-server/src/AccessServer.Infrastructure/Persistence/Migrations
 
 .PHONY: db-migrate
 db-migrate: ## Yangi migratsiya yaratadi:  make db-migrate NAME=AddPlans
@@ -259,8 +267,50 @@ db-migrate: ## Yangi migratsiya yaratadi:  make db-migrate NAME=AddPlans
 db-update: ## Migratsiyalarni bazaga qo'llaydi
 	$(EF) database update $(EF_PROJECT)
 
+# Ma'lumot yo'qotadigan maqsadlar (db-rollback, db-down) uchun himoya:
+# CC01_ACCESS_DB o'rnatilmagan bo'lsa — dev default (lokal 127.0.0.1:15432)
+# ishlatiladi va hech narsa so'ralmaydi. O'rnatilgan bo'lsa (staging/prod)
+# qaysi bazaga ulanishi parolsiz ko'rsatiladi va CONFIRM=yes talab qilinadi —
+# eksport qilinib qolgan o'zgaruvchi bilan masofaviy bazani tasodifan
+# buzib qo'ymaslik uchun.
+define DB_DESTRUCTIVE_GUARD
+	@if [ -n "$$CC01_ACCESS_DB" ]; then \
+	  target=$$(printf '%s' "$$CC01_ACCESS_DB" | tr ';' '\n' \
+	    | grep -iE '^[[:space:]]*(host|server|port|database)[[:space:]]*=' | paste -sd' ' -); \
+	  echo "⚠ CC01_ACCESS_DB dagi baza: $${target:-?}"; \
+	  if [ "$(CONFIRM)" != "yes" ]; then \
+	    echo "✘ Bu dev bazasi emas. Ishonchingiz komil bo'lsa CONFIRM=yes qo'shing."; exit 1; \
+	  fi; \
+	else \
+	  echo "→ dev baza (127.0.0.1:15432/cc01_access)"; \
+	fi
+endef
+
+.PHONY: db-rollback
+db-rollback: ## Shu migratsiyagacha qaytaradi:  make db-rollback TO=InitialAccessSchema
+	@case "$(TO)" in \
+	  '') echo "✘ TO kerak — qoladigan oxirgi migratsiya nomi. Masalan:"; \
+	      echo "      make db-rollback TO=InitialAccessSchema"; exit 1 ;; \
+	  0)  echo "✘ TO=0 hamma narsani o'chiradi — bu db-down (faqat dev)."; exit 1 ;; \
+	  *[!A-Za-z0-9_]*) echo "✘ TO noto'g'ri: $(TO)"; exit 1 ;; \
+	esac
+	@found=; for f in $(MIGRATIONS_DIR)/*.cs; do \
+	  b=$${f##*/}; b=$${b%.cs}; \
+	  case "$$b" in *.Designer|*ModelSnapshot) continue ;; esac; \
+	  if [ "$$b" = "$(TO)" ] || [ "$${b#*_}" = "$(TO)" ]; then found=$$b; fi; \
+	done; \
+	if [ -z "$$found" ]; then \
+	  echo "✘ Migratsiya topilmadi: $(TO). Mavjudlari:"; \
+	  ls $(MIGRATIONS_DIR) | grep -vE 'Designer|ModelSnapshot' | sed 's/\.cs$$//; s/^/      /'; \
+	  exit 1; \
+	fi; \
+	echo "→ $$found dan keyingi migratsiyalarning Down() i ishlaydi"
+	$(DB_DESTRUCTIVE_GUARD)
+	$(EF) database update $(TO) $(EF_PROJECT)
+
 .PHONY: db-down
-db-down: ## Hamma migratsiyani qaytaradi (bo'sh bazaga)
+db-down: ## ⚠ HAMMA migratsiyani qaytaradi — barcha jadval va ma'lumot o'chadi (faqat dev)
+	$(DB_DESTRUCTIVE_GUARD)
 	$(EF) database update 0 $(EF_PROJECT)
 
 .PHONY: db-verify
@@ -273,6 +323,32 @@ db-verify: ## DoD talabi: up → down → up ishlashini tekshiradi
 .PHONY: db-sql
 db-sql: ## Migratsiyalarni SQL ko'rinishida chiqaradi (review uchun)
 	$(EF) migrations script $(EF_PROJECT) --idempotent
+
+# Operator API ichki listener'da (h2c, sukut bo'yicha 127.0.0.1:5081).
+# Kalit CC01_ADMIN_KEY muhit o'zgaruvchisidan olinadi — operator yozadigan
+# buyruqqa ham, shell tarixiga ham, curl'ning argv'iga ham tushmaydi
+# (`ps`/`/proc/<pid>/cmdline` da ko'rinmaydi): sarlavhani bash'ning ichki
+# printf'i stdin orqali beradi (`-H @-`, curl ≥ 7.55).
+# AP'da Internal__AdminKey shu qiymatga teng.
+AP_INTERNAL ?= http://127.0.0.1:5081
+
+.PHONY: ap-set-plan
+ap-set-plan: ## Tenant tarifini o'zgartiradi:  make ap-set-plan SLUG=t_... PLAN=pro ACTOR=aziz REASON=...
+	@if [ -z "$(SLUG)" ] || [ -z "$(PLAN)" ] || [ -z "$(ACTOR)" ]; then \
+	  echo "✘ SLUG, PLAN va ACTOR kerak. Masalan: make ap-set-plan SLUG=t_9f3a PLAN=pro ACTOR=aziz"; exit 1; \
+	fi
+	@if [ -z "$$CC01_ADMIN_KEY" ]; then \
+	  echo "✘ CC01_ADMIN_KEY muhit o'zgaruvchisi o'rnatilmagan."; exit 1; \
+	fi
+	@case "$$CC01_ADMIN_KEY" in *[$$'\r\n']*) \
+	  echo "✘ CC01_ADMIN_KEY ichida qator oxiri belgisi bor."; exit 1 ;; \
+	esac
+	@printf 'X-Cc01-Admin-Key: %s\n' "$$CC01_ADMIN_KEY" | \
+	curl --fail-with-body --silent --show-error --http2-prior-knowledge -w '\n' \
+	  -X PUT $(AP_INTERNAL)/internal/v1/tenants/$(SLUG)/subscription \
+	  -H @- -H "X-Cc01-Actor: $(ACTOR)" \
+	  -H 'content-type: application/json' \
+	  -d '{"plan":"$(PLAN)","reason":"$(REASON)"}'
 
 # ── Dev muhit ─────────────────────────────────────────────────────────────
 
